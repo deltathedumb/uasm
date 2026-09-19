@@ -4,31 +4,71 @@
 choose it, and the thin layer that turns `LinkRequest` -- artifacts in memory,
 paths on disk, a target -- into a call to it.
 
-WHY IT IS A SEPARATE MODULE FROM THE LINKER. `staticlink` knows about ELF and
-nothing about this compiler's driver: it takes bytes and gives bytes back, so
-it can be tested by handing it hand-built objects and running the result, with
-no `Target`, no workdir and no options. Everything that knows what a
-`LinkRequest` is lives here.
+WHY IT IS A SEPARATE MODULE FROM THE LINKER. `staticlink` knows about object
+containers and nothing about this compiler's driver: it takes bytes and gives
+bytes back, so it can be tested by handing it hand-built objects and running
+the result, with no `Target`, no workdir and no options. Everything that knows
+what a `LinkRequest` is lives here.
 
-WHAT IT CAN AND CANNOT LINK. ELF64 relocatables for x86-64 and AArch64, into a
-STATIC executable with no libc and no dynamic loader. That is exactly what a
-program built on the platform floor needs -- `plat_write`, `plat_exit` and
-`plat_heap` are syscalls -- and it is not enough for a program that calls
+WHAT IT CAN AND CANNOT LINK. ELF64 and PE/COFF relocatables, for x86-64 and
+AArch64, into a STATIC executable with no libc and no dynamic loader. That is
+exactly what a program built on the platform floor needs -- `plat_write`,
+`plat_exit` and `plat_heap` are three syscalls on Linux and three calls into
+`kernel32.dll` on Windows -- and it is not enough for a program that calls
 `printf`. A missing symbol is reported by name, which is the honest failure:
 the alternative is finding libc and becoming `cc` with extra steps.
+
+THE CONTAINER IS READ OFF THE OBJECTS, not taken from the target. `uasm link
+a.obj` says nothing about Windows and the object says everything; a target
+that disagrees with its own inputs would be a worse answer than the inputs.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from ..backend.objfile import EM_AARCH64, EM_X86_64
-from ..backend.objfile.elfread import ElfError, read
+from ..backend.objfile.coffread import (
+    IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
+)
 from ..target import Target
 from .base import LinkError, LinkRequest, Toolchain
 from .freestanding import PROVIDES, floor_object
+from .pewrite import IMP_PREFIX
 from .registry import register
 from .runtimeobj import RuntimeBuildFailed, runtime_object
-from .staticlink import DEFAULT_BASE, LinkFailed, executable, link
+from .staticlink import (
+    DEFAULT_BASE, LinkFailed, executable, link, read_object,
+)
+
+#: WHICH BACKEND BUILT AN OBJECT, read back off the object. The runtime has
+#: to be compiled for the same machine and into the same container as the
+#: program it is linked with, and the program is the only thing here that
+#: knows which those are -- the `LinkRequest`'s target may be the host's
+#: default when `uasm link a.obj` is all that was said.
+_BACKEND_OF = {
+    ("elf", EM_X86_64): "x86-64",
+    ("elf", EM_AARCH64): "arm64",
+    ("coff", IMAGE_FILE_MACHINE_AMD64): "x86-64",
+    ("coff", IMAGE_FILE_MACHINE_ARM64): "arm64",
+}
+
+#: The architecture names that go with each, for deciding whether a target
+#: the caller already named is the right one after all.
+_ARCH_OF = {
+    ("elf", EM_X86_64): ("x86_64",),
+    ("elf", EM_AARCH64): ("aarch64",),
+    ("coff", IMAGE_FILE_MACHINE_AMD64): ("x86_64",),
+    ("coff", IMAGE_FILE_MACHINE_ARM64): ("aarch64",),
+}
+
+#: And which TARGET to compile it for, since the container is part of the
+#: answer and a backend name is not.
+_TARGET_OF = {
+    ("elf", EM_X86_64): "x86_64-linux",
+    ("elf", EM_AARCH64): "aarch64-linux",
+    ("coff", IMAGE_FILE_MACHINE_AMD64): "x86_64-windows",
+    ("coff", IMAGE_FILE_MACHINE_ARM64): "aarch64-windows",
+}
 
 #: The symbol the program starts at. `_start` and not `main`: there is no
 #: crt1.o in a static image built this way, so the ENTRY POINT is what the
@@ -38,7 +78,7 @@ ENTRY = "_start"
 
 
 class BuiltinToolchain(Toolchain):
-    """Link ELF objects into a static executable, using no external tool."""
+    """Link relocatables into a static executable, using no external tool."""
 
     name = "builtin"
     #: A native executable, which on a Unix has no extension -- the same
@@ -49,18 +89,19 @@ class BuiltinToolchain(Toolchain):
     #: avoided. A `c` artifact handed here is a file this cannot read, and
     #: saying so in the declaration is better than finding out at link time.
     backends = ("x86-64", "arm64")
-    description = "link ELF objects into a static executable, with no " \
+    description = "link objects into a static executable, with no " \
                   "external tools"
 
     def supports(self, target: Target) -> bool:
-        """Whether an ELF static link is a thing this target wants.
+        """Whether a static link is a thing this target wants.
 
-        ASKED OF THE FORMAT AND NOT THE OPERATING SYSTEM. A target that wants
-        Mach-O or PE is not served by this yet, and a bare-metal ELF one is --
-        the difference is the container, not whether there is a kernel.
+        ASKED OF THE FORMAT AND NOT THE OPERATING SYSTEM. A bare-metal ELF
+        target is served exactly as a Linux one is -- the difference is the
+        container, not whether there is a kernel -- and Mach-O is the one
+        that is not served yet.
         """
         fmt = getattr(target, "object_format", None)
-        return fmt in (None, "elf")
+        return fmt in (None, "elf", "coff")
 
     def link(self, request: LinkRequest) -> Path:
         inputs: list[tuple[str, bytes]] = []
@@ -69,12 +110,12 @@ class BuiltinToolchain(Toolchain):
         # made when `--keep-intermediates` asks, because the point of that
         # flag is to be able to look at what went in.
         for name, blob in request.artifacts.items():
-            if not name.endswith(".o"):
+            if not name.endswith((".o", ".obj")):
                 raise LinkError(
                     f"the builtin linker cannot read {name}",
-                    detail="it links ELF objects; a backend that emits "
-                           "source or assembly needs a toolchain that can "
-                           "compile it",
+                    detail="it links relocatable objects; a backend that "
+                           "emits source or assembly needs a toolchain that "
+                           "can compile it",
                     help="use `-ln cc`, or a backend that emits objects "
                          "(-bk x86-64)")
             inputs.append((name, blob))
@@ -116,22 +157,44 @@ class BuiltinToolchain(Toolchain):
         return request.output
 
 
-def _needs(inputs: list[tuple[str, bytes]]) -> tuple[set[str], set[str], int]:
-    """What the inputs define, what they still need, and their machine."""
+def _survey(inputs: list[tuple[str, bytes]]) -> tuple[
+        set[str], set[str], tuple[str, int] | None]:
+    """What the inputs define, what they still need, and what they are for.
+
+    The third answer is `(container, machine)` -- the key everything else
+    here is looked up by -- or None when the inputs could not all be read.
+    NOT AN ERROR TO REPORT FROM HERE: the link is about to read the same
+    bytes and say so properly, and two messages for one bad file is worse
+    than one.
+    """
     defined: set[str] = set()
     wanted: set[str] = set()
-    machine = 0
+    kind: tuple[str, int] | None = None
     for origin, blob in inputs:
         try:
-            got = read(blob, origin)
-        except ElfError:
-            return set(), set(), 0
-        machine = machine or got.machine
+            got = read_object(blob, origin)
+        except Exception:                          # noqa: BLE001
+            return set(), set(), None
+        if kind is None:
+            kind = (getattr(got, "fmt", "elf"), got.machine)
         for sym in got.symbols:
             if not sym.name:
                 continue
             (wanted if sym.is_undefined else defined).add(sym.name)
-    return defined, wanted - defined, machine
+    return defined, wanted - defined, kind
+
+
+def _imports(wanted: set[str], kind: tuple[str, int] | None) -> set[str]:
+    """The names the CONTAINER answers rather than an object.
+
+    A PE reaches the kernel through a DLL, so `__imp_WriteFile` is not a
+    missing symbol but a slot the linker builds an import table for. On ELF
+    there is no such thing and this is empty, which is why the caller can
+    subtract it unconditionally.
+    """
+    if kind is None or kind[0] != "coff":
+        return set()
+    return {name for name in wanted if name.startswith(IMP_PREFIX)}
 
 
 def _with_runtime(inputs: list[tuple[str, bytes]],
@@ -143,15 +206,17 @@ def _with_runtime(inputs: list[tuple[str, bytes]],
     is not the floor: an object that needs nothing needs no runtime, and a
     program already linked against one must not get a second.
     """
-    defined, wanted, machine = _needs(inputs)
-    if not wanted or wanted <= set(PROVIDES):
+    defined, wanted, kind = _survey(inputs)
+    wanted = wanted - set(PROVIDES) - _imports(wanted, kind)
+    if not wanted:
         return inputs
-    backend = {EM_X86_64: "x86-64", EM_AARCH64: "arm64"}.get(machine)
+    backend = _BACKEND_OF.get(kind)
     if backend is None:
         return inputs
     try:
         blob = runtime_object(defined, backend=backend,
-                              target=request.target, workdir=request.workdir,
+                              target=_target_for(kind, request.target),
+                              workdir=request.workdir,
                               verbose=request.verbose)
     except RuntimeBuildFailed as exc:
         raise LinkError(exc.message, detail=exc.detail,
@@ -163,6 +228,29 @@ def _with_runtime(inputs: list[tuple[str, bytes]],
     return [*inputs, ("<runtime>", blob)]
 
 
+def _target_for(kind: tuple[str, int] | None, given):
+    """The target to compile the object runtime for.
+
+    THE OBJECTS DECIDE, not the request. `uasm link hello.obj` names no
+    target, so the request carries the host's -- and compiling a Windows
+    program's runtime for Linux would fail at the link with a hundred
+    undefined names rather than with the one sentence that is true. The
+    request's own target is kept when it already agrees, because it may be a
+    more specific member of the same family than the table's default.
+    """
+    want = _TARGET_OF.get(kind)
+    if want is None:
+        return given
+    if getattr(given, "object_format", None) == kind[0] and \
+            getattr(given, "arch", None) in _ARCH_OF.get(kind, ()):
+        return given
+    from .. import target as target_registry
+    try:
+        return target_registry.get(want)
+    except Exception:                              # noqa: BLE001
+        return given
+
+
 def _with_floor(inputs: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
     """The inputs, plus the freestanding floor when nothing else has one.
 
@@ -171,34 +259,18 @@ def _with_floor(inputs: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
     bare-metal image, an object built against a different floor -- must not
     get a second one, and a duplicate definition is an error rather than a
     silent choice.
-
-    The machine comes from the first input, because a link of objects for two
-    machines is refused a moment later anyway and reading one header here is
-    cheaper than reading all of them twice.
     """
     if not inputs:
         return inputs
-    defined: set[str] = set()
-    machine = None
-    for origin, blob in inputs:
-        try:
-            got = read(blob, origin)
-        except ElfError:
-            # NOT THIS FUNCTION'S ERROR TO REPORT. The link is about to read
-            # the same bytes and say so properly; guessing here would mean
-            # two messages for one bad file.
-            return inputs
-        if machine is None:
-            machine = got.machine
-        defined.update(s.name for s in got.symbols
-                       if s.name and not s.is_undefined)
-    if not defined.isdisjoint(PROVIDES):
+    defined, _, kind = _survey(inputs)
+    if kind is None or not defined.isdisjoint(PROVIDES):
         return inputs
+    fmt, machine = kind
     try:
-        return [("<floor>", floor_object(machine)), *inputs]
+        return [("<floor>", floor_object(machine, fmt=fmt)), *inputs]
     except KeyError:
-        # No floor for this machine. The link will fail on the undefined
-        # symbols, which names them, which is the better message.
+        # No floor for this container and machine. The link will fail on the
+        # undefined symbols, which names them, which is the better message.
         return inputs
 
 

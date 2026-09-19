@@ -298,8 +298,168 @@ def _aarch64_object(entry: str) -> ElfObject:
     return obj
 
 
-#: Which builder serves which ELF machine.
-_BUILDERS = {EM_X86_64: _x86_64_object, EM_AARCH64: _aarch64_object}
+# ── Windows ─────────────────────────────────────────────────────────────────
+
+#: `GetStdHandle`'s arguments, and the two `VirtualAlloc` flags. Windows
+#: constants, not machine ones.
+STD_OUTPUT_HANDLE = -11
+STD_ERROR_HANDLE = -12
+MEM_COMMIT_RESERVE = 0x3000
+PAGE_READWRITE = 0x04
+
+
+def _windows_x86_64_object(entry: str):
+    """The floor and the entry point for Windows x86-64.
+
+    THREE THINGS ARE DIFFERENT FROM LINUX, and all three are why this is a
+    separate function rather than a table of syscall numbers:
+
+      * THERE IS NO SYSCALL ABI A PROGRAM MAY USE. The numbers in `ntdll`
+        change between builds of the operating system and Microsoft says so,
+        so the kernel is reached through `kernel32.dll` -- which means an
+        IMPORT TABLE, built by `link/pewrite.py`, and calls that go
+        indirectly through it. `__imp_WriteFile` is the ADDRESS OF THE SLOT
+        the loader writes the function's address into, which is MSVC's
+        convention and what makes `call *__imp_WriteFile(%rip)` work.
+      * THE CALLING CONVENTION IS MICROSOFT'S: rcx, rdx, r8, r9, then the
+        stack -- and the caller reserves THIRTY-TWO BYTES OF SHADOW SPACE
+        above the return address for the callee to spill those four into,
+        whether or not it does. A call without it corrupts the caller's own
+        frame.
+      * EVERY VOLATILE REGISTER IS REALLY VOLATILE. rax, rcx, rdx and r8-r11
+        do not survive a call, so `plat_write` keeps its arguments on the
+        stack across `GetStdHandle` rather than in r10 and r11, which was
+        the first version of this and would have failed only sometimes.
+
+    NOTHING HERE HAS BEEN EXECUTED. There is no Windows and no emulator on
+    the machine this was written on; the encodings are checked by
+    disassembling the linked image, and the import table by reading it back.
+    That is a weaker claim than the Linux floor's, which is run by
+    `tests/uasm/integration/test_builtin_linker.py`, and it is the honest one.
+    """
+    from ..backend.objfile import (
+        CoffObject, CoffRelocation, CoffSymbol, IMAGE_FILE_MACHINE_AMD64,
+        IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ,
+    )
+
+    IMAGE_REL_AMD64_REL32 = 0x0004
+    text = bytearray()
+    symbols: list = []
+    relocs: list = []
+
+    def call(name: str) -> None:
+        """`call *__imp_<name>(%rip)` -- indirectly, through the IAT."""
+        text.extend(b"\xFF\x15\x00\x00\x00\x00")
+        relocs.append(CoffRelocation(len(text) - 4, "__imp_" + name,
+                                     IMAGE_REL_AMD64_REL32))
+
+    def end(name: str, at: int) -> None:
+        symbols.append(CoffSymbol(name=name, section=".text", value=at,
+                                  size=len(text) - at, binding=1, kind=2))
+
+    # ── _start ──────────────────────────────────────────────────────────────
+    at = len(text)
+    text += b"\x48\x83\xE4\xF0"            # and $-16,%rsp
+    text += b"\x48\x83\xEC\x20"            # sub $32,%rsp   (shadow space)
+    text += b"\xE8\x00\x00\x00\x00"        # call uasm_main
+    relocs.append(CoffRelocation(len(text) - 4, entry, IMAGE_REL_AMD64_REL32))
+    text += b"\x89\xC1"                     # mov %eax,%ecx  (exit status)
+    call("ExitProcess")
+    text += b"\xCC"                          # int3 -- ExitProcess is noreturn
+    end("_start", at)
+
+    # ── plat_write(fd, buf, n) -> i64 ───────────────────────────────────────
+    at = len(text)
+    text += b"\x48\x83\xEC\x48"            # sub $72,%rsp
+    text += b"\x48\x89\x54\x24\x30"        # mov %rdx,0x30(%rsp)  (buf)
+    text += b"\x4C\x89\x44\x24\x38"        # mov %r8,0x38(%rsp)   (n)
+    text += b"\x48\x83\xF9\x02"            # cmp $2,%rcx
+    text += b"\xB9" + struct.pack("<i", STD_OUTPUT_HANDLE)
+    text += b"\xB8" + struct.pack("<i", STD_ERROR_HANDLE)
+    text += b"\x0F\x44\xC8"                # cmove %eax,%ecx
+    call("GetStdHandle")
+    text += b"\x48\x89\xC1"                # mov %rax,%rcx  (handle)
+    text += b"\x48\x8B\x54\x24\x30"        # mov 0x30(%rsp),%rdx
+    text += b"\x4C\x8B\x44\x24\x38"        # mov 0x38(%rsp),%r8
+    text += b"\x4C\x8D\x4C\x24\x40"        # lea 0x40(%rsp),%r9  (written)
+    text += b"\x48\xC7\x44\x24\x20\x00\x00\x00\x00"   # movq $0,0x20(%rsp)
+    call("WriteFile")
+    text += b"\x85\xC0"                     # test %eax,%eax
+    text += b"\x74\x0A"                     # je +10  (the failure tail)
+    text += b"\x48\x8B\x44\x24\x38"        # mov 0x38(%rsp),%rax  (n)
+    text += b"\x48\x83\xC4\x48"            # add $72,%rsp
+    text += b"\xC3"                          # ret
+    text += b"\x48\xC7\xC0\xFF\xFF\xFF\xFF"  # mov $-1,%rax
+    text += b"\x48\x83\xC4\x48"            # add $72,%rsp
+    text += b"\xC3"                          # ret
+    end("plat_write", at)
+
+    # ── plat_exit(code) ─────────────────────────────────────────────────────
+    at = len(text)
+    text += b"\x48\x83\xEC\x28"            # sub $40,%rsp
+    call("ExitProcess")
+    text += b"\xCC"                          # int3
+    end("plat_exit", at)
+
+    # ── putchar(c) -> int ───────────────────────────────────────────────────
+    at = len(text)
+    text += b"\x48\x83\xEC\x48"            # sub $72,%rsp
+    text += b"\x89\x4C\x24\x30"            # mov %ecx,0x30(%rsp)  (keep c)
+    text += b"\x88\x4C\x24\x38"            # mov %cl,0x38(%rsp)   (the byte)
+    text += b"\xB9" + struct.pack("<i", STD_OUTPUT_HANDLE)
+    call("GetStdHandle")
+    text += b"\x48\x89\xC1"                # mov %rax,%rcx
+    text += b"\x48\x8D\x54\x24\x38"        # lea 0x38(%rsp),%rdx
+    text += b"\x41\xB8\x01\x00\x00\x00"    # mov $1,%r8d
+    text += b"\x4C\x8D\x4C\x24\x40"        # lea 0x40(%rsp),%r9
+    text += b"\x48\xC7\x44\x24\x20\x00\x00\x00\x00"
+    call("WriteFile")
+    text += b"\x8B\x44\x24\x30"            # mov 0x30(%rsp),%eax
+    text += b"\x48\x83\xC4\x48"            # add $72,%rsp
+    text += b"\xC3"                          # ret
+    end("putchar", at)
+
+    # ── plat_heap(n) -> ptr ─────────────────────────────────────────────────
+    #
+    # `VirtualAlloc(NULL, n, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)`, which
+    # is Windows' answer to the anonymous `mmap` the Linux floor makes. It
+    # rounds up to a page too, so the arena above chains them the same way.
+    at = len(text)
+    text += b"\x48\x83\xEC\x28"            # sub $40,%rsp
+    text += b"\x48\x85\xC9"                # test %rcx,%rcx
+    text += b"\x7E\x1C"                     # jle +28  (answer null)
+    text += b"\x48\x89\xCA"                # mov %rcx,%rdx   (size)
+    text += b"\x31\xC9"                     # xor %ecx,%ecx   (address)
+    text += b"\x41\xB8" + struct.pack("<I", MEM_COMMIT_RESERVE)
+    text += b"\x41\xB9" + struct.pack("<I", PAGE_READWRITE)
+    call("VirtualAlloc")
+    text += b"\x48\x83\xC4\x28"            # add $40,%rsp
+    text += b"\xC3"                          # ret
+    text += b"\x48\x31\xC0"                # xor %rax,%rax
+    text += b"\x48\x83\xC4\x28"            # add $40,%rsp
+    text += b"\xC3"                          # ret
+    end("plat_heap", at)
+
+    obj = CoffObject(IMAGE_FILE_MACHINE_AMD64)
+    obj.section(".text", bytes(text), align=16,
+                characteristics=IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE
+                                | IMAGE_SCN_MEM_READ)
+    for sym in symbols:
+        obj.symbol(sym)
+    for name in (entry, "__imp_ExitProcess", "__imp_WriteFile",
+                 "__imp_GetStdHandle", "__imp_VirtualAlloc"):
+        obj.symbol(CoffSymbol(name=name, section="", binding=1))
+    for rel in relocs:
+        obj.relocate(".text", rel)
+    return obj
+
+
+#: Which builder serves which (container, machine).
+_BUILDERS = {
+    ("elf", EM_X86_64): _x86_64_object,
+    ("elf", EM_AARCH64): _aarch64_object,
+    ("coff", 0x8664): _windows_x86_64_object,
+}
 
 #: The names this object defines.
 #:
@@ -311,13 +471,15 @@ _BUILDERS = {EM_X86_64: _x86_64_object, EM_AARCH64: _aarch64_object}
 PROVIDES = ("_start", "plat_write", "plat_exit", "plat_heap", "putchar")
 
 
-def floor_object(machine: int, *, entry: str = "uasm_main") -> bytes:
-    """The floor, `_start` and nothing else, as a relocatable ELF object."""
-    build = _BUILDERS.get(machine)
+def floor_object(machine: int, *, entry: str = "uasm_main",
+                 fmt: str = "elf") -> bytes:
+    """The floor and `_start`, as a relocatable object in `fmt`."""
+    build = _BUILDERS.get((fmt, machine))
     if build is None:
+        known = ", ".join(f"{f} {m:#x}" for f, m in sorted(_BUILDERS))
         raise KeyError(
-            f"no freestanding floor for ELF machine {machine}; "
-            f"x86-64 (62) and AArch64 (183) have one")
+            f"no freestanding floor for {fmt} machine {machine:#x}; "
+            f"there is one for: {known}")
     return build(entry).to_bytes()
 
 

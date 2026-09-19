@@ -151,8 +151,11 @@ def _compile(source: Path, *, backend: str, target, workdir: Path,
         raise RuntimeBuildFailed(
             "could not compile the object runtime",
             detail=_render(sink))
+    # `.o` OR `.obj`: the suffix belongs to the target, not to the step.
+    # A COFF backend writes `out.obj` and a run that only looked for `.o`
+    # reported "0 objects, not one" for a compile that had just succeeded.
     objects = [blob for name, blob in sorted(result.artifacts.items())
-               if name.endswith(".o")]
+               if name.endswith((".o", ".obj"))]
     if len(objects) != 1:
         raise RuntimeBuildFailed(
             f"the {backend} backend produced "

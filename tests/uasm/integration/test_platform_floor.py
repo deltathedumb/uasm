@@ -138,7 +138,12 @@ def interpret(source: Path) -> subprocess.CompletedProcess:
 def build_and_run(tmp_path: Path, source: Path, backend: str) -> \
         subprocess.CompletedProcess:
     out = tmp_path / ("prog.exe" if backend == "c" else "Prog.class")
-    built = _cli("build", str(source), "--backend", backend,
+    # `--link` BECAUSE `build` STOPS AT AN OBJECT. What this file checks is
+    # that a PROGRAM built on the floor runs and prints the right thing, so
+    # it asks for the program; a build without it writes the artifact the
+    # backend produced and nothing more. See `test_builtin_linker.py`, whose
+    # `TestBuildAndLinkAreSeparateVerbs` is the test of the split itself.
+    built = _cli("build", str(source), "--backend", backend, "--link",
                  "-o", str(out), "--workdir", str(tmp_path / f"wd-{backend}"))
     assert built.returncode == 0, built.stdout + built.stderr
     if backend == "c":

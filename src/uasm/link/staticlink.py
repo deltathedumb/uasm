@@ -53,8 +53,10 @@ from ..backend.objfile.elf import (
     EM_AARCH64, EM_X86_64, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE,
     STB_GLOBAL, STB_LOCAL, STB_WEAK,
 )
+from . import pewrite
+from ..backend.objfile import coffread, elfread, machoread
 from ..backend.objfile.elfread import (
-    ElfError, InReloc, InSection, Relocatable, SHN_ABS, SHN_COMMON, read,
+    ElfError, InReloc, InSection, Relocatable, SHN_ABS, SHN_COMMON,
 )
 
 #: Where the image is loaded. 0x400000 is the traditional x86-64 text base and
@@ -165,7 +167,28 @@ def _bucket(sec: InSection) -> str | None:
     return ".rodata"
 
 
-def _lay_out(objects: list[Relocatable], base: int) -> tuple[
+@dataclass(slots=True)
+class Reserved:
+    """Space the LINKER contributes, rather than any input object.
+
+    Today there is exactly one: the PE import table, whose size is known from
+    the names before its address is, and whose address has to be known before
+    its bytes can be written -- every pointer inside one is a virtual
+    address. So it is laid out as a section like any other and filled in
+    afterwards.
+    """
+
+    name: str
+    size: int
+    flags: int
+    align: int = 8
+    addr: int = 0
+
+
+def _lay_out(objects: list[Relocatable], base: int,
+             reserved: list[Reserved] | None = None, *,
+             headroom: int | None = None,
+             section_align: int = 1) -> tuple[
         list[OutSection], dict[tuple[int, int], int], int]:
     """Place every allocatable input section and give it an address.
 
@@ -175,6 +198,16 @@ def _lay_out(objects: list[Relocatable], base: int) -> tuple[
     THE FILE OFFSET AND THE ADDRESS ARE THE SAME COUNTER, less `base` -- see
     the module docstring. The one place they part company is `.bss`, which
     advances the address and not the offset, and that is why it is last.
+
+    `headroom` is how many bytes the container's own headers need in front of
+    the first section, and `section_align` how far apart the sections have to
+    be. THE TWO CONTAINERS DISAGREE ON BOTH. An ELF loader reads SEGMENTS, so
+    the sections inside one may be packed tight and the headers are the three
+    structures below; a PE loader maps SECTIONS, and the format says each
+    one's address is a multiple of `SectionAlignment` -- so on that side
+    every section starts a page and the headers get a page of their own.
+    Getting this wrong is not subtle: the first version wrote PE headers over
+    the beginning of `.text`.
     """
     out = {
         ".text": OutSection(".text", SHF_ALLOC | SHF_EXECINSTR),
@@ -197,19 +230,40 @@ def _lay_out(objects: list[Relocatable], base: int) -> tuple[
     # a program read its own headers, which is how `sys.argv` and the auxv
     # walk find things on other platforms.
     phnum = 3  # two PT_LOAD plus PT_GNU_STACK
-    cursor = struct.calcsize(_EHDR) + phnum * struct.calcsize(_PHDR)
+    cursor = (struct.calcsize(_EHDR) + phnum * struct.calcsize(_PHDR)
+              if headroom is None else headroom)
+
+    # A RESERVED AREA IS A SECTION OF ITS OWN, placed with the writable ones:
+    # the loader writes into the import table, so it cannot share a page with
+    # anything read-only.
+    for got in reserved or ():
+        out[got.name] = OutSection(got.name, got.flags,
+                                   nobits=False, align=got.align)
+        out[got.name].pieces.append(
+            Piece(obj=-1, section=InSection(
+                index=-1, name=got.name, kind=1, flags=got.flags,
+                align=got.align, data=b"\0" * got.size, size=got.size),
+                addr=0, at=0))
 
     where: dict[tuple[int, int], int] = {}
-    order = [".text", ".rodata", ".data", ".bss"]
+    order = [".text", ".rodata", ".data",
+             *(r.name for r in reserved or ()), ".bss"]
+    writable_started = False
     for name in order:
         sec = out[name]
         if not sec.pieces:
             continue
-        # A WRITABLE SECTION STARTS A NEW PAGE. Two segments cannot share one:
-        # the kernel's protection is per page, so a read-only byte on the same
-        # page as a writable one is writable.
-        if name == ".data" or (name == ".bss" and not out[".data"].pieces):
+        if section_align > 1:
+            # EVERY SECTION ON ITS OWN PAGE, which is what a PE asks for.
+            cursor = _round_up(cursor, section_align)
+        elif sec.flags & SHF_WRITE and not writable_started:
+            # THE FIRST WRITABLE SECTION STARTS A NEW PAGE. Two segments
+            # cannot share one: the kernel's protection is per page, so a
+            # read-only byte on the same page as a writable one is writable.
+            # The ones after it follow on, because they are all in that
+            # second segment.
             cursor = _round_up(cursor, PAGE)
+        writable_started = writable_started or bool(sec.flags & SHF_WRITE)
         cursor = _round_up(cursor, sec.align)
         sec.addr = base + cursor
         for piece in sec.pieces:
@@ -225,7 +279,8 @@ def _lay_out(objects: list[Relocatable], base: int) -> tuple[
 # ── step 3: symbol resolution ───────────────────────────────────────────────
 
 def _resolve(objects: list[Relocatable],
-             where: dict[tuple[int, int], int]) -> tuple[
+             where: dict[tuple[int, int], int],
+             extra: dict[str, Defined] | None = None) -> tuple[
                  dict[str, Defined], list[list[int | None]]]:
     """Every global symbol's address, and every object's own symbol addresses.
 
@@ -241,7 +296,7 @@ def _resolve(objects: list[Relocatable],
     compiler emits is weak today; the rule is here because an object the user
     brings might be, and silently taking the first would be a wrong program.
     """
-    globals_: dict[str, Defined] = {}
+    globals_: dict[str, Defined] = dict(extra or {})
     for i, obj in enumerate(objects):
         for sym in obj.symbols:
             if not sym.name or sym.is_local or sym.is_undefined:
@@ -420,7 +475,211 @@ def _patch_aarch64(buf: bytearray, at: int, rel: InReloc, s: int,
     struct.pack_into("<I", buf, at, word & 0xFFFFFFFF)
 
 
-_PATCH = {EM_X86_64: _patch_x86_64, EM_AARCH64: _patch_aarch64}
+def _patch_coff_amd64(buf: bytearray, at: int, rel: InReloc, s: int,
+                      p: int, name: str) -> None:
+    """One COFF relocation for x86-64, applied.
+
+    THE BIAS IS PART OF THE TYPE, not a number in the file. ELF says
+    "relative to the field, and here is -4"; COFF says "relative to the byte
+    AFTER the field" and stores nothing. `REL32_1` through `REL32_5` shift
+    the reference point further on, which is how COFF spells a displacement
+    in an instruction with bytes after it.
+    """
+    kind = rel.kind
+    a = rel.addend
+    if 0x0004 <= kind <= 0x0009:
+        # REL32 is "past the field"; REL32_N adds N more.
+        bias = 4 + (kind - 0x0004)
+        value = s + a - (p + bias)
+        if not _signed_fits(value, 32):
+            raise LinkFailed(f"{name!r} is too far away to reach")
+        struct.pack_into("<i", buf, at, value)
+    elif kind == 0x0001:                  # ADDR64
+        struct.pack_into("<Q", buf, at, (s + a) & 0xFFFFFFFFFFFFFFFF)
+    elif kind == 0x0002:                  # ADDR32
+        value = s + a
+        if not 0 <= value < (1 << 32):
+            raise LinkFailed(f"{name!r} does not fit a 32-bit absolute field")
+        struct.pack_into("<I", buf, at, value)
+    elif kind == 0x0003:                  # ADDR32NB: minus the image base
+        value = s + a - _IMAGE_BASE[0]
+        if not 0 <= value < (1 << 32):
+            raise LinkFailed(f"{name!r} is not within 4 GiB of the image base")
+        struct.pack_into("<I", buf, at, value)
+    else:
+        raise LinkFailed(
+            f"COFF x86-64 relocation type {kind:#x} is not implemented",
+            detail=f"needed for {name!r}")
+
+
+#: WHERE THE IMAGE WAS LAID OUT, for the one relocation type that needs to
+#: know. `ADDR32NB` is an address MINUS the image base, and the patch
+#: functions are handed only S, A and P -- so the base is left here rather
+#: than threaded through every signature for the one caller that reads it.
+#: Set by `link` before any patching happens.
+_IMAGE_BASE = [DEFAULT_BASE]
+
+
+def _patch_coff_arm64(buf: bytearray, at: int, rel: InReloc, s: int,
+                      p: int, name: str) -> None:
+    """One COFF relocation for AArch64, applied.
+
+    THE SAME BITFIELDS AS ELF, under different numbers -- which is the shape
+    of most of this: the arithmetic is the architecture's and the numbering
+    is the container's.
+    """
+    same = {0x0001: 257,          # ADDR64            -> R_AARCH64_ABS64
+            0x0003: 283,          # BRANCH26          -> CALL26
+            0x0004: 275,          # PAGEBASE_REL21    -> ADR_PREL_PG_HI21
+            0x0006: 277}          # PAGEOFFSET_12A    -> ADD_ABS_LO12_NC
+    if rel.kind not in same:
+        raise LinkFailed(
+            f"COFF AArch64 relocation type {rel.kind:#x} is not implemented",
+            detail=f"needed for {name!r}")
+    _patch_aarch64(buf, at, InReloc(rel.offset, rel.symbol, same[rel.kind],
+                                    rel.addend), s, p, name)
+
+
+def _patch_macho_x86_64(buf: bytearray, at: int, rel: InReloc, s: int,
+                        p: int, name: str) -> None:
+    """One Mach-O relocation for x86-64, applied.
+
+    MACH-O PUTS `pcrel` AND `length` IN THE RECORD where ELF implies both
+    from the type, so the arithmetic reads them rather than a table. What it
+    does NOT put anywhere is an extra bias: a displacement is always from the
+    byte after the four the field occupies, and an instruction with more
+    bytes after it says so by storing a NEGATIVE ADDEND in the field --
+    `X86_64_RELOC_SIGNED_4` is "signed displacement with a -4 addend", and
+    the -4 is already there. So one formula serves every PC-relative type.
+    """
+    kind = rel.kind
+    a = rel.addend
+    width = 1 << rel.length
+    if kind == 0:                         # X86_64_RELOC_UNSIGNED
+        if rel.pcrel:
+            raise LinkFailed(f"{name!r}: X86_64_RELOC_UNSIGNED cannot be "
+                             f"PC-relative")
+        form = {1: "<B", 2: "<H", 4: "<I", 8: "<Q"}[width]
+        struct.pack_into(form, buf, at, (s + a) & ((1 << (width * 8)) - 1))
+        return
+    if kind in (3, 4):                    # GOT_LOAD, GOT
+        # THERE IS NO GLOBAL OFFSET TABLE IN A STATIC IMAGE, and there does
+        # not need to be: the symbol's address is known now. `GOT_LOAD` is
+        # `movq sym@GOTPCREL(%rip),%reg`, which becomes `leaq sym(%rip),%reg`
+        # by changing one opcode byte -- the relaxation every static linker
+        # performs. A bare `GOT` is a reference to the SLOT and cannot be
+        # relaxed, so it is refused.
+        if kind == 4:
+            raise LinkFailed(
+                f"{name!r} is referenced through the global offset table",
+                detail="a static image has none; only the `GOT_LOAD` form, "
+                       "which relaxes to an address, can be linked here")
+        if at >= 2 and buf[at - 2] == 0x8B:
+            buf[at - 2] = 0x8D            # mov -> lea
+        else:
+            raise LinkFailed(
+                f"{name!r}: a GOT load this linker cannot relax",
+                detail="the four bytes are expected to follow a `movq` "
+                       "opcode (0x8b)")
+    elif kind not in (1, 2, 6, 7, 8):     # SIGNED, BRANCH, SIGNED_1/2/4
+        raise LinkFailed(
+            f"Mach-O x86-64 relocation type {kind} is not implemented",
+            detail=f"needed for {name!r}")
+    if width != 4:
+        raise LinkFailed(
+            f"{name!r}: a PC-relative Mach-O relocation of {width} bytes",
+            detail="every type this linker patches is four bytes wide")
+    value = s + a - (p + 4)
+    if not _signed_fits(value, 32):
+        raise LinkFailed(f"{name!r} is too far away to reach")
+    struct.pack_into("<i", buf, at, value)
+
+
+#: The load/store forms `ARM64_RELOC_PAGEOFF12` may be patching, and the ELF
+#: relocation that spells the same arithmetic.
+#:
+#: MACH-O HAS ONE TYPE WHERE ELF HAS SIX. ELF names the access width in the
+#: relocation -- `LDST8`, `LDST16` and the rest -- because a scaled load's
+#: immediate counts ELEMENTS; Mach-O expects the linker to read the
+#: instruction and work it out. So that is what happens here.
+_PAGEOFF_LDST = {0: 278, 1: 284, 2: 285, 3: 286, 4: 299}
+
+
+def _pageoff_kind(word: int) -> int:
+    """Which ELF relocation `ARM64_RELOC_PAGEOFF12` means, for this word."""
+    if word & 0x3B000000 != 0x39000000:
+        # Not a scaled load or store: an `ADD` immediate, whose field counts
+        # bytes and needs no shift.
+        return 277                        # R_AARCH64_ADD_ABS_LO12_NC
+    size = (word >> 30) & 3
+    if size == 0 and word & 0x04800000 == 0x04800000:
+        size = 4                          # the 128-bit SIMD form
+    return _PAGEOFF_LDST[size]
+
+
+def _patch_macho_arm64(buf: bytearray, at: int, rel: InReloc, s: int,
+                       p: int, name: str) -> None:
+    """One Mach-O relocation for AArch64, applied.
+
+    THE SAME BITFIELDS AS ELF under different numbers, as in COFF -- with the
+    one difference that `PAGEOFF12` has to be told apart from ELF's six by
+    looking at the instruction. See `_pageoff_kind`.
+    """
+    kind = rel.kind
+    if kind == 0:                         # ARM64_RELOC_UNSIGNED
+        width = 1 << rel.length
+        form = {1: "<B", 2: "<H", 4: "<I", 8: "<Q"}[width]
+        struct.pack_into(form, buf, at,
+                         (s + rel.addend) & ((1 << (width * 8)) - 1))
+        return
+    if kind in (5, 6):                    # GOT_LOAD_PAGE21, GOT_LOAD_PAGEOFF12
+        raise LinkFailed(
+            f"{name!r} is referenced through the global offset table",
+            detail="a static image has none; relaxing an AArch64 GOT load "
+                   "means rewriting an `ldr` as an `add`, which this linker "
+                   "does not do")
+    word, = struct.unpack_from("<I", buf, at)
+    same = {2: 283,                       # BRANCH26      -> CALL26
+            3: 275,                       # PAGE21        -> ADR_PREL_PG_HI21
+            4: _pageoff_kind(word)}       # PAGEOFF12     -> one of seven
+    if kind not in same:
+        raise LinkFailed(
+            f"Mach-O AArch64 relocation type {kind} is not implemented",
+            detail=f"needed for {name!r}")
+    _patch_aarch64(buf, at, InReloc(rel.offset, rel.symbol, same[kind],
+                                    rel.addend), s, p, name)
+
+
+#: WHICH PATCHER SERVES WHICH (container, machine). The numbers mean
+#: different things in different containers -- 4 is `R_X86_64_PLT32` in ELF,
+#: `IMAGE_REL_AMD64_REL32` in COFF and `X86_64_RELOC_GOT` in Mach-O -- so the
+#: container is half the key.
+_PATCH = {
+    ("elf", EM_X86_64): _patch_x86_64,
+    ("elf", EM_AARCH64): _patch_aarch64,
+    ("coff", coffread.IMAGE_FILE_MACHINE_AMD64): _patch_coff_amd64,
+    ("coff", coffread.IMAGE_FILE_MACHINE_ARM64): _patch_coff_arm64,
+    ("macho", machoread.CPU_TYPE_X86_64): _patch_macho_x86_64,
+    ("macho", machoread.CPU_TYPE_ARM64): _patch_macho_arm64,
+}
+
+
+def read_object(blob: bytes, origin: str):
+    """One input object, whatever container it is in.
+
+    TOLD APART BY THE BYTES rather than by the file name: `uasm link a.o b.o`
+    names two files and says nothing about their format, and a `.o` that is
+    really a COFF object is an ordinary thing to have on Windows.
+    """
+    if elfread.is_elf(blob):
+        return elfread.read(blob, origin)
+    if coffread.is_coff(blob):
+        return coffread.read(blob, origin)
+    if machoread.is_macho(blob):
+        return machoread.read(blob, origin)
+    raise LinkFailed(
+        f"{origin}: not an object file this linker reads",
+        detail="ELF, PE/COFF and Mach-O relocatables are understood")
 
 
 # ── the whole of it ─────────────────────────────────────────────────────────
@@ -434,6 +693,21 @@ class Image:
     machine: int
     sections: list[OutSection]
     symbols: dict[str, Defined]
+    #: The container the inputs came out of, and therefore the one the
+    #: program goes into: `executable` writes ELF for "elf" and PE for
+    #: "coff". A link never mixes them -- see `link`.
+    fmt: str = "elf"
+    #: Where the image was laid out. Carried so that `executable` need not be
+    #: told again, and cannot be told something different.
+    base: int = DEFAULT_BASE
+    #: The PE import directory's address and size, both zero for ELF and for
+    #: a PE that imports nothing.
+    import_rva: int = 0
+    import_size: int = 0
+    #: The Import Address Table's address and size, which is a data directory
+    #: of its own: the loader writes into that range and some of them make it
+    #: writable ahead of time on the strength of this.
+    iat: tuple[int, int] = (0, 0)
 
 
 def link(inputs: list[tuple[str, bytes]], *, entry: str = "_start",
@@ -450,10 +724,18 @@ def link(inputs: list[tuple[str, bytes]], *, entry: str = "_start",
     objects: list[Relocatable] = []
     for origin, blob in inputs:
         try:
-            objects.append(read(blob, origin))
-        except ElfError as exc:
+            objects.append(read_object(blob, origin))
+        except (ElfError, coffread.CoffError,
+                machoread.MachoError) as exc:
             raise LinkFailed(str(exc)) from None
 
+    formats = {getattr(obj, "fmt", "elf") for obj in objects}
+    if len(formats) > 1:
+        raise LinkFailed(
+            "the inputs are in different object formats",
+            detail=", ".join(f"{obj.origin} ({getattr(obj, 'fmt', 'elf')})"
+                             for obj in objects))
+    fmt = formats.pop()
     machines = {obj.machine for obj in objects}
     if len(machines) > 1:
         named = ", ".join(f"{obj.origin} (machine {obj.machine})"
@@ -461,15 +743,68 @@ def link(inputs: list[tuple[str, bytes]], *, entry: str = "_start",
         raise LinkFailed("the inputs are for different machines",
                          detail=named)
     machine = machines.pop()
-    if machine not in _PATCH:
+    if (fmt, machine) not in _PATCH:
         raise LinkFailed(
-            f"no relocation support for ELF machine {machine}",
-            detail="x86-64 (62) and AArch64 (183) are implemented")
+            f"no relocation support for {fmt} machine {machine:#x}",
+            detail="; ".join(f"{f} {m:#x}" for f, m in sorted(_PATCH)))
 
-    sections, place, end = _lay_out(objects, base)
+    _IMAGE_BASE[0] = base
+
+    # ── what the linker itself has to contribute ────────────────────────────
+    #
+    # A PE REACHES THE KERNEL THROUGH A DLL, so its undefined `__imp_` names
+    # are not missing symbols but imports, and the table that answers them is
+    # the linker's to build. Its SIZE is known from the names; its CONTENTS
+    # need its address, so it is reserved now and filled once the layout is
+    # decided. See `pewrite.py`.
+    reserved: list[Reserved] = []
+    by_dll: dict[str, list[str]] = {}
+    if fmt == "coff":
+        wanted = {obj.symbols[rel.symbol].name
+                  for obj in objects for rels in obj.relocs.values()
+                  for rel in rels if obj.symbols[rel.symbol].name}
+        have = {sym.name for obj in objects for sym in obj.symbols
+                if sym.name and not sym.is_undefined}
+        try:
+            by_dll = pewrite.imports_needed(wanted - have)
+        except pewrite.PeError as exc:
+            raise LinkFailed(str(exc)) from None
+        if by_dll:
+            blob, _, _ = pewrite.import_section(by_dll, 0)
+            reserved.append(Reserved(".idata", len(blob),
+                                     SHF_ALLOC | SHF_WRITE))
+
+    if fmt == "coff":
+        sections, place, end = _lay_out(
+            objects, base, reserved,
+            headroom=pewrite.header_space(PAGE), section_align=PAGE)
+    else:
+        sections, place, end = _lay_out(objects, base, reserved)
     if not sections:
         raise LinkFailed("the inputs contain no loadable sections")
     globals_, per_object = _resolve(objects, place)
+
+    import_rva = import_size = 0
+    import_blob = b""
+    iat = (0, 0)
+    if by_dll:
+        area = next(s for s in sections if s.name == ".idata")
+        import_blob, slots, iat = pewrite.import_section(by_dll,
+                                                         area.addr - base)
+        import_rva, import_size = area.addr - base, len(import_blob)
+        # THE SLOTS COME BACK AS RVAs, because that is what everything
+        # inside an import table is; a relocation is patched from ADDRESSES.
+        # The first version seeded the RVA and every call through the IAT
+        # went four megabytes short of it.
+        seeded = {name: Defined(base + addr, 8, False, "<import table>")
+                  for name, addr in slots.items()}
+        # ASKED AGAIN WITH THE SLOTS IN HAND, rather than patched into the
+        # answer: `per_object` was built from a table that did not have them,
+        # so every `__imp_` reference in it is still None. Only the SLOTS are
+        # seeded -- handing back the whole map would have every object's own
+        # definitions arrive a second time, which `_resolve` correctly calls
+        # a duplicate.
+        globals_, per_object = _resolve(objects, place, extra=seeded)
 
     missing = _undefined(objects, per_object)
     if missing:
@@ -502,7 +837,7 @@ def link(inputs: list[tuple[str, bytes]], *, entry: str = "_start",
                 buf[piece.at:piece.at + len(piece.section.data)] = \
                     piece.section.data
 
-    patch = _PATCH[machine]
+    patch = _PATCH[(fmt, machine)]
     for i, obj in enumerate(objects):
         for sec_index, rels in obj.relocs.items():
             target = place.get((i, sec_index))
@@ -520,11 +855,30 @@ def link(inputs: list[tuple[str, bytes]], *, entry: str = "_start",
                 patch(buf, at, rel, s, addr,
                       obj.symbols[rel.symbol].name or "<unnamed>")
 
+    if import_blob:
+        area = next(s for s in sections if s.name == ".idata")
+        at = area.addr - base
+        buf[at:at + len(import_blob)] = import_blob
     return Image(data=bytes(buf), entry=globals_[entry].addr, machine=machine,
-                 sections=sections, symbols=globals_)
+                 sections=sections, symbols=globals_, fmt=fmt, base=base,
+                 import_rva=import_rva, import_size=import_size, iat=iat)
 
 
-def executable(image: Image, *, base: int = DEFAULT_BASE) -> bytes:
+def executable(image: Image, *, base: int | None = None) -> bytes:
+    """The image, wrapped in the container its inputs came out of."""
+    where = image.base if base is None else base
+    if image.fmt == "coff":
+        try:
+            return pewrite.executable(image, base=where, page=PAGE,
+                                      import_rva=image.import_rva,
+                                      import_size=image.import_size,
+                                      iat=image.iat)
+        except pewrite.PeError as exc:
+            raise LinkFailed(str(exc)) from None
+    return _elf_executable(image, base=where)
+
+
+def _elf_executable(image: Image, *, base: int = DEFAULT_BASE) -> bytes:
     """The image, wrapped in an ELF executable the kernel will load.
 
     NO SECTION HEADER TABLE. A loader reads program headers and nothing else;
