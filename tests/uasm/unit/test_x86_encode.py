@@ -245,3 +245,64 @@ class TestWhatItCannotEncodeItRefuses:
             assert exc is not None
         else:
             raise AssertionError("an unknown instruction was accepted")
+
+
+class TestARipRelativeSymbolIsCarriedOrRefused:
+    """Every form naming `sym(%rip)` either asks for a relocation or stops.
+
+    WHAT THIS EXISTS TO PREVENT is the third thing, which is what the file
+    used to do: emit a ZERO DISPLACEMENT AND NO RELOCATION. That assembles,
+    links and disassembles without a word, and reads whatever happens to be
+    four bytes past the instruction.
+
+    NONE OF THE REFUSED FORMS IS REACHABLE TODAY -- `emit.py` writes exactly
+    one RIP-relative operand, the `leaq` that takes a global's address, and
+    every read-modify-write goes through a register after it. They are
+    refused rather than fixed because recording the bias is a PER-FORM job:
+    the displacement is measured from the end of the instruction, so a
+    trailing `imm32` makes the addend -8 where `leaq`'s is -4, and Mach-O
+    needs `X86_64_RELOC_SIGNED_4` rather than `SIGNED` to say so. Threading
+    -4 through all of them would store four bytes past the global instead of
+    declining.
+    """
+
+    #: The three that have somewhere to put it: a displacement with nothing
+    #: after it.
+    CARRIES = [
+        "leaq gv(%rip), %rax",
+        "movq gv(%rip), %rax",
+        "movq %rax, gv(%rip)",
+    ]
+
+    #: And the ones that do not.
+    REFUSES = [
+        "movq $1, gv(%rip)",
+        "movl $1, gv(%rip)",
+        "addq $8, gv(%rip)",
+        "andq $100000, gv(%rip)",
+        "shlq $3, gv(%rip)",
+        "shlq %cl, gv(%rip)",
+        "negq gv(%rip)",
+        "idivq gv(%rip)",
+        "imulq gv(%rip), %rax",
+        "testq %rax, gv(%rip)",
+        "sete gv(%rip)",
+        "movzbl gv(%rip), %eax",
+        "movslq gv(%rip), %rax",
+    ]
+
+    @harness.cases("line", CARRIES)
+    def test_it_asks_for_a_relocation(self, line):
+        out = Encoded()
+        encode_line(line, out)
+        assert len(out.relocs) == 1, (line, out.relocs)
+        _at, name, kind, addend = out.relocs[0]
+        assert (name, kind, addend) == ("gv", 2, -4), out.relocs
+
+    @harness.cases("line", REFUSES)
+    def test_it_refuses_rather_than_dropping_the_symbol(self, line):
+        from uasm.backends.x86_64.encode import EncodeError
+        out = Encoded()
+        with harness.raises(EncodeError, match="relocation"):
+            encode_line(line, out)
+        assert not out.relocs, out.relocs

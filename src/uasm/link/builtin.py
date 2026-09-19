@@ -38,6 +38,7 @@ from .freestanding import floor_object, provides
 from .pewrite import IMP_PREFIX
 from .registry import register
 from .runtimeobj import RuntimeBuildFailed, runtime_object
+from . import machowrite
 from .staticlink import LinkFailed, executable, link, read_object
 
 #: WHICH BACKEND BUILT AN OBJECT, read back off the object. The runtime has
@@ -150,6 +151,12 @@ class BuiltinToolchain(Toolchain):
             # known until the objects have been read.
             image = link(inputs, entry=ENTRY)
             blob = executable(image)
+            # A CORRECT IMAGE THE PLATFORM WILL NOT START is still worth
+            # saying out loud. `machowrite` knows the one case there is.
+            if image.fmt == "macho":
+                said = machowrite.arm64_static_will_not_load(image.machine)
+                if said:
+                    request.notes.append(said)
         except LinkFailed as exc:
             raise LinkError(exc.message, detail=exc.detail) from None
 

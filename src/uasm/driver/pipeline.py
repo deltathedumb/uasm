@@ -30,7 +30,7 @@ from .. import backend as backend_registry
 from .. import frontend as frontend_registry
 from .. import target as target_registry
 from ..target import Target
-from ..diagnostics import DiagnosticSink, Severity, SourceFile, error
+from ..diagnostics import DiagnosticSink, Severity, SourceFile, error, warning
 from ..ir import Module, print_module, verify
 from ..backend.base import BackendUnsupported
 from ..ir.verifier import VerifyError
@@ -511,6 +511,11 @@ def _link_stage(opts: Options, result: Result, be, target: Target,
         result.module = None          # nothing usable was produced
     finally:
         result.commands = [list(c) for c in request.commands]
+        # WHAT THE TOOLCHAIN WANTS SAID ABOUT A LINK THAT WORKED. See
+        # `LinkRequest.notes`: an image can be correct and still be one the
+        # target platform will not start.
+        for note in request.notes:
+            sink.report(warning("W9116", note))
 
 
 def _verify_stage(module: Module, sink: DiagnosticSink, who: str) -> bool:

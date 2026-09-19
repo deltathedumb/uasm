@@ -79,6 +79,15 @@ class LinkRequest:
     #: Commands actually run, for `--verbose` and for tests that assert what
     #: was invoked rather than parsing stdout.
     commands: list[list[str]] = field(default_factory=list)
+    #: Things the user should be told about a link that SUCCEEDED.
+    #:
+    #: NOT `LinkError`, which is a link that did not happen, and not a
+    #: comment in a source file, which nobody reads at the moment it matters.
+    #: The case this exists for is a program that is correct, is written, and
+    #: will not run on the platform it names -- a static arm64 macOS image,
+    #: which a release kernel refuses before it reads a single load command.
+    #: The driver reports each as a warning.
+    notes: list[str] = field(default_factory=list)
 
 
 class Toolchain(abc.ABC):

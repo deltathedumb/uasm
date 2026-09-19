@@ -5,32 +5,60 @@ writes the result into when the inputs were Mach-O. It is the third of
 these, after `staticlink._elf_executable` and `pewrite.executable`, and it
 is the longest for two reasons that have nothing to do with headers.
 
-THE FIRST IS THAT THE KERNEL DOES NOT READ `LC_MAIN`. That load command
-carries an entry OFFSET, and the comment in XNU's `load_main` says plainly
-that the kernel does not use it -- dyld does. A static image has no dyld, so
-the entry point has to be handed over the way it was before `LC_MAIN`
-existed: `LC_UNIXTHREAD`, which carries A WHOLE REGISTER STATE, and the
-program counter is one register in it. That is why this file knows what an
-`x86_THREAD_STATE64` looks like.
+THE FIRST IS THAT THE KERNEL DOES NOT READ `LC_MAIN`'S ENTRY OFFSET. The
+comment in XNU's `load_main` says so in as many words -- dyld uses it -- and
+what that function does instead is set `needs_dynlinker`, which fails the
+load a moment later when there is no `LC_LOAD_DYLINKER`. A static image has
+no dyld, so the entry point has to be handed over the way it was before
+`LC_MAIN` existed: `LC_UNIXTHREAD`, which carries A WHOLE REGISTER STATE
+with the program counter as one register in it. That is why this file knows
+what an `x86_THREAD_STATE64` looks like. (The kernel does read `LC_MAIN`'s
+`stacksize`; it is only the entry offset it leaves to dyld.)
 
 THE SECOND IS THAT AN ARM64 MAC WILL NOT RUN AN UNSIGNED BINARY. Not "will
-warn": the kernel refuses to map it and the process dies before its first
-instruction. The signature that gets past this is an AD-HOC one -- no
-certificate, no Apple, no network -- and it is nothing but a table of
-SHA-256 hashes, one per page of the file, wrapped in two headers. A linker
-that could not produce one would be a linker whose output does not run on
-half the Macs there are, so this one produces it.
+warn": it dies before its first instruction. The signature that gets past
+that is an AD-HOC one -- no certificate, no Apple, no network -- and it is
+nothing but a table of SHA-256 hashes, one per 4 KiB page of the file,
+wrapped in two headers. A linker that could not produce one would be a
+linker whose output does not run on half the Macs there are, so this one
+produces it.
+
+AND A THIRD THING, WHICH IS WHY THE ARM64 IMAGE THIS WRITES IS WELL FORMED
+AND STILL WILL NOT RUN. `parse_machfile` gates `MH_EXECUTE` before any entry
+command is looked at:
+
+    case MH_EXECUTE:
+        if (header->flags & MH_DYLDLINK) { ... needs_dynlinker = TRUE; }
+        else if (header->cputype == CPU_TYPE_X86_64) { /* allowed */ }
+        else { #if !(DEVELOPMENT || DEBUG) return LOAD_FAILURE; #endif }
+
+So a static `MH_EXECUTE` is permitted on x86-64 BY NAME and refused on
+arm64 on a release kernel -- and setting `MH_DYLDLINK` to get past the gate
+sets `needs_dynlinker`, which then demands the dyld this image does not
+have. There is no arrangement of load commands that loads a dyld-free arm64
+executable on a shipping macOS. The image is written anyway, because it is
+correct and a development kernel or a later change in Apple's policy would
+take it, and `arm64_static_will_not_load` says so where a caller can see it
+rather than leaving the user to find out on a Mac.
 
 WHAT IS CONVENTION AND WHAT IS NOT, because the difference matters when
 something does not load:
 
   * `__PAGEZERO` -- a segment at address zero, four gigabytes of it, with no
-    permissions -- is what makes a null dereference a fault rather than a
-    read. Convention, and universal. The image starts at 0x100000000 because
-    that is where `__PAGEZERO` ends.
-  * `__TEXT` MUST BE FIRST AND MUST START AT FILE OFFSET ZERO, because the
-    Mach header and the load commands are inside it and the kernel maps the
-    segment in order to read them.
+    permissions -- is NOT a convention. `load_machfile` requires the map's
+    minimum offset to be at least one page for any 64-bit executable and at
+    least 0x100000000 for an arm64 one, and only a segment with `vmaddr` 0,
+    `filesize` 0, `vmsize` non-zero and BOTH protections `VM_PROT_NONE`
+    raises it. A non-zero `maxprot` silently disqualifies it. The image
+    starts at 0x100000000 because that is where `__PAGEZERO` ends.
+  * EXACTLY ONE SEGMENT MAY MAP FILE OFFSET ZERO with contents, it must be
+    readable and executable, and at least one must exist -- so `__TEXT`
+    starts at file offset zero and holds the Mach header and the load
+    commands. `__PAGEZERO` is exempt because its `filesize` is zero.
+  * THE ENTRY MUST LAND INSIDE A SEGMENT WHOSE `initprot` IS EXACTLY
+    READ|EXECUTE. For an `LC_UNIXTHREAD` image the kernel checks this and
+    fails the load otherwise, so an entry in `__DATA` is not a program that
+    crashes -- it is a program that does not start.
   * A SEGMENT'S ADDRESS AND FILE OFFSET ARE PAGE-ALIGNED. The page is 4 KiB
     on Intel and 16 KiB on Apple Silicon, and the kernel enforces the one
     for the architecture it is running.
@@ -123,6 +151,25 @@ def _fixed(text: str, width: int = 16) -> bytes:
 
 def _round_up(value: int, to: int) -> int:
     return (value + to - 1) & ~(to - 1) if to > 1 else value
+
+
+def arm64_static_will_not_load(machine: int) -> str:
+    """Why this image will not run, if it will not. Empty when it will.
+
+    ASKED OF THE MACHINE AND ANSWERED IN WORDS, because there is nothing to
+    fix. See the module docstring: a release macOS kernel refuses a static
+    `MH_EXECUTE` for any cputype but x86-64, before it looks at a single
+    load command, and the flag that gets past the gate demands the dynamic
+    linker this image does not have.
+    """
+    if machine != CPU_TYPE_ARM64:
+        return ""
+    return ("a static arm64 macOS executable is refused by the kernel: "
+            "`parse_machfile` allows an MH_EXECUTE without MH_DYLDLINK only "
+            "for CPU_TYPE_X86_64, and setting MH_DYLDLINK would require an "
+            "LC_LOAD_DYLINKER that a freestanding image has no use for. The "
+            "image written here is well formed and a development kernel "
+            "will take it")
 
 
 def header_space(page: int, segments: int = 4, sections: int = 4,
@@ -407,5 +454,5 @@ def executable(image, *, base: int, page: int, sign: bool = False,
     return bytes(out)
 
 
-__all__ = ["DEFAULT_BASE", "MachoWriteError", "PAGE_OF", "executable",
-           "header_space"]
+__all__ = ["DEFAULT_BASE", "MachoWriteError", "PAGE_OF",
+           "arm64_static_will_not_load", "executable", "header_space"]

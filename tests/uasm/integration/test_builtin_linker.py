@@ -736,3 +736,75 @@ class TestMacOS:
         defined = {s.name for s in got.symbols if not s.is_undefined}
         assert defined == set(provides("macho")), defined
         assert "_plat_write" in defined and "plat_write" not in defined
+
+
+class TestWhatTheObjectsSay:
+    """Two things the linker reads or says that no image structure shows."""
+
+    def test_a_macho_addend_in_the_section_data_is_recovered(self, tmp_path):
+        """MACH-O HAS NO ADDEND FIELD, so it lives under the field patched.
+
+        The reader shipped without reading it back: an x86-64 relocation's
+        addend was always zero, which is right for the objects this compiler
+        emits -- it writes zero -- and silently wrong by N for anything from
+        clang with `leaq sym+N(%rip)` or a `.quad sym+N` in it. The object
+        below is assembled by llvm-mc precisely so that it is NOT one of
+        ours.
+        """
+        import shutil
+        import subprocess
+        if not shutil.which("llvm-mc"):
+            harness.skip("llvm-mc is not installed")
+        from uasm.backend.objfile import machoread
+
+        source = tmp_path / "addends.s"
+        source.write_text("""\
+\t.section __TEXT,__text,regular,pure_instructions
+\t.globl _main
+_main:
+\tleaq\t_gv+8(%rip), %rax
+\tmovq\t_gv(%rip), %rcx
+\tretq
+\t.section __DATA,__data
+\t.globl _ptr
+_ptr:
+\t.quad\t_gv+16
+""", encoding="utf-8")
+        obj = tmp_path / "addends.o"
+        subprocess.run(["llvm-mc", "-triple=x86_64-apple-macosx",
+                        "-filetype=obj", "-o", str(obj), str(source)],
+                       check=True, capture_output=True)
+
+        got = machoread.read(obj.read_bytes(), "addends.o")
+        addends = sorted(rel.addend for rels in got.relocs.values()
+                         for rel in rels)
+        assert addends == [0, 8, 16], addends
+
+    def test_an_arm64_macos_image_says_it_will_not_run(self, tmp_path):
+        """THE KERNEL REFUSES A STATIC arm64 MH_EXECUTE, so the linker says
+        so rather than handing over a file that dies at exec.
+
+        `parse_machfile` allows an `MH_EXECUTE` without `MH_DYLDLINK` only
+        for `CPU_TYPE_X86_64`; setting the flag to get past that demands an
+        `LC_LOAD_DYLINKER` a freestanding image has no use for. There is no
+        arrangement of load commands that works, so the image is written and
+        the fact is reported.
+        """
+        source = _write(tmp_path, FLOOR_PROGRAM)
+        out = tmp_path / "prog"
+        got = _cli("build", str(source), "--target", "aarch64-macos",
+                   "--link", "-ln", "builtin", "-o", str(out),
+                   "--workdir", str(tmp_path / ".uasm"))
+        assert got.returncode == 0, got.stderr[-2000:]
+        assert out.exists(), "the image is still written"
+        said = got.stdout + got.stderr
+        assert "W9116" in said, said[-2000:]
+        assert "MH_DYLDLINK" in said, said[-2000:]
+
+        # AND THE x86-64 ONE DOES NOT SAY IT, because that one does load:
+        # the kernel allows a static MH_EXECUTE for CPU_TYPE_X86_64 by name.
+        quiet = _cli("build", str(source), "--target", "x86_64-macos",
+                     "--link", "-ln", "builtin", "-o", str(tmp_path / "x"),
+                     "--workdir", str(tmp_path / ".uasm"))
+        assert quiet.returncode == 0, quiet.stderr[-2000:]
+        assert "W9116" not in quiet.stdout + quiet.stderr

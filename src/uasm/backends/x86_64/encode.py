@@ -307,6 +307,34 @@ def _rm(reg: int, target: Reg | Mem) -> tuple[bytes, int, str | None]:
     return _mem_operand(reg, target)
 
 
+def _rm_here(reg: int, target: Reg | Mem, mnemonic: str) -> tuple[bytes, int]:
+    """`_rm` for the forms that have nowhere to put a relocation.
+
+    SIXTEEN INSTRUCTION FORMS IN THIS FILE take an r/m operand and ignore the
+    symbol `_rm` hands back -- `movq $1, sym(%rip)`, `shlq $3, sym(%rip)`,
+    `negq sym(%rip)`, `testq %rax, sym(%rip)` and the rest. Each of them
+    emitted a zero displacement and NO RELOCATION, which assembles, links and
+    disassembles without complaint and reads whatever is four bytes past the
+    instruction.
+
+    NONE OF THEM IS REACHABLE TODAY. `emit.py` writes exactly one
+    RIP-relative operand -- the `leaq` that takes a global's address -- and
+    every read-modify-write goes through a register after it. So this is a
+    refusal and not a fix: recording the bias correctly is a per-form job
+    (the displacement is measured from the END of the instruction, so a
+    trailing `imm32` makes it -8 rather than -4, and Mach-O needs
+    `X86_64_RELOC_SIGNED_4` rather than `SIGNED` to say so), and threading
+    -4 through all sixteen would silently store four bytes off the global
+    rather than loudly declining.
+    """
+    rm, disp_at, symbol = _rm(reg, target)
+    if symbol is not None:
+        raise EncodeError(
+            f"{mnemonic} cannot carry a relocation for {symbol!r}: this form "
+            f"has no place to record one")
+    return rm, disp_at
+
+
 def _rex_for(w: int, reg: Reg | int, target: Reg | Mem | None,
              *, force: bool = False) -> bytes:
     r = reg.num if isinstance(reg, Reg) else reg
@@ -462,7 +490,7 @@ def _encode(mnemonic: str, ops: list[Operand], out: Encoded,
         src, dst = ops
         assert isinstance(dst, Reg)
         assert isinstance(src, (Reg, Mem))
-        rm, _, sym = _rm(dst.num, src)
+        rm, _ = _rm_here(dst.num, src, mnemonic)
         return _rex_for(w, dst, src, force=_needs_rex8(src)) + opcode + rm
     if mnemonic in ("movq", "movl", "movw", "movb", "movd"):
         # AN SSE REGISTER ON EITHER SIDE MAKES THIS A DIFFERENT INSTRUCTION,
@@ -493,7 +521,7 @@ def _encode(mnemonic: str, ops: list[Operand], out: Encoded,
     if stem == "test":
         src, dst = ops
         assert isinstance(src, Reg) and isinstance(dst, (Reg, Mem))
-        rm, _, _ = _rm(src.num, dst)
+        rm, _ = _rm_here(src.num, dst, mnemonic)
         return _rex_for(1 if bits == 64 else 0, src, dst) + b"\x85" + rm
     if stem in ("shl", "sar", "shr", "sal"):
         return _shift(stem, bits, ops)
@@ -502,7 +530,7 @@ def _encode(mnemonic: str, ops: list[Operand], out: Encoded,
     if mnemonic.startswith("set") and mnemonic[3:] in _CC:
         dst = ops[0]
         assert isinstance(dst, (Reg, Mem))
-        rm, _, _ = _rm(0, dst)
+        rm, _ = _rm_here(0, dst, mnemonic)
         return _rex_for(0, 0, dst, force=_needs_rex8(dst)) \
             + bytes([0x0F, 0x90 | _CC[mnemonic[3:]]]) + rm
 
@@ -570,7 +598,7 @@ def _mov(bits: int, ops: list[Operand], out: Encoded, base: int) -> bytes:
             raise EncodeError(
                 f"no 64-bit store of {src.value:#x}: it does not fit a "
                 f"sign-extended imm32 and movabs cannot address memory")
-        rm, disp_at, _ = _rm(0, dst)
+        rm, disp_at = _rm_here(0, dst, "a mov of an immediate")
         head = _prefix_for(bits) + _rex_for(w, 0, dst) \
             + bytes([0xC6 if bits == 8 else 0xC7])
         return head + rm + _imm(value, min(bits, 32))
@@ -600,7 +628,7 @@ def _alu(stem: str, bits: int, ops: list[Operand], out: Encoded,
     w = 1 if bits == 64 else 0
     if isinstance(src, Imm):
         assert isinstance(dst, (Reg, Mem))
-        rm, _, _ = _rm(ext, dst)
+        rm, _ = _rm_here(ext, dst, stem)
         value = _signed(src.value, bits)
         # THE SHORT FORM when the immediate fits in a signed byte, which is
         # most of them: `addq $8, %rsp` is four bytes rather than seven, and
@@ -648,11 +676,11 @@ def _unary(stem: str, bits: int, ops: list[Operand]) -> bytes:
         # r/m and writes the register, where the F7 group writes rdx:rax.
         src, dst = ops
         assert isinstance(dst, Reg) and isinstance(src, (Reg, Mem))
-        rm, _, _ = _rm(dst.num, src)
+        rm, _ = _rm_here(dst.num, src, stem)
         return _rex_for(1 if bits == 64 else 0, dst, src) + b"\x0f\xaf" + rm
     dst = ops[0]
     assert isinstance(dst, (Reg, Mem))
-    rm, _, _ = _rm(_UNARY_EXT[stem], dst)
+    rm, _ = _rm_here(_UNARY_EXT[stem], dst, stem)
     return _prefix_for(bits) + _rex_for(1 if bits == 64 else 0,
                                         _UNARY_EXT[stem], dst) \
         + bytes([0xF6 if bits == 8 else 0xF7]) + rm
@@ -665,7 +693,7 @@ def _shift(stem: str, bits: int, ops: list[Operand]) -> bytes:
     amount, dst = ops
     assert isinstance(dst, (Reg, Mem))
     ext = _SHIFT_EXT[stem]
-    rm, _, _ = _rm(ext, dst)
+    rm, _ = _rm_here(ext, dst, stem)
     w = 1 if bits == 64 else 0
     if isinstance(amount, Reg) and amount.name == "cl":
         return _prefix_for(bits) + _rex_for(w, ext, dst) \

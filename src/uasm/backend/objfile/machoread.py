@@ -63,6 +63,9 @@ _ZEROFILL = (S_ZEROFILL, S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL)
 #: The addend carrier. Its `r_symbolnum` field is not a symbol index but a
 #: 24-bit addend for the record that follows it.
 ARM64_RELOC_ADDEND = 10
+#: The one AArch64 type whose addend IS in the section data, because the
+#: field is a plain pointer rather than a bitfield in an instruction.
+ARM64_RELOC_UNSIGNED = 0
 
 #: The machines a backend here targets.
 KNOWN_MACHINES = (CPU_TYPE_X86_64, CPU_TYPE_ARM64)
@@ -193,6 +196,39 @@ def _permissions(segment: str, section: str, flags: int) -> tuple[int, int]:
         # means neither said anything, so the safe reading is writable data.
         out |= 0x1
     return kind, out
+
+
+def _addend_of(data: bytes, offset: int, length: int, kind: int,
+               cputype: int, where: str) -> int:
+    """The addend Mach-O stored in the section data, if it stored one there.
+
+    MACH-O HAS NO ADDEND FIELD, as COFF has none -- see `coffread._addend_of`,
+    which is this function's twin and was written first. The value sits under
+    the field being patched, so reading it back means knowing how wide that
+    field is; Mach-O, unlike COFF, says so in the RECORD, which is what
+    `length` is.
+
+    WHICH TYPES KEEP IT THERE IS THE ARCHITECTURE'S ANSWER, not the
+    container's. Every x86-64 type patches a plain little-endian integer, so
+    every one of them carries its addend in the data. AArch64 packs its
+    operands into instruction bitfields, so there is nowhere sensible to put
+    one -- which is why Mach-O invented `ARM64_RELOC_ADDEND` as a separate
+    record. The single exception is `ARM64_RELOC_UNSIGNED`, whose field is a
+    pointer and not an instruction.
+
+    THIS FILE SHIPPED WITHOUT IT, reading every x86-64 addend as zero. Its
+    own emitter stores zero, so nothing here noticed; an object from clang
+    with `leaq sym+8(%rip)` in it would have linked and been wrong by eight.
+    """
+    if cputype == CPU_TYPE_ARM64 and kind != ARM64_RELOC_UNSIGNED:
+        return 0
+    width = 1 << length
+    form = {1: "<b", 2: "<h", 4: "<i", 8: "<q"}.get(width)
+    if form is None or offset + width > len(data):
+        raise MachoError(
+            f"a relocation at {offset:#x} in {where} patches {width} bytes "
+            f"that are not there")
+    return struct.unpack_from(form, data, offset)[0]
 
 
 def _cstr(raw: bytes, at: int) -> str:
@@ -369,8 +405,16 @@ def read(blob: bytes, origin: str = "<memory>") -> Relocatable:
                     f"{origin}: {sec.origin_name} has a relocation against a "
                     f"section rather than a symbol, which this linker does "
                     f"not read")
+            # THE TWO SOURCES OF AN ADDEND ARE EXCLUSIVE in anything a
+            # Mach-O producer writes: a type that takes `ARM64_RELOC_ADDEND`
+            # keeps nothing in the data, and a type that keeps it in the data
+            # is never preceded by one. Summing them is what that means
+            # rather than a choice between them.
+            stored = _addend_of(sec.data, address, length, kind, cputype,
+                                sec.origin_name)
             here.append(InReloc(offset=address, symbol=symbolnum, kind=kind,
-                                addend=pending, pcrel=pcrel, length=length))
+                                addend=pending + stored, pcrel=pcrel,
+                                length=length))
             pending = 0
         if pending:
             raise MachoError(
