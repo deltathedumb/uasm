@@ -159,3 +159,149 @@ class TestTheObjectIsWellFormed:
                        "R_AARCH64_ADD_ABS_LO12_NC"):
             assert wanted in out, f"no {wanted} in the object"
         assert "R_X86_64" not in out
+
+
+# ── the frame, which no machine here can execute ────────────────────────────
+#
+# READ RATHER THAN RUN, and the file's own preamble argues against exactly
+# that -- so it is worth saying why these two are the exception. Both check a
+# property of the STACK POINTER over a whole sequence: how far it moves, and
+# what the offsets around it are measured from. There is no ARM machine here
+# and no emulator, `llvm-mc` agrees with whatever text it is handed so it
+# cannot catch a wrong offset, and both bugs below shipped in code that
+# assembled, linked and disassembled without complaint. Reading is what there
+# is, and reading finds them.
+
+def _lines_of(name: str, source: str, tmp_path: Path) -> list[str]:
+    """The AArch64 assembly for one function of `source`."""
+    from uasm.backends.arm64.emit import abi_for, dialect_for
+    load_builtin()
+    backend = get("arm64")
+    target = get_target("aarch64-linux")
+    abi, dialect = abi_for(target), dialect_for(target)
+    module = compile_module(textwrap.dedent(source).strip() + "\n",
+                            tmp_path, True)
+    for fn in module.defined_functions():
+        if fn.name == name:
+            return backend._function(fn, abi, dialect)
+    raise AssertionError(f"no function named {name!r} was compiled")
+
+
+def _immediate(line: str, after: str) -> int | None:
+    """The `#n` in a line beginning `after`, or None if it is not one."""
+    import re
+    got = re.fullmatch(rf"\s*{after}\s*#(\d+)\s*", line)
+    return int(got.group(1)) if got else None
+
+
+#: Eleven arguments, two of them floats. Nine integers fill x0-x7 and spill
+#: one onto the stack, which is what makes the caller push an outgoing area
+#: at all -- and the floats live in frame slots, which is what makes the
+#: offsets around that push matter.
+WIDE_CALL = """
+    def wide(a: float, b: int, c: int, d: int, e: int, f: int,
+             g: int, h: int, i: int, j: int, k: float) -> float:
+        return a + float(b + c + d + e + f + g + h + i + j) + k
+
+
+    def go() -> float:
+        return wide(1.5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 2.5)
+
+
+    print(go())
+"""
+
+#: A frame bigger than one `sub sp, sp, #imm` can carry. `alloca` is counted
+#: into the frame, so this is the shortest way to ask for one -- and it is
+#: written in the STATICALLY TYPED subset, because that is where `alloca`
+#: lives, with a dynamic `main` to call it so the module compiles as Python.
+BIG_FRAME = """
+    def wide() -> i64:
+        buf: ptr = alloca(8192)
+        store(i64, 4242, buf)
+        return load(i64, buf)
+
+
+    def main() -> int:
+        return int(wide())
+"""
+
+
+class TestTheStackPointerIsAccountedFor:
+
+    def test_a_slot_read_inside_a_call_is_biased_by_the_push(self, tmp_path):
+        """SP HAS ALREADY MOVED by the time the arguments are read.
+
+        A call with a stacked argument pushes the outgoing area first, so
+        every frame slot is that much further up while it is being filled.
+        The integer side added the bias and the FLOAT side did not, which is
+        a float argument read from the outgoing area instead of from its own
+        slot -- on every call that had both.
+        """
+        lines = _lines_of("go", WIDE_CALL, tmp_path)
+        pushes = [(i, _immediate(line, "sub sp, sp,"))
+                  for i, line in enumerate(lines)]
+        pushes = [(i, n) for i, n in pushes if n]
+        # The first is the prologue; the rest are outgoing argument areas.
+        assert len(pushes) >= 2, lines
+        at, adjust = pushes[1]
+        end = next(i for i, line in enumerate(lines[at:], at)
+                   if line.strip().startswith("bl "))
+        reads = [line for line in lines[at:end]
+                 if line.strip().startswith(("ldr ", "ldr\t"))]
+        assert reads, lines[at:end]
+        import re
+        for line in reads:
+            got = re.search(r"\[sp, #(\d+)\]", line)
+            assert got, line
+            assert int(got.group(1)) >= adjust, (
+                f"{line.strip()!r} reads below the {adjust} bytes just "
+                f"pushed, which is the outgoing area and not a frame slot")
+
+    def test_a_frame_too_big_for_one_immediate_is_split(self, tmp_path):
+        """`sub sp, sp, #imm` carries twelve bits and the frame needs more.
+
+        THE ARCHITECTURE ALREADY ALLOWS IT: the immediate may be shifted
+        left by twelve, so two instructions reach sixteen megabytes. The
+        backend refused anything over 4088 instead, which is what stopped an
+        AArch64 object runtime from building at all -- one function in it
+        needs 5216 bytes.
+        """
+        lines = _lines_of("wide", BIG_FRAME, tmp_path)
+        down = sum(n for n in (_immediate(line, "sub sp, sp,")
+                               for line in lines) if n)
+        up = sum(n for n in (_immediate(line, "add sp, sp,")
+                             for line in lines) if n)
+        assert down > 4095, f"the frame is only {down} bytes; make it bigger"
+        assert down == up, f"SP goes down {down} and comes back up {up}"
+        # AND EVERY PIECE FITS ONE IMMEDIATE, which is the point: a value
+        # over 4095 is emitted as its high and low halves, and `encode.py`
+        # picks the shift for the high one because it is a clean multiple.
+        for line in lines:
+            for direction in ("sub sp, sp,", "add sp, sp,"):
+                n = _immediate(line, direction)
+                if n is not None:
+                    assert n <= 4095 or not n & 0xFFF, line
+
+    def test_the_limit_it_still_has_is_the_one_it_says(self, tmp_path):
+        """And it is a LOAD/STORE limit, not a stack-pointer one.
+
+        `ldr`/`str` scale their twelve-bit offset by the access width, so a
+        32-bit float reaches 16380 where a 64-bit register reaches 32760.
+        The frame check has to be the smaller of those, and the encoder
+        refuses anything past it rather than truncating -- so this asserts
+        the two numbers agree.
+        """
+        from uasm.backends.arm64 import encode
+        from uasm.backends.arm64.emit import MAX_FRAME
+
+        assert MAX_FRAME <= 16380, MAX_FRAME
+        assert MAX_FRAME % 8 == 0, "slots are eight-aligned"
+        got = encode.encode_function([f"\tldr s0, [sp, #{MAX_FRAME}]"])
+        assert len(got.code) == 4, got.code
+        try:
+            encode.encode_function([f"\tldr s0, [sp, #{MAX_FRAME + 8}]"])
+        except encode.EncodeError:
+            pass
+        else:
+            harness.fail("an offset past the limit should not encode")

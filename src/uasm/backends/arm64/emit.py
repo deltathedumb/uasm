@@ -87,6 +87,60 @@ RESERVED = frozenset({"x16", "x17", "x18", "x29", "x30", "sp"})
 #: register file, and this is a second one.
 FSCRATCH_A, FSCRATCH_B = "d0", "d1"
 
+#: The largest frame this backend emits, and the encoding that decides it.
+#:
+#: NOT THE STACK-POINTER ADJUSTMENT. `sub sp, sp, #imm` carries twelve bits,
+#: which is 4095 -- but the architecture also lets the immediate be shifted
+#: left by twelve, so two instructions reach sixteen megabytes and
+#: `_move_sp` below emits them. It was the adjustment that set the old limit
+#: of 4088, and it never needed to.
+#:
+#: IT IS THE SLOT ACCESS, and specifically a THIRTY-TWO-BIT FLOAT. Every
+#: `ldr`/`str` with an unsigned offset scales the twelve-bit immediate by the
+#: access width: eight bytes for `x` and `d` reaches 32760, four bytes for
+#: `s` reaches 16380. A float slot is eight-aligned like every other, so the
+#: last one this backend can address is 16376.
+#:
+#: BEYOND THAT THE ADDRESS HAS TO BE MATERIALISED, which needs a scratch
+#: register at every spill site, and a function whose frame is sixteen
+#: kilobytes is a function that should be looked at rather than accommodated.
+#: So it is refused, by name, with the number.
+MAX_FRAME = 16376
+
+#: What one `add`/`sub` immediate holds before the shifted form is needed.
+_IMM12 = 4095
+
+
+def _move_sp(e: "_Emitter", op: str, amount: int) -> None:
+    """`add`/`sub sp, sp, #amount`, in as many instructions as it takes.
+
+    THE SHIFTED FORM CARRIES ONLY A MULTIPLE OF 4096, so an amount with
+    anything in its low twelve bits is two instructions: the high part
+    shifted, then the rest. `encode.py` picks the shift itself for a value
+    that is a clean multiple, which is why this splits rather than spelling
+    `lsl #12` out.
+    """
+    if not amount:
+        return
+    if amount <= _IMM12:
+        e.emit(f"{op} sp, sp, #{amount}")
+        return
+    high, low = amount & ~0xFFF, amount & 0xFFF
+    e.emit(f"{op} sp, sp, #{high}")
+    if low:
+        e.emit(f"{op} sp, sp, #{low}")
+
+
+def _address_in_frame(e: "_Emitter", dest: str, offset: int) -> None:
+    """`add dest, sp, #offset`, in as many instructions as it takes."""
+    if offset <= _IMM12:
+        e.emit(f"add {dest}, sp, #{offset}")
+        return
+    high, low = offset & ~0xFFF, offset & 0xFFF
+    e.emit(f"add {dest}, sp, #{high}")
+    if low:
+        e.emit(f"add {dest}, {dest}, #{low}")
+
 
 @dataclass(frozen=True, slots=True)
 class ABI:
@@ -258,12 +312,18 @@ class _Emitter:
         # wants them from zero.
         return place.offset - 8
 
-    def into(self, reg: Register, scratch: str) -> str:
-        """A register holding `reg`'s value, loading a spilled one first."""
+    def into(self, reg: Register, scratch: str, bias: int = 0) -> str:
+        """A register holding `reg`'s value, loading a spilled one first.
+
+        `bias` IS HOW FAR SP HAS MOVED since the frame was laid out. It is
+        zero everywhere but inside a call sequence, where the outgoing
+        argument area has already been pushed and every frame slot is that
+        much further up.
+        """
         place = self.alloc.location(reg)
         if isinstance(place, InRegister):
             return place.name
-        self.emit(f"ldr {scratch}, [sp, #{self.slot_offset(reg)}]")
+        self.emit(f"ldr {scratch}, [sp, #{self.slot_offset(reg) + bias}]")
         return scratch
 
     def out_register(self, reg: Register, scratch: str) -> str:
@@ -280,10 +340,17 @@ class _Emitter:
             self.emit(f"str {scratch}, [sp, #{self.slot_offset(reg)}]")
 
     # ── float values ────────────────────────────────────────────────────────
-    def float_into(self, reg: Register, vreg: str) -> str:
+    def float_into(self, reg: Register, vreg: str, bias: int = 0) -> str:
+        """The float in `vreg`. `bias` as in `into` -- see there.
+
+        THE BIAS WAS MISSING HERE AND PRESENT ON THE INTEGER SIDE, which is
+        a call with a stacked argument and a float one reading the float
+        from `adjust` bytes below where it lives. Every float in this
+        backend lives in a frame slot, so it was every such call.
+        """
         ty = self.fn.register_type(reg)
         name = vreg if ty is T.F64 else "s" + vreg[1:]
-        self.emit(f"ldr {name}, [sp, #{self.slot_offset(reg)}]")
+        self.emit(f"ldr {name}, [sp, #{self.slot_offset(reg) + bias}]")
         return name
 
     def float_store(self, vreg: str, reg: Register) -> None:
@@ -465,13 +532,13 @@ class Arm64Backend(Backend):
         frame = (frame + 15) & ~15
         saved_base = alloc.frame_size + alloca_bytes
 
-        if frame > 4088:
-            # `sub sp, sp, #imm` takes a 12-bit immediate, and every slot
-            # access uses a 12-bit scaled offset. Refusing beats emitting a
-            # frame whose upper slots silently alias.
+        if frame > MAX_FRAME:
+            # SEE `MAX_FRAME`. Refusing beats emitting a frame whose upper
+            # slots silently alias.
             raise UnsupportedOperation(
                 f"{fn.name}: frame of {frame} bytes exceeds this backend's "
-                f"limit of 4088; use --backend c")
+                f"limit of {MAX_FRAME}",
+                )
 
         name = self.symbol(fn.name, dialect)
         e.lines.extend(
@@ -479,8 +546,7 @@ class Arm64Backend(Backend):
         e.label(name)
         e.emit("stp x29, x30, [sp, #-16]!")
         e.emit("mov x29, sp")
-        if frame:
-            e.emit(f"sub sp, sp, #{frame}")
+        _move_sp(e, "sub", frame)
         for i, reg in enumerate(saved):
             e.emit(f"str {reg}, [sp, #{saved_base + 8 * i}]")
 
@@ -555,17 +621,16 @@ class Arm64Backend(Backend):
                                        abi)
         stacked = sum(1 for p in places if p.on_stack)
         adjust = (8 * stacked + 15) & ~15
-        if adjust:
-            e.emit(f"sub sp, sp, #{adjust}")
+        _move_sp(e, "sub", adjust)
 
         for arg, place in zip(args, places):
             if not place.on_stack:
                 continue
             if place.is_float:
-                vreg = e.float_into(arg, FSCRATCH_A)
+                vreg = e.float_into(arg, FSCRATCH_A, bias=adjust)
                 e.emit(f"str {vreg}, [sp, #{place.stack_offset}]")
             else:
-                source = e.into(arg, SCRATCH_A)
+                source = e.into(arg, SCRATCH_A, bias=adjust)
                 e.emit(f"str {source}, [sp, #{place.stack_offset}]")
 
         moves: list[tuple[str, str]] = []
@@ -573,7 +638,7 @@ class Arm64Backend(Backend):
             if place.on_stack:
                 continue
             if place.is_float:
-                e.float_into(arg, place.register)
+                e.float_into(arg, place.register, bias=adjust)
             else:
                 location = e.alloc.location(arg)
                 source = (location.name if isinstance(location, InRegister)
@@ -676,7 +741,7 @@ class Arm64Backend(Backend):
 
             case Op.ALLOCA:
                 dest = e.out_register(ins.dst, SCRATCH_A)
-                e.emit(f"add {dest}, sp, #{e.alloca_base + e.alloca_used}")
+                _address_in_frame(e, dest, e.alloca_base + e.alloca_used)
                 e.alloca_used += (int(ins.imm) + 15) & ~15
                 e.store(dest, ins.dst)
 
@@ -714,7 +779,7 @@ class Arm64Backend(Backend):
                 else:
                     e.emit(f"blr {SCRATCH_B}")
                 if adjust:
-                    e.emit(f"add sp, sp, #{adjust}")
+                    _move_sp(e, "add", adjust)
                 if ins.dst is not None:
                     if e.fn.register_type(ins.dst).is_float:
                         e.float_store("d0", ins.dst)
@@ -747,8 +812,7 @@ class Arm64Backend(Backend):
                             e.emit(f"mov x0, {source}")
                 for i, reg in enumerate(saved):
                     e.emit(f"ldr {reg}, [sp, #{saved_base + 8 * i}]")
-                if frame:
-                    e.emit(f"add sp, sp, #{frame}")
+                _move_sp(e, "add", frame)
                 e.emit("ldp x29, x30, [sp], #16")
                 e.emit("ret")
 
