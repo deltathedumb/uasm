@@ -192,12 +192,34 @@ def cmd_build(args) -> int:
         # One artifact goes exactly where -o said. Several are written beside
         # it under their own names -- renaming the second onto the requested
         # path would silently overwrite the first.
-        dest = out if (out and len(result.artifacts) == 1) else \
-            ((out.parent / name) if out else Path(name))
+        if out:
+            dest = out if len(result.artifacts) == 1 else out.parent / name
+        else:
+            dest = Path(_named_after(opts.source, name,
+                                     len(result.artifacts)))
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         print(f"wrote {dest} ({len(data)} bytes)")
     return 0
+
+
+def _named_after(source: Path, artifact: str, count: int) -> str:
+    """What a lone artifact is called when `-o` did not say.
+
+    `uasm build hello.py` USED TO WRITE `out.o`, which is the backend's own
+    name for its own output and makes the natural pair read `uasm build
+    hello.py && uasm link out.o`. It is the source's name that the user
+    knows, so a single artifact takes it.
+
+    ONLY WHEN THE BACKEND CALLED IT `out`. That stem is the placeholder every
+    machine backend uses; `Prog.class` is not one -- a JVM class file has to
+    be named after the class inside it, and renaming it makes a file the JVM
+    refuses to load. So the rename happens exactly where the name carries no
+    information.
+    """
+    if count != 1 or Path(artifact).stem != "out":
+        return artifact
+    return source.stem + Path(artifact).suffix
 
 
 def _truthy(raw) -> bool:
