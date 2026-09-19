@@ -8940,14 +8940,43 @@ def _kind_attr(h, obj, want: str):
 
 
 def _object_new_of(h):
-    """`object.__new__(cls)`, and `object.__new__(cls, content)` for a class
-    extending a builtin. See the caller for why the second shape exists."""
+    """`object.__new__(cls)` -- and the two refusals CPython makes here.
+
+    A CLASS EXTENDING A BUILTIN IS REFUSED, which is CPython's rule and not
+    an arbitrary one: `object.__new__` would build the shell and leave the
+    builtin half empty, where `str.__new__(S, value)` fills it. CPython walks
+    up to the first base that is not a Python class and refuses when its
+    `__new__` is not object's -- which for `class S(str)` is `str`'s.
+
+    AN ARGUMENT BEYOND THE CLASS IS FOR `__init__` TO TAKE, and only when
+    there is one to take it. CPython draws the line twice: a class that wrote
+    `__new__` gets the argument count complained about, and a class with
+    neither is told it takes none.
+    """
     def _new(cls, *rest):
-        made = Instance(cls, h)
-        kind = cls.builtin_kind() if isinstance(cls, Class) else None
-        if kind is not None and rest:
-            made.held = kind(*[_content_of(one) for one in rest])
-        return made
+        who = cls.name if isinstance(cls, Class) else h.kind_name(cls)
+        if isinstance(cls, Class) and cls.builtin_kind() is not None:
+            h._fail("TypeError",
+                    f"object.__new__({who}) is not safe, "
+                    f"use {who}.__new__()")
+            raise _UserFailed
+        # BY VALUE AND NOT BY COUNT, which this path alone could do. The
+        # compiled halves reach the same native with a trailing slot the
+        # arity check has already filled from `defaults`, so they see two
+        # arguments whether or not one was written and read a None as
+        # "omitted". Counting here instead would make the interpreter right
+        # and the other two wrong, which is worse than all three agreeing.
+        # See #160, which is that one spelling.
+        rest = [one for one in rest if one is not None]
+        if rest and isinstance(cls, Class):
+            if cls.find("__new__") is not None:
+                h._fail("TypeError", "object.__new__() takes exactly one "
+                                     "argument (the type to instantiate)")
+                raise _UserFailed
+            if cls.find("__init__") is None:
+                h._fail("TypeError", f"{who}() takes no arguments")
+                raise _UserFailed
+        return Instance(cls, h)
 
     return _new
 
@@ -9309,6 +9338,50 @@ def _apy_init_subclass(h, a):
 #: The C's kind enum, as the Python types the host uses. The two lists must
 #: agree -- a wrong number gives an instance the wrong kind of storage.
 _BUILTIN_KINDS = {4: str, 5: list, 6: tuple, 7: dict, 9: set}
+
+
+def _apy_builtin_new(h, a):
+    """`str.__new__(cls, content)` -- the builtin half of an instance, built
+    through the type it extends. This is how CPython's own `enum` makes a
+    mixin member: `member_type.__new__(enum_class, value)`.
+
+    AN IMPLICIT STATICMETHOD, so the first argument is the CLASS TO BUILD and
+    not a receiver of this type. The ordinary unbound-method check --
+    `apy_descr_applies` -- therefore does not apply to it, and did.
+
+    THE CONTENT IS TAKEN ONLY BY THE IMMUTABLE KINDS. `list.__new__(L,
+    [1, 2])` is an EMPTY list in CPython and `tuple.__new__(T, [1, 2])` is
+    `(1, 2)`: a mutable builtin fills in `__init__`, and an immutable one has
+    nowhere else to do it.
+
+    THE BUILTIN ITSELF ANSWERS A PLAIN ONE. `str.__new__(str, "ab")` is
+    `"ab"` -- there is no class to put it in.
+    """
+    want = str(h._get(a[0], "apy_builtin_new"))
+    kind = _BUILTIN_KINDS.get(int(a[1]))
+    cls = h._get(a[2], "apy_builtin_new")
+    content = h._get(a[3], "apy_builtin_new")
+    has = content is not None
+    given = None
+    if isinstance(cls, Class):
+        given = cls.name
+        if cls.builtin_kind() is kind and kind is not None:
+            made = Instance(cls, h)
+            if kind in (str, tuple) and has:
+                made.held = kind(_content_of(content))
+            return h._new(made)
+    elif isinstance(cls, (Func, Native)) and getattr(cls, "is_type", False):
+        given = cls.name
+        if given == want:
+            return h._value(kind(_content_of(content)) if has else kind())
+    else:
+        # NOT A TYPE AT ALL, which CPython words differently from a type that
+        # is simply the wrong one -- and writes as a literal `X`.
+        return h._fail("TypeError",
+                       f"{want}.__new__(X): X is not a type object "
+                       f"({h.kind_name(cls)})")
+    return h._fail("TypeError", f"{want}.__new__({given}): {given} is not a "
+                                f"subtype of {want}")
 
 
 def _apy_type_builtin(h, a):
@@ -11415,7 +11488,19 @@ def _apy_is_subclass(h, a):
         return h._bool(True)
     if not isinstance(x, Class):
         return h._fail("TypeError", "issubclass() arg 1 must be a class")
+    # A BUILTIN AS THE SECOND ARGUMENT, with a class extending it as the
+    # first: `issubclass(S, str)` for a `class S(str)` is True in CPython and
+    # was `issubclass() arg 2 must be a class or tuple of classes` here -- a
+    # builtin kind has no class cell, so the walk below had nothing to
+    # compare against. The relation is the one `builtin_kind` records, and
+    # the name is how it travels, exactly as it does for `isinstance`.
     if not isinstance(y, Class):
+        want = (y.name if isinstance(y, (Func, Native))
+                and getattr(y, "is_type", False)
+                else y if isinstance(y, str) else None)
+        if want is not None:
+            kind = x.builtin_kind()
+            return h._bool(kind is not None and kind.__name__ == want)
         return h._fail("TypeError", "issubclass() arg 2 must be a class or "
                                     "tuple of classes")
     # THROUGH THE ORDER, not the base chain. With several bases the two are
@@ -16722,6 +16807,7 @@ _TABLE.update({
     "apy_type_class": _apy_type_class,
     "apy_type_object": _apy_type_object,
     "apy_prepare": _apy_prepare,
+    "apy_builtin_new": _apy_builtin_new,
     "apy_type_builtin_pending": _apy_type_builtin_pending,
     "apy_class_build": _apy_class_build,
     "apy_class_build_kw": _apy_class_build_kw,

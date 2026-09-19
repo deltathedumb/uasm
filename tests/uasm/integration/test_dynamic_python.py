@@ -3874,6 +3874,94 @@ PROGRAMS = {
 
         print("variadic:", list(gen_both(1, 2, 3, z=4)))
     """,
+    # A BUILTIN'S `__new__` BUILDS THE SUBCLASS IT IS HANDED. It is an
+    # implicit staticmethod, so its first argument is the CLASS TO BUILD and
+    # not a receiver of that type -- and the unbound-method check that every
+    # other method wants said so: `str.__new__(S, "hi")` was `descriptor
+    # '__new__' for 'str' objects doesn't apply to a 'type' object`, about a
+    # class that is exactly what the call meant to name. `object.__new__`
+    # refuses the same shapes CPython refuses, now that there is somewhere
+    # else for them to go.
+    "a_builtins_new_builds_the_subclass_it_is_handed": """
+        class S(str):
+            pass
+
+        class T(tuple):
+            pass
+
+        class L(list):
+            pass
+
+        class D(dict):
+            pass
+
+        class Own:
+            def __new__(cls, *rest):
+                return super().__new__(cls)
+
+        class WithInit:
+            def __init__(self, x):
+                self.x = x
+
+        class Plain:
+            pass
+
+        # THE BUILTIN ITSELF ANSWERS A PLAIN ONE -- there is no class to put
+        # it in.
+        print("plain:", repr(str.__new__(str, "ab")),
+              type(str.__new__(str, "ab")).__name__)
+        print("sub:", repr(str.__new__(S, "ab")),
+              type(str.__new__(S, "ab")).__name__)
+        print("empty:", repr(str.__new__(S)), len(str.__new__(S)))
+        # THE CONTENT IS TAKEN ONLY BY THE IMMUTABLE KINDS: a mutable builtin
+        # fills in `__init__`, and an immutable one has nowhere else to.
+        print("tuple:", repr(tuple.__new__(T, [1, 2])))
+        print("list:", repr(list.__new__(L, [1, 2])))
+        print("dict:", repr(dict.__new__(D)))
+        # AND IT IS A REAL str, methods and all.
+        s = str.__new__(S, "hi")
+        print("methods:", s.upper(), s == "hi", isinstance(s, str), len(s))
+        try:
+            str.__new__(L, "x")
+        except TypeError as e:
+            print("wrong type:", e)
+        try:
+            str.__new__(5)
+        except TypeError as e:
+            print("not a type:", e)
+        # `object.__new__` REFUSES A CLASS EXTENDING A BUILTIN, because it
+        # would build the shell and leave the builtin half empty.
+        try:
+            object.__new__(S)
+        except TypeError as e:
+            print("unsafe:", e)
+        try:
+            object.__new__(S, 1)
+        except TypeError as e:
+            print("unsafe with arg:", e)
+        # AN ARGUMENT BEYOND THE CLASS IS FOR `__init__` TO TAKE, and only
+        # when there is one to take it.
+        print("own:", type(object.__new__(Own)).__name__)
+        try:
+            object.__new__(Own, 1)
+        except TypeError as e:
+            print("own with arg:", e)
+        print("with init:", type(object.__new__(WithInit, 1)).__name__)
+        print("plain class:", type(object.__new__(Plain)).__name__)
+        try:
+            object.__new__(Plain, 1)
+        except TypeError as e:
+            print("plain with arg:", e)
+        # AND THE CLASS-LEVEL QUESTION IS ANSWERABLE, which is how a caller
+        # knows which `__new__` to reach for. A builtin kind has no class
+        # cell and travels as a NAME, the shape `isinstance` already reads,
+        # and `issubclass` refused it outright.
+        print("issubclass:", issubclass(S, str), issubclass(T, tuple),
+              issubclass(L, list), issubclass(D, dict))
+        print("issubclass no:", issubclass(S, tuple), issubclass(Plain, str),
+              issubclass(L, str))
+        print("issubclass self:", issubclass(str, str), issubclass(S, object))
+    """,
     # AND A CLASS LEARNS ITS BUILTIN BEFORE ITS METACLASS RUNS. The kind
     # used to be recorded once `apy_class_build` had ANSWERED, which for a
     # class with a metaclass is after the metaclass body has finished -- and

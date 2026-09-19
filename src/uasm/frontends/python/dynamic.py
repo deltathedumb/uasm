@@ -2552,6 +2552,24 @@ class DynamicLowering:
                                      f"argument")])])
                 self._dyn_check()
                 return self.b.call(T.PTR, "apy_none", [])
+            if node.func.attr == "__new__" and base in _BUILTIN_BASE_KIND:
+                # `str.__new__(cls, value)` -- AN IMPLICIT STATICMETHOD, so
+                # the first argument is the CLASS TO BUILD and not a receiver
+                # of this type. The check below therefore does not apply to
+                # it, and did: the call was `descriptor '__new__' for 'str'
+                # objects doesn't apply to a 'type' object`, about a class
+                # that is exactly what it meant to name. See
+                # `apy_builtin_new`, which is also what CPython's own `enum`
+                # builds a mixin member with.
+                made = self.b.call(
+                    T.PTR, "apy_builtin_new",
+                    [self._dyn_str_literal(base),
+                     self.b.const(T.I64, _BUILTIN_BASE_KIND[base]),
+                     self._dyn_expr(node.args[0]),
+                     (self._dyn_expr(node.args[1]) if len(node.args) > 1
+                      else self.b.call(T.PTR, "apy_none", []))])
+                self._dyn_check()
+                return made
             # THE RECEIVER IS CHECKED AGAINST THE TYPE IT WAS REACHED OFF.
             # `str.upper(5)` is `descriptor 'upper' for 'str' objects doesn't
             # apply to a 'int' object` in CPython, which is the DESCRIPTOR

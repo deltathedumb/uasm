@@ -1689,6 +1689,30 @@ APY_API apy_value apy_is_subclass(apy_value a, apy_value b) {
     }
     if (O(a)->kind != APY_TYPE_K)
         return apy_fail("TypeError", "issubclass() arg 1 must be a class");
+    /* A BUILTIN AS THE SECOND ARGUMENT, with a class extending it as the
+       first: `issubclass(S, str)` for a `class S(str)` is True in CPython
+       and was `issubclass() arg 2 must be a class or tuple of classes`
+       here -- a builtin kind has no type cell, so the walk below had
+       nothing to compare against. The relation is the one
+       `apy_class_builtin_kind` records, and the name is how it travels,
+       exactly as it does for `isinstance`. */
+    if (O(b)->kind != APY_TYPE_K) {
+        const char *want = 0;
+        if (O(b)->kind == APY_FUNC_K && O(b)->v.fn.is_type)
+            want = APY_CSTR(O(b)->v.fn.name);
+        else if (O(b)->kind == APY_STR_K)
+            want = APY_CSTR(b);
+        if (want) {
+            int64_t kind = apy_class_builtin_kind(a);
+            const char *have =
+                kind == APY_STR_K ? "str"
+                : kind == APY_LIST_K ? "list"
+                : kind == APY_TUPLE_K ? "tuple"
+                : kind == APY_DICT_K ? "dict"
+                : kind == APY_SET_K ? "set" : 0;
+            return apy_from_bool(have && strcmp(have, want) == 0);
+        }
+    }
     if (O(b)->kind != APY_TYPE_K)
         return apy_fail("TypeError",
                         "issubclass() arg 2 must be a class or tuple of "

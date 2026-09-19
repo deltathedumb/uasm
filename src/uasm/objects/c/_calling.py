@@ -382,6 +382,73 @@ APY_API apy_value apy_class_build(apy_value meta, apy_value name,
     return apy_class_build_kw(meta, name, bases, ns, 0);
 }
 
+/* An EMPTY value of a builtin kind: what `str.__new__(S)` puts inside. The
+   same five `apy_instance_new` fills a held slot with. */
+static apy_value apy_empty_of_kind(int kind) {
+    if (kind == APY_DICT_K) return apy_dict_new(4);
+    if (kind == APY_LIST_K) return apy_list_new(4);
+    if (kind == APY_SET_K) return apy_set_new(4);
+    if (kind == APY_TUPLE_K) return apy_tuple_new(1);
+    if (kind == APY_STR_K) return apy_lit("");
+    return apy_none();
+}
+
+/* `str.__new__(cls, content)` -- the builtin half of an instance, built
+   through the type it extends. This is how CPython's own `enum` makes a
+   mixin member: `member_type.__new__(enum_class, value)`.
+
+   AN IMPLICIT STATICMETHOD, so the first argument is the CLASS TO BUILD and
+   not a receiver of this type. The ordinary unbound-method check --
+   `apy_descr_applies` -- therefore does not apply to it, and did: `str.__new__
+   (S, "hi")` was `descriptor '__new__' for 'str' objects doesn't apply to a
+   'type' object`, about a class that is exactly what the call meant to name.
+
+   THE CONTENT IS TAKEN ONLY BY THE IMMUTABLE KINDS. `list.__new__(L, [1, 2])`
+   is an EMPTY list in CPython and `tuple.__new__(T, [1, 2])` is `(1, 2)`: a
+   mutable builtin fills in `__init__`, and an immutable one has nowhere else
+   to do it.
+
+   THE BUILTIN ITSELF ANSWERS A PLAIN ONE. `str.__new__(str, "ab")` is
+   `"ab"` -- there is no class to put it in, and CPython answers the bare
+   value. */
+APY_API apy_value apy_builtin_new(apy_value type_name, int64_t kind,
+                                  apy_value cls, apy_value content) {
+    const char *want = APY_CSTR(type_name);
+    const char *given = 0;
+    char buf[192];
+    apy_value made;
+    int fills = kind == APY_STR_K || kind == APY_TUPLE_K;
+    int has = content && O(content)->kind != APY_NONE_K;
+    if (O(cls)->kind == APY_FUNC_K && O(cls)->v.fn.is_type) {
+        given = APY_CSTR(O(cls)->v.fn.name);
+        if (strcmp(given, want) == 0)
+            return has ? apy_call_kind((int)kind, content)
+                       : apy_empty_of_kind((int)kind);
+    } else if (O(cls)->kind == APY_TYPE_K) {
+        given = APY_CSTR(O(cls)->v.t.name);
+        if (apy_class_builtin_kind(cls) == kind) {
+            made = apy_instance_new(cls);
+            if (!made) return 0;
+            if (fills && has && O(made)->kind == APY_INST_K
+                    && O(made)->v.o.held) {
+                apy_value filled = apy_call_kind((int)kind, content);
+                if (!filled) return 0;
+                O(made)->v.o.held = filled;
+            }
+            return made;
+        }
+    } else {
+        /* NOT A TYPE AT ALL, which CPython words differently from a type
+           that is simply the wrong one -- and writes as a literal `X`. */
+        snprintf(buf, sizeof buf, "%s.__new__(X): X is not a type object (%s)",
+                 want, apy_kind_name(cls));
+        return apy_fail("TypeError", buf);
+    }
+    snprintf(buf, sizeof buf, "%s.__new__(%s): %s is not a subtype of %s",
+             want, given, given, want);
+    return apy_fail("TypeError", buf);
+}
+
 /* `object` AS A CLASS OBJECT -- what `C.__base__` answers for a class with
    no written base, and what `C.__bases__` holds. Its dict carries the same
    defaults `super()` falls back to.
@@ -1618,26 +1685,38 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
         /* `object.__new__(cls)`. The CLASS is the argument, not an instance:
            it is an implicit staticmethod, which is why a bound one still
            receives the class in `a[0]`. */
-        apy_value made;
+        char buf[160];
+        const char *who;
         if (n < 1 || O(a[0])->kind != APY_TYPE_K)
             return apy_fail("TypeError", "object.__new__(): not a type");
-        made = apy_instance_new(a[0]);
-        if (!made) return 0;
-        /* A CONTENT ARGUMENT FILLS THE BUILTIN HALF, which is the only way
-           to build an immutable one: `class P(tuple)` has to be filled here
-           or never, and an enum member of a `class Colour(str, Enum)` is its
-           VALUE rather than an empty string. The same fill
-           `super().__new__(cls, x)` already does -- see
-           `APY_NAT_BUILTIN_NEW` -- and CPython reaches it as
-           `str.__new__(cls, value)`, a spelling this runtime has no type
-           object to write. */
-        if (n > 1 && O(a[1])->kind != APY_NONE_K
-                && O(made)->kind == APY_INST_K && O(made)->v.o.held) {
-            apy_value filled = apy_call_kind(O(O(made)->v.o.held)->kind, a[1]);
-            if (!filled) return 0;
-            O(made)->v.o.held = filled;
+        who = APY_CSTR(O(a[0])->v.t.name);
+        /* A CLASS EXTENDING A BUILTIN IS REFUSED, which is CPython's rule
+           and not an arbitrary one: `object.__new__` would build the shell
+           and leave the builtin half empty, where `str.__new__(S, value)`
+           fills it. CPython walks up to the first base that is not a Python
+           class and refuses when its `__new__` is not object's -- which for
+           `class S(str)` is `str`'s. */
+        if (apy_class_builtin_kind(a[0])) {
+            snprintf(buf, sizeof buf,
+                     "object.__new__(%s) is not safe, use %s.__new__()",
+                     who, who);
+            return apy_fail("TypeError", buf);
         }
-        return made;
+        /* AN ARGUMENT BEYOND THE CLASS IS FOR `__init__` TO TAKE, and only
+           when there is one to take it. CPython draws the line twice: a
+           class that wrote `__new__` gets the argument count complained
+           about, and a class with neither is told it takes none. */
+        if (n > 1 && O(a[1])->kind != APY_NONE_K) {
+            if (apy_class_find(a[0], apy_name("__new__")))
+                return apy_fail("TypeError",
+                                "object.__new__() takes exactly one argument "
+                                "(the type to instantiate)");
+            if (!apy_class_find(a[0], apy_name("__init__"))) {
+                snprintf(buf, sizeof buf, "%s() takes no arguments", who);
+                return apy_fail("TypeError", buf);
+            }
+        }
+        return apy_instance_new(a[0]);
     }
     case APY_NAT_REPR:
     case APY_NAT_STR:      return n < 1 ? 0 : apy_default_repr(a[0]);

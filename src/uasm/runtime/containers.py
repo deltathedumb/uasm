@@ -2456,6 +2456,38 @@ def apy_is_subclass(a: ptr, b: ptr) -> ptr:
         return apy_raise_at(rodata(b"TypeError\0"),
                             rodata(b"issubclass() arg 1 must be a class\0"))
     if i64(load(i32, offset(b, 0))) != apy_type_kind():
+        # A BUILTIN AS THE SECOND ARGUMENT, with a class extending it as the
+        # first: `issubclass(S, str)` for a `class S(str)` is True in CPython
+        # and was the refusal below -- a builtin kind has no type cell, so
+        # the walk had nothing to compare against. The relation is the one
+        # `apy_class_builtin_kind` records, and the name is how it travels,
+        # exactly as it does for `isinstance`.
+        named: ptr = ptr(0)
+        if i64(load(i32, offset(b, 0))) == apy_func_kind():
+            if load(i32, offset(b, apy_fn_is_type_offset())):
+                named = ptr(load(u64, offset(
+                    ptr(load(u64, offset(b, apy_fn_name_offset()))),
+                    apy_str_ptr_offset())))
+        if i64(load(i32, offset(b, 0))) == apy_str_kind():
+            named = ptr(load(u64, offset(b, apy_str_ptr_offset())))
+        if named:
+            extends: i64 = apy_class_builtin_kind(a)
+            mine: ptr = rodata(b"\0")
+            if extends == apy_str_kind():
+                mine = rodata(b"str\0")
+            if extends == apy_list_kind():
+                mine = rodata(b"list\0")
+            if extends == apy_tuple_kind():
+                mine = rodata(b"tuple\0")
+            if extends == apy_dict_kind():
+                mine = rodata(b"dict\0")
+            if extends == apy_set_kind():
+                mine = rodata(b"set\0")
+            same: i64 = 0
+            if extends:
+                if apy_cstr_eq(mine, named):
+                    same = 1
+            return apy_from_bool(same)
         return apy_raise_at(
             rodata(b"TypeError\0"),
             rodata(b"issubclass() arg 2 must be a class or tuple of "

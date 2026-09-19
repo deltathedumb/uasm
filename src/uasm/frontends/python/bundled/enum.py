@@ -111,12 +111,21 @@ class EnumMeta(type):
                 by_name[key] = found
                 continue
             # THE VALUE GOES IN THE BUILTIN HALF, which is what makes a
-            # member of `class Colour(str, Enum)` a str: CPython builds one
-            # with `member_type.__new__(enum_class, value)`, and this is the
-            # spelling that reaches the same fill here. A class extending
-            # nothing ignores the argument, so there is one shape and not
-            # two.
-            member = object.__new__(cls, value)
+            # member of `class Colour(str, Enum)` a str -- and it is
+            # `member_type.__new__(enum_class, value)` that puts it there,
+            # which is what CPython's own enum writes. THE CLASS DECIDES
+            # AND NOT THE VALUE: `class Colour(Enum)` with `RED = "red"`
+            # extends nothing, and asking the value would hand a plain enum
+            # to `str.__new__` and be told it is not a subtype of str.
+            # `str` and `tuple` are the two mixins that take their content at
+            # construction; every other kind fills in `__init__`, and an enum
+            # extending nothing has no half to fill.
+            if issubclass(cls, str):
+                member = str.__new__(cls, value)
+            elif issubclass(cls, tuple):
+                member = tuple.__new__(cls, value)
+            else:
+                member = object.__new__(cls)
             member._name_ = key
             member._value_ = value
             setattr(cls, key, member)
