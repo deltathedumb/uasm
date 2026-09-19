@@ -48,3 +48,5 @@ def load_builtin() -> None:
     _load()
     from .baremetal import load_builtin as _load_bare
     _load_bare()
+    from .builtin import load_builtin as _load_own
+    _load_own()
