@@ -287,7 +287,7 @@ HOST_NAMES = (
 
 def host_functions(*, static: bool = False,
                    strptr: str = "const char *",
-                   ptr: str = "void *") -> str:
+                   ptr: str = "void *", floor: bool = True) -> str:
     """`HOST_FUNCTIONS` with its substitutions made.
 
     `py_repr_double` is always `static`: it is an implementation detail of the
@@ -295,6 +295,16 @@ def host_functions(*, static: bool = False,
     the linked-runtime build would export a symbol no frontend asked for. The
     same goes for the three helpers inside `POW_INT_C`, which is why they are
     written `static` there rather than marked.
+
+    `floor=False` LEAVES THE THREE FLOOR FUNCTIONS UNDEFINED, for the one
+    consumer that must not have them: this runtime compiled by uasm's OWN C
+    frontend. That frontend's `__uasm_base.h` already declares them --
+    `extern long plat_write(long, const void *, long)` -- and its whole
+    standard library is written against that declaration, so defining them
+    here as `int64_t plat_write(int64_t, void *, int64_t)` is a conflicting
+    type for the same symbol and the compile stops. The definitions come from
+    `link/freestanding.py` instead, as syscalls, which is what makes the
+    result need no libc.
     """
     text = HOST_FUNCTIONS.replace("@POW@", POW_INT_C).replace("@STRPTR@", strptr)
     text = text.replace("@STATIC@void py_repr_double",
@@ -302,7 +312,8 @@ def host_functions(*, static: bool = False,
     # THE FLOOR FIRST. Nothing above it may depend on it yet, but everything
     # eventually will -- stage 6 replaces the writers with subset code that
     # calls `plat_write` -- and C wants a definition in scope before a use.
-    text = _floor_c(static=static, ptr=ptr) + "\n" + text
+    if floor:
+        text = _floor_c(static=static, ptr=ptr) + "\n" + text
     return text.replace("@STATIC@", "static " if static else "")
 
 
@@ -347,7 +358,8 @@ _ENTRY_TOKEN = "@ENTRY@"
 from ..backend.base import ENTRY_SYMBOL  # noqa: E402
 
 
-def runtime_c(*, entry: str = ENTRY_SYMBOL, module=None) -> str:
+def runtime_c(*, entry: str = ENTRY_SYMBOL, module=None,
+              floor: bool = True, main_shim: bool = True) -> str:
     """The complete linked runtime, ready to compile.
 
     Every consumer goes through this rather than substituting the placeholders
@@ -361,18 +373,29 @@ def runtime_c(*, entry: str = ENTRY_SYMBOL, module=None) -> str:
     """
     from .csource import objects_c
     from .ir import omitted_by, split_by
-    return (RUNTIME_C.replace("@HOST@", host_functions())
+    text = RUNTIME_C
+    if not main_shim:
+        # THE `main` SHIM IS NOT PART OF THE RUNTIME, and when this text is
+        # compiled by uasm's OWN C frontend it must not be there: that
+        # frontend renames C's `main` to the backend's entry symbol, which is
+        # the very name the program's own object defines. Two definitions of
+        # it is what the linker then reports, about a function neither file
+        # appears to have written.
+        text = text.replace(
+            "int main(void) { return (int)@ENTRY@(); }",
+            "/* The `main` shim is omitted: see `runtime_c(main_shim=False)`. */")
+    return (text.replace("@HOST@", host_functions(floor=floor))
             .replace("@OBJECTS@", objects_c(omit=omitted_by(module),
                                             split=split_by(module)))
             .replace(_ENTRY_TOKEN, entry))
 
 
 def write_runtime(directory: Path, *, entry: str = ENTRY_SYMBOL,
-                  module=None) -> Path:
+                  module=None, floor: bool = True) -> Path:
     """Write the runtime C file into `directory` and return its path."""
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "uasm_runtime.c"
-    path.write_text(runtime_c(entry=entry, module=module),
+    path.write_text(runtime_c(entry=entry, module=module, floor=floor),
                     encoding="utf-8")
     return path
 

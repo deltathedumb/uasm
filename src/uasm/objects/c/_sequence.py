@@ -194,7 +194,14 @@ APY_API apy_value apy_getattr(apy_value obj, apy_value name);
 APY_API apy_value apy_typing_form(apy_value name);
 static int64_t apy_str_chars(apy_value v);
 APY_API apy_value apy_object_default(apy_value want);
-static apy_value apy_kind_class(apy_value obj);
+/* `APY_API` AND NOT `static`, which it was until the ported runtime found
+   out. The DEFINITION is `APY_API` (`_calling.py`), and one translation unit
+   tolerates the mismatch -- the whole thing simply becomes internal. It stops
+   being tolerable the moment the definition is OMITTED because IR provides
+   it: the declaration then names an internal symbol nothing in the object
+   defines, and the linker reports a mangled name (`c0.apy_kind_class`) that
+   appears nowhere in the source. */
+APY_API apy_value apy_kind_class(apy_value obj);
 APY_API apy_value apy_dict_get_or(apy_value d, apy_value key,
                                   apy_value fallback);
 static void apy_union_arms(apy_value into, apy_value v);
@@ -354,7 +361,10 @@ static int apy_type_is_sub(apy_value of, apy_value cls);
 APY_API apy_value apy_chr(apy_value v);
 /* `next()` reports a generator's exhaustion with the value its `return`
    carried, and runs well above where generators are defined. */
-static apy_value apy_gen_stop(apy_value g);
+/* `APY_API` for the reason `apy_kind_class` gives above: the definition in
+   `_async.py` is one, and a `static` declaration of it breaks the build that
+   omits the definition. */
+APY_API apy_value apy_gen_stop(apy_value g);
 /* `del obj.attr` consults a descriptor, well above where the descriptor
    protocol itself is defined. */
 static int apy_is_data_descriptor(apy_value v);
