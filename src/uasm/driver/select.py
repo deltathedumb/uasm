@@ -132,8 +132,27 @@ def choose_linker(output: Path | None, named: str | None, registry,
     return picked if picked is not None else fallback
 
 
+def _target_backend(candidates: list[str], target: str | None) -> str | None:
+    """The candidate that emits for the named target's architecture.
+
+    None when nothing was named, when the name is not a target, or when the
+    architecture is one no candidate emits for -- every case where guessing
+    would be worse than falling through to the host.
+    """
+    if not target:
+        return None
+    from ..backend.families import _ARCH_OF
+    from .. import target as target_registry
+    try:
+        arch = target_registry.get(target).arch
+    except Exception:                                  # noqa: BLE001
+        return None
+    matching = [c for c in candidates if _ARCH_OF.get(c) == arch]
+    return matching[0] if len(matching) == 1 else None
+
+
 def choose_backend(output: Path | None, named: str | None, linker: str,
-                   backends, linkers) -> str:
+                   backends, linkers, target: str | None = None) -> str:
     """The backend, from the linker first and the output's spelling second.
 
     THE LINKER KNOWS BEST. It declares what it can take input from, in
@@ -154,6 +173,21 @@ def choose_backend(output: Path | None, named: str | None, linker: str,
             raise SelectionError(
                 f"the {linker} linker takes input from "
                 f"{', '.join(wanted)}, and none of them is registered")
+        if len(ready) > 1:
+            # THE TARGET DECIDES WHICH MACHINE, when there is more than one
+            # to decide between. The builtin linker takes input from both
+            # machine backends, so `--target aarch64-macos` with no `-bk`
+            # reached the x86-64 backend and was refused for declaring an
+            # ABI it does not implement -- a failure whose cause is two
+            # flags away from what it says.
+            #
+            # AND THE HOST DECIDES WHEN NOTHING ELSE DOES, because a build
+            # that names no target is a build for the machine it is running
+            # on. Only then does the order in `backends` break the tie.
+            picked = (_target_backend(ready, target)
+                      or _host_backend(ready))
+            if picked is not None:
+                return picked
         return ready[0]
     if output is not None:
         claimed = _claimants(output.suffix, backends, "artifacts")
@@ -227,7 +261,7 @@ def _host_backend(candidates: list[str]) -> str | None:
 
 def choose(source: Path, output: Path | None, *, frontend: str | None,
            backend: str | None, linker: str | None, emit: bool,
-           frontends, backends, linkers) -> Choice:
+           frontends, backends, linkers, target: str | None = None) -> Choice:
     """The three components one build runs through.
 
     WHAT `-o` MEANS DECIDES WHETHER THERE IS A LINKER AT ALL, and the four
@@ -273,7 +307,7 @@ def choose(source: Path, output: Path | None, *, frontend: str | None,
     # named it or the output's extension is one a linker claims.
     named = bool(linker) or bool(
         output is not None and _claimants(output.suffix, linkers, "artifacts"))
-    chosen = choose_backend(output, backend, names, backends, linkers)
+    chosen = choose_backend(output, backend, names, backends, linkers, target)
     # AND THE BACKEND GETS TO CORRECT THE LINKER, which is the same coupling
     # read the other way. `choose_backend` asks the LINKER what it takes
     # input from, so a linker nobody named implies a backend; when the user

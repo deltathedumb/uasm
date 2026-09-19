@@ -53,7 +53,7 @@ from ..backend.objfile.elf import (
     EM_AARCH64, EM_X86_64, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE,
     STB_GLOBAL, STB_LOCAL, STB_WEAK,
 )
-from . import pewrite
+from . import machowrite, pewrite
 from ..backend.objfile import coffread, elfread, machoread
 from ..backend.objfile.elfread import (
     ElfError, InReloc, InSection, Relocatable, SHN_ABS, SHN_COMMON,
@@ -188,7 +188,7 @@ class Reserved:
 def _lay_out(objects: list[Relocatable], base: int,
              reserved: list[Reserved] | None = None, *,
              headroom: int | None = None,
-             section_align: int = 1) -> tuple[
+             section_align: int = 1, page: int = PAGE) -> tuple[
         list[OutSection], dict[tuple[int, int], int], int]:
     """Place every allocatable input section and give it an address.
 
@@ -262,7 +262,7 @@ def _lay_out(objects: list[Relocatable], base: int,
             # read-only byte on the same page as a writable one is writable.
             # The ones after it follow on, because they are all in that
             # second segment.
-            cursor = _round_up(cursor, PAGE)
+            cursor = _round_up(cursor, page)
         writable_started = writable_started or bool(sec.flags & SHF_WRITE)
         cursor = _round_up(cursor, sec.align)
         sec.addr = base + cursor
@@ -710,13 +710,33 @@ class Image:
     iat: tuple[int, int] = (0, 0)
 
 
+#: Where each container's images are loaded, and what a page is in one.
+#:
+#: NOT ONE ANSWER, and neither number is arbitrary. 0x400000 is the
+#: traditional x86-64 ELF text base; a 64-bit Mach-O image starts at
+#: 0x100000000 because that is where `__PAGEZERO` ends. The page is 4 KiB
+#: everywhere except an Apple Silicon Mac, where the kernel maps 16 KiB and
+#: refuses a segment that is not aligned to it.
+_BASE_OF = {"elf": DEFAULT_BASE, "coff": DEFAULT_BASE,
+            "macho": machowrite.DEFAULT_BASE}
+
+
+def _page_of(fmt: str, machine: int) -> int:
+    if fmt == "macho":
+        return machowrite.PAGE_OF.get(machine, PAGE)
+    return PAGE
+
+
 def link(inputs: list[tuple[str, bytes]], *, entry: str = "_start",
-         base: int = DEFAULT_BASE) -> Image:
+         base: int | None = None) -> Image:
     """Link relocatable objects into a static executable image.
 
     `inputs` is (origin, bytes) so that an object held in memory -- which is
     what a backend hands the driver -- needs no temporary file to be linked,
     and one read from disk still reports its path when something is wrong.
+
+    `base` DEFAULTS TO THE CONTAINER'S, which is not known until the inputs
+    have been read -- so it is settled below rather than in the signature.
     """
     if not inputs:
         raise LinkFailed("nothing to link")
@@ -748,6 +768,9 @@ def link(inputs: list[tuple[str, bytes]], *, entry: str = "_start",
             f"no relocation support for {fmt} machine {machine:#x}",
             detail="; ".join(f"{f} {m:#x}" for f, m in sorted(_PATCH)))
 
+    if base is None:
+        base = _BASE_OF[fmt]
+    page = _page_of(fmt, machine)
     _IMAGE_BASE[0] = base
 
     # ── what the linker itself has to contribute ────────────────────────────
@@ -775,11 +798,18 @@ def link(inputs: list[tuple[str, bytes]], *, entry: str = "_start",
                                      SHF_ALLOC | SHF_WRITE))
 
     if fmt == "coff":
+        # EVERY SECTION ON ITS OWN PAGE, which is what a PE loader maps.
         sections, place, end = _lay_out(
-            objects, base, reserved,
-            headroom=pewrite.header_space(PAGE), section_align=PAGE)
+            objects, base, reserved, page=page,
+            headroom=pewrite.header_space(page), section_align=page)
+    elif fmt == "macho":
+        # SEGMENTS ARE WHAT A MACH-O LOADER MAPS, and the sections inside one
+        # are packed as they are in ELF -- so only the headroom differs.
+        sections, place, end = _lay_out(
+            objects, base, reserved, page=page,
+            headroom=machowrite.header_space(page))
     else:
-        sections, place, end = _lay_out(objects, base, reserved)
+        sections, place, end = _lay_out(objects, base, reserved, page=page)
     if not sections:
         raise LinkFailed("the inputs contain no loadable sections")
     globals_, per_object = _resolve(objects, place)
@@ -864,9 +894,22 @@ def link(inputs: list[tuple[str, bytes]], *, entry: str = "_start",
                  import_rva=import_rva, import_size=import_size, iat=iat)
 
 
-def executable(image: Image, *, base: int | None = None) -> bytes:
-    """The image, wrapped in the container its inputs came out of."""
+def executable(image: Image, *, base: int | None = None,
+               sign: bool = True) -> bytes:
+    """The image, wrapped in the container its inputs came out of.
+
+    `sign` APPLIES TO MACH-O AND NOTHING ELSE: an arm64 Mac will not run an
+    unsigned image at all, so the default is to sign, and the flag exists so
+    that a test can look at an unsigned one.
+    """
     where = image.base if base is None else base
+    if image.fmt == "macho":
+        try:
+            return machowrite.executable(
+                image, base=where, page=_page_of(image.fmt, image.machine),
+                sign=sign)
+        except machowrite.MachoWriteError as exc:
+            raise LinkFailed(str(exc)) from None
     if image.fmt == "coff":
         try:
             return pewrite.executable(image, base=where, page=PAGE,

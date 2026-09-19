@@ -95,7 +95,12 @@ def _select(args):
             emit=(getattr(args, "emit", False)
                   or getattr(args, "emit_asm", False)),
             frontends=frontend_registry, backends=backend_registry,
-            linkers=link_registry)
+            linkers=link_registry,
+            # WHAT WAS ASKED FOR, not what was resolved: the target is
+            # resolved FROM the backend two lines down, and the backend is
+            # what is being chosen here. A named target is the only thing
+            # that can say which machine a build is for before then.
+            target=named)
         backend = resolve_backend(choice.backend, bits, None)
         target = resolve_target(backend, bits, named, target_registry)
     except SelectionError as exc:

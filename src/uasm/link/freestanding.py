@@ -235,7 +235,7 @@ def _aarch64_object(entry: str) -> ElfObject:
     words.append(SVC0)
     # `cmp x0, #0` then `csel`-free clamp: b.ge over a `mov x0, #-1`.
     words.append(0xF100001F)                       # cmp x0, #0
-    words.append(0x540000AA)                       # b.ge +8 (two words on)
+    words.append(0x5400004A)                       # b.ge +8 (two words on)
     words.append(0x92800000)                       # movn x0, #0  -> -1
     words.append(RET)
     end("plat_write", at)
@@ -281,7 +281,7 @@ def _aarch64_object(entry: str) -> ElfObject:
     # THE ERROR RANGE IS THE LAST PAGE, as on x86-64. `cmn x0, #4095` sets the
     # flags that `cmp x0, #-4095` would, which is how a comparison against a
     # negative immediate is spelled when the field is unsigned.
-    words.append(0xB103FC1F)                       # cmn x0, #4095
+    words.append(0xB13FFC1F)                       # cmn x0, #4095
     words.append(0x54000043)                       # b.lo +8
     words.append(0xAA1F03E0)                       # mov x0, xzr
     words.append(RET)
@@ -454,11 +454,290 @@ def _windows_x86_64_object(entry: str):
     return obj
 
 
+# ── macOS ───────────────────────────────────────────────────────────────────
+
+#: Darwin syscall numbers, from `bsd/kern/syscalls.master`. THE SAME ON BOTH
+#: MACHINES, unlike Linux's: Darwin has one BSD table and both architectures
+#: use it.
+_DARWIN = {"write": 4, "exit": 1, "mmap": 197}
+
+#: THE CLASS GOES IN THE NUMBER ON INTEL AND NOWHERE ON APPLE SILICON. A
+#: Darwin syscall number is (class << 24) | number, and the BSD class is 2 --
+#: so `write` is 0x2000004 in `rax` on x86-64. On arm64 the number goes in
+#: `x16` as itself, and the trap is `svc #0x80`.
+SYSCALL_CLASS_UNIX = 2 << 24
+
+#: `mmap` arguments for an anonymous private mapping. NOT LINUX'S NUMBERS:
+#: `MAP_ANON` is 0x1000 on Darwin where it is 0x20 on Linux, and a floor that
+#: reused the Linux constant would ask for a file mapping of file -1.
+DARWIN_MAP_PRIVATE, DARWIN_MAP_ANON = 0x0002, 0x1000
+
+
+def _macho_symbols(obj, text: bytes, defined, needed, machine) -> None:
+    """The shared tail of both macOS floors: one section and its symbols.
+
+    A NAME NEEDS ITS LEADING UNDERSCORE on this platform -- the backend
+    applies it to everything it emits, so `uasm_main` is `_uasm_main` in the
+    object -- and the entry point is spelled `_start` here for the same
+    reason the other two floors spell it that way: it is the name the linker
+    is told to start at, and one name across three containers is worth more
+    than each platform's own.
+    """
+    from ..backend.objfile.macho import (
+        S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS, S_REGULAR,
+        Symbol,
+    )
+    del machine
+    obj.section(".text", text, align=16,
+                flags=S_REGULAR | S_ATTR_PURE_INSTRUCTIONS
+                | S_ATTR_SOME_INSTRUCTIONS)
+    for sym in defined:
+        obj.symbol(sym)
+    for name in needed:
+        obj.symbol(Symbol(name=name, section="", binding=1))
+
+
+def _macos_x86_64_object(entry: str):
+    """The floor and the entry point for macOS x86-64.
+
+    THE TRAP IS THE SAME INSTRUCTION AS LINUX'S and almost nothing else is.
+    The arguments go in the same six registers, which is why `plat_write`
+    below is three instructions; the NUMBER carries a class in its top byte,
+    the error is signalled by the CARRY FLAG rather than by a negative
+    return, and `mmap`'s flags are Darwin's.
+
+    NOTHING HERE HAS BEEN EXECUTED. There is no macOS on the machine this was
+    written on and no emulator; the encodings are checked by disassembling
+    the linked image and the structures by reading them back with
+    `llvm-objdump --macho`. That is a weaker claim than the Linux floor's,
+    which `tests/uasm/integration/test_builtin_linker.py` runs, and it is the
+    honest one.
+    """
+    from ..backend.objfile.macho import (
+        CPU_SUBTYPE_X86_64_ALL, CPU_TYPE_X86_64, MachoObject, Relocation,
+        Symbol,
+    )
+
+    X86_64_RELOC_BRANCH = 2
+    sc = {k: SYSCALL_CLASS_UNIX | v for k, v in _DARWIN.items()}
+    text = bytearray()
+    defined: list = []
+    relocs: list = []
+
+    def end(name: str, at: int) -> None:
+        # THE PLATFORM'S UNDERSCORE. Every C name on macOS wears one, so the
+        # backend emits `_plat_write` and the floor has to DEFINE
+        # `_plat_write` -- a floor spelling it without would link against
+        # nothing and leave every call undefined. `_start` already begins
+        # with one and keeps its single underscore: it is not a C name, it
+        # is the string the linker is told to start at, and it is the same
+        # string in all three containers.
+        defined.append(Symbol(name=name if name == "_start" else "_" + name,
+                              section=".text", value=at,
+                              size=len(text) - at, binding=1, kind=2))
+
+    # ── _start ──────────────────────────────────────────────────────────────
+    at = len(text)
+    text += b"\x48\x31\xED"                # xor %rbp,%rbp  (outermost frame)
+    text += b"\x48\x83\xE4\xF0"            # and $-16,%rsp
+    text += b"\xE8\x00\x00\x00\x00"        # call _uasm_main
+    relocs.append(Relocation(len(text) - 4, "_" + entry, X86_64_RELOC_BRANCH,
+                             addend=0, pcrel=True, length=2))
+    text += b"\x48\x89\xC7"                # mov %rax,%rdi  (exit status)
+    text += b"\xB8" + struct.pack("<I", sc["exit"])
+    text += b"\x0F\x05"                     # syscall
+    text += b"\x0F\x0B"                     # ud2 -- exit does not return
+    end("_start", at)
+
+    # ── plat_write(fd, buf, n) -> i64 ───────────────────────────────────────
+    #
+    # THE ARGUMENTS ARE ALREADY WHERE THE SYSCALL WANTS THEM, as on Linux.
+    # What differs is the failure: Darwin sets the CARRY FLAG and puts the
+    # errno in rax, where Linux returns a negative number -- so a test of the
+    # sign would read `EBADF` as nine bytes written.
+    at = len(text)
+    text += b"\xB8" + struct.pack("<I", sc["write"])
+    text += b"\x0F\x05"                     # syscall
+    text += b"\x73\x07"                     # jnc +7
+    text += b"\x48\xC7\xC0\xFF\xFF\xFF\xFF"   # mov $-1,%rax
+    text += b"\xC3"                          # ret
+    end("plat_write", at)
+
+    # ── plat_exit(code) ─────────────────────────────────────────────────────
+    at = len(text)
+    text += b"\xB8" + struct.pack("<I", sc["exit"])
+    text += b"\x0F\x05"                     # syscall
+    text += b"\x0F\x0B"                     # ud2
+    end("plat_exit", at)
+
+    # ── putchar(c) -> int ───────────────────────────────────────────────────
+    #
+    # SEE THE LINUX FLOOR for why a platform floor defines this at all: the
+    # Python frontend emits a call to it, and uasm's own `<stdio.h>` declares
+    # it `static`, so nothing else in a freestanding link exports one.
+    at = len(text)
+    text += b"\x48\x83\xEC\x10"            # sub $16,%rsp
+    text += b"\x40\x88\x3C\x24"            # mov %dil,(%rsp)
+    text += b"\xB8" + struct.pack("<I", sc["write"])
+    text += b"\xBF\x01\x00\x00\x00"        # mov $1,%edi
+    text += b"\x48\x89\xE6"                # mov %rsp,%rsi
+    text += b"\xBA\x01\x00\x00\x00"        # mov $1,%edx
+    text += b"\x0F\x05"                     # syscall
+    text += b"\x0F\xB6\x04\x24"            # movzbl (%rsp),%eax
+    text += b"\x48\x83\xC4\x10"            # add $16,%rsp
+    text += b"\xC3"                          # ret
+    end("putchar", at)
+
+    # ── plat_heap(n) -> ptr ─────────────────────────────────────────────────
+    at = len(text)
+    text += b"\x48\x85\xFF"                # test %rdi,%rdi
+    text += b"\x7F\x05"                     # jg +5
+    text += b"\x48\x31\xC0"                # xor %rax,%rax
+    text += b"\xC3"                          # ret
+    text += b"\x48\x89\xFE"                # mov %rdi,%rsi  (len)
+    text += b"\x48\x31\xFF"                # xor %rdi,%rdi  (addr)
+    text += b"\xBA" + struct.pack("<I", PROT_READ | PROT_WRITE)
+    text += b"\x41\xBA" + struct.pack("<I", DARWIN_MAP_PRIVATE
+                                      | DARWIN_MAP_ANON)
+    text += b"\x49\xC7\xC0\xFF\xFF\xFF\xFF"   # mov $-1,%r8   (fd)
+    text += b"\x4D\x31\xC9"                # xor %r9,%r9   (offset)
+    text += b"\xB8" + struct.pack("<I", sc["mmap"])
+    text += b"\x0F\x05"                     # syscall
+    text += b"\x73\x03"                     # jnc +3
+    text += b"\x48\x31\xC0"                # xor %rax,%rax
+    text += b"\xC3"                          # ret
+    end("plat_heap", at)
+
+    obj = MachoObject(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL)
+    _macho_symbols(obj, bytes(text), defined, ("_" + entry,), CPU_TYPE_X86_64)
+    for rel in relocs:
+        obj.relocate(".text", rel)
+    return obj
+
+
+def _macos_aarch64_object(entry: str):
+    """The floor and the entry point for macOS on Apple Silicon.
+
+    THREE THINGS DIFFER FROM LINUX AARCH64 and all three are the platform's,
+    not the machine's: the syscall number goes in `x16` rather than `x8`, the
+    trap is `svc #0x80` rather than `svc #0`, and a failure is the CARRY FLAG
+    rather than a negative return. The last is the one that fails quietly --
+    a floor that tested the sign would read `EBADF` as nine bytes written.
+
+    NOTHING HERE HAS BEEN EXECUTED. See the x86-64 twin: the encodings are
+    checked by disassembling the linked image, which found two real bugs in
+    the LINUX AArch64 floor above, and that is the strongest check available
+    without a Mac.
+    """
+    from ..backend.objfile.macho import (
+        CPU_SUBTYPE_ARM64_ALL, CPU_TYPE_ARM64, MachoObject, Relocation,
+        Symbol,
+    )
+
+    ARM64_RELOC_BRANCH26 = 2
+    words: list[int] = []
+    defined: list = []
+    relocs: list = []
+
+    def movz(rd: int, imm: int) -> int:
+        """`mov xD, #imm` for a 16-bit immediate -- MOVZ, shift 0."""
+        if not 0 <= imm <= 0xFFFF:
+            raise ValueError(f"{imm} does not fit one MOVZ")
+        return 0xD2800000 | ((imm & 0xFFFF) << 5) | rd
+
+    def here() -> int:
+        return len(words) * 4
+
+    def end(name: str, at: int) -> None:
+        # THE PLATFORM'S UNDERSCORE -- see the x86-64 twin.
+        defined.append(Symbol(name=name if name == "_start" else "_" + name,
+                              section=".text", value=at,
+                              size=here() - at, binding=1, kind=2))
+
+    SVC80 = 0xD4001001         # svc #0x80  -- Darwin's, not svc #0
+    RET = 0xD65F03C0
+    BRK0 = 0xD4200000
+    #: `b.cc` two instructions on: the Darwin success path, since a syscall
+    #: that failed sets the carry flag.
+    BCC_TWO = 0x54000043
+    NUM = 16                   # x16 holds the number
+
+    # ── _start ──────────────────────────────────────────────────────────────
+    at = here()
+    relocs.append(Relocation(here(), "_" + entry, ARM64_RELOC_BRANCH26,
+                             addend=0, pcrel=True, length=2))
+    words.append(0x94000000)                       # bl _uasm_main
+    words.append(0xAA0003E0)                       # mov x0, x0  (status)
+    words.append(movz(NUM, _DARWIN["exit"]))
+    words.append(SVC80)
+    words.append(BRK0)                             # exit does not return
+    end("_start", at)
+
+    # ── plat_write(fd, buf, n) -> i64 ───────────────────────────────────────
+    at = here()
+    words.append(movz(NUM, _DARWIN["write"]))
+    words.append(SVC80)
+    words.append(BCC_TWO)                          # carry clear: it worked
+    words.append(0x92800000)                       # movn x0, #0  -> -1
+    words.append(RET)
+    end("plat_write", at)
+
+    # ── plat_exit(code) ─────────────────────────────────────────────────────
+    at = here()
+    words.append(movz(NUM, _DARWIN["exit"]))
+    words.append(SVC80)
+    words.append(BRK0)
+    end("plat_exit", at)
+
+    # ── putchar(c) -> int ───────────────────────────────────────────────────
+    at = here()
+    words.append(0xD10043FF)                       # sub sp, sp, #16
+    words.append(0x390003E0)                       # strb w0, [sp]
+    words.append(0xAA0003E9)                       # mov x9, x0   (keep it)
+    words.append(0xD2800020)                       # mov x0, #1   (fd)
+    words.append(0x910003E1)                       # mov x1, sp   (buf)
+    words.append(0xD2800022)                       # mov x2, #1   (len)
+    words.append(movz(NUM, _DARWIN["write"]))
+    words.append(SVC80)
+    words.append(0x12001D20)                       # and w0, w9, #0xff
+    words.append(0x910043FF)                       # add sp, sp, #16
+    words.append(RET)
+    end("putchar", at)
+
+    # ── plat_heap(n) -> ptr ─────────────────────────────────────────────────
+    at = here()
+    words.append(0xF100001F)                       # cmp x0, #0
+    words.append(0x5400006C)                       # b.gt +12 (three words on)
+    words.append(0xAA1F03E0)                       # mov x0, xzr
+    words.append(RET)
+    words.append(0xAA0003E1)                       # mov x1, x0   (length)
+    words.append(0xAA1F03E0)                       # mov x0, xzr  (addr)
+    words.append(movz(2, PROT_READ | PROT_WRITE))
+    words.append(movz(3, DARWIN_MAP_PRIVATE | DARWIN_MAP_ANON))
+    words.append(0x92800004)                       # movn x4, #0  -> -1 (fd)
+    words.append(0xAA1F03E5)                       # mov x5, xzr  (offset)
+    words.append(movz(NUM, _DARWIN["mmap"]))
+    words.append(SVC80)
+    words.append(BCC_TWO)                          # carry clear: it worked
+    words.append(0xAA1F03E0)                       # mov x0, xzr
+    words.append(RET)
+    end("plat_heap", at)
+
+    text = b"".join(struct.pack("<I", w) for w in words)
+    obj = MachoObject(CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL)
+    _macho_symbols(obj, text, defined, ("_" + entry,), CPU_TYPE_ARM64)
+    for rel in relocs:
+        obj.relocate(".text", rel)
+    return obj
+
+
 #: Which builder serves which (container, machine).
 _BUILDERS = {
     ("elf", EM_X86_64): _x86_64_object,
     ("elf", EM_AARCH64): _aarch64_object,
     ("coff", 0x8664): _windows_x86_64_object,
+    ("macho", 0x01000007): _macos_x86_64_object,     # CPU_TYPE_X86_64
+    ("macho", 0x0100000C): _macos_aarch64_object,    # CPU_TYPE_ARM64
 }
 
 #: The names this object defines.
@@ -469,6 +748,21 @@ _BUILDERS = {
 #: plus the entry point the C runtime start files would have supplied, plus
 #: the one libc function the Python frontend emits a call to.
 PROVIDES = ("_start", "plat_write", "plat_exit", "plat_heap", "putchar")
+
+
+def provides(fmt: str = "elf") -> tuple[str, ...]:
+    """The same names, spelled the way `fmt`'s platform spells them.
+
+    MACH-O PUTS AN UNDERSCORE IN FRONT OF EVERY C NAME, which is the
+    platform's ABI and not this file's choice -- so the floor defines
+    `_plat_write` there and `plat_write` everywhere else, and a caller asking
+    "does anything here already define the floor" has to ask in the right
+    spelling. `_start` is not a C name and keeps its one underscore.
+    """
+    if fmt != "macho":
+        return PROVIDES
+    return tuple(name if name == "_start" else "_" + name
+                 for name in PROVIDES)
 
 
 def floor_object(machine: int, *, entry: str = "uasm_main",
@@ -483,4 +777,4 @@ def floor_object(machine: int, *, entry: str = "uasm_main",
     return build(entry).to_bytes()
 
 
-__all__ = ["PROVIDES", "floor_object"]
+__all__ = ["PROVIDES", "floor_object", "provides"]

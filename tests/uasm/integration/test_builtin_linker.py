@@ -16,14 +16,17 @@ WHY THE PROGRAMS ARE THE ONES THEY ARE, smallest first:
     compiled by uasm's own C frontend, linked, and run. It fails if any of
     the four pieces is wrong.
 
-AND THEN THERE IS WINDOWS, which is not run, because there is no Windows on
-the machine this was written on and no emulator either. `TestWindows` builds
-real programs and takes the image apart again -- the headers, the section
-table and the import directory -- with its own struct walk rather than with
-the writer that produced them, and it checks the relocation ARITHMETIC by
-reading the displacement out of a `call` and adding it up. That is a weaker
-claim than "it printed hello", and saying which tests make which claim is
-the point of writing this down.
+AND THEN THERE ARE WINDOWS AND MACOS, which are not run, because there is
+neither on the machine this was written on and no emulator either.
+`TestWindows` and `TestMacOS` build real programs and take the image apart
+again -- the headers, the segment and section tables, the import directory,
+the code signature -- with their own struct walk rather than with the writer
+that produced them. Where a claim can still be made arithmetically it is:
+Windows checks a relocation by reading the displacement out of a `call` and
+adding it up, and macOS re-hashes every page of the file and compares it
+against the signature that claims to cover it. That is a weaker claim than
+"it printed hello", and saying which tests make which claim is the point of
+writing this down.
 
 THESE TESTS ARE SLOW THE FIRST TIME -- the object runtime is 22k lines of C
 and takes about twelve seconds to compile -- and fast afterwards, because
@@ -515,3 +518,221 @@ class TestItRefusesWhatItCannotDo:
             assert "different object formats" in exc.message, exc.message
         else:
             harness.fail("two containers in one link should be refused")
+
+
+# ── macOS ───────────────────────────────────────────────────────────────────
+#
+# NOT RUN EITHER, and the same rule applies: every structure is walked by
+# hand, and the one thing that CAN be checked arithmetically -- that the
+# signature's hashes are the hashes of the bytes it says it covers -- is.
+
+def _macho(blob: bytes) -> dict:
+    """A linked Mach-O, taken apart by hand.
+
+    THE LOAD COMMANDS ARE A LINKED LIST OF SIZES, so this walks them the way
+    the kernel does rather than trusting a table of offsets.
+    """
+    import struct
+    magic, cputype, _sub, filetype, ncmds, _size, flags, _pad = \
+        struct.unpack_from("<IiiIIIII", blob, 0)
+    assert magic == 0xFEEDFACF, hex(magic)
+    out = {"cputype": cputype, "filetype": filetype, "flags": flags,
+           "segments": [], "entry": None, "signature": None}
+    at = 32
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from("<II", blob, at)
+        if cmd == 0x19:                                  # LC_SEGMENT_64
+            (_, _, name, vmaddr, vmsize, fileoff, filesize, maxprot,
+             initprot, nsects, _f) = struct.unpack_from("<II16sQQQQiiII",
+                                                        blob, at)
+            sections = []
+            where = at + 72
+            for _i in range(nsects):
+                sname, sseg, addr, ssize, offset, align = struct.unpack_from(
+                    "<16s16sQQII", blob, where)
+                sflags, = struct.unpack_from("<I", blob, where + 64)
+                sections.append({"name": sname.rstrip(b"\0").decode(),
+                                 "segment": sseg.rstrip(b"\0").decode(),
+                                 "addr": addr, "size": ssize,
+                                 "offset": offset, "align": 1 << align,
+                                 "flags": sflags})
+                where += 80
+            out["segments"].append(
+                {"name": name.rstrip(b"\0").decode(), "vmaddr": vmaddr,
+                 "vmsize": vmsize, "fileoff": fileoff, "filesize": filesize,
+                 "maxprot": maxprot, "initprot": initprot,
+                 "sections": sections})
+        elif cmd == 0x5:                                 # LC_UNIXTHREAD
+            _, _, flavour, count = struct.unpack_from("<IIII", blob, at)
+            state = at + 16
+            # x86_THREAD_STATE64 is flavour 4 with rip seventeenth;
+            # ARM_THREAD_STATE64 is flavour 6 with pc thirty-third.
+            pc_at = {4: 16 * 8, 6: 32 * 8}[flavour]
+            out["entry"] = struct.unpack_from("<Q", blob, state + pc_at)[0]
+            out["thread"] = (flavour, count)
+        elif cmd == 0x1D:                                # LC_CODE_SIGNATURE
+            _, _, off, length = struct.unpack_from("<IIII", blob, at)
+            out["signature"] = (off, length)
+        at += size
+    return out
+
+
+def _code_directory(blob: bytes, where: tuple[int, int]) -> dict:
+    """The `CodeDirectory` inside the signature. EVERY FIELD BIG-ENDIAN."""
+    import struct
+    off, length = where
+    sb = blob[off:off + length]
+    magic, total, count = struct.unpack_from(">III", sb, 0)
+    assert magic == 0xFADE0CC0, hex(magic)
+    assert total == length, (total, length)
+    assert count >= 1, count
+    slot, at = struct.unpack_from(">II", sb, 12)
+    cd = sb[at:]
+    (m, cd_len, version, flags, hash_at, ident_at, nspecial, nslots,
+     climit) = struct.unpack_from(">IIIIIIIII", cd, 0)
+    hsize, htype, platform, pshift = struct.unpack_from(">BBBB", cd, 36)
+    exec_base, exec_limit, exec_flags = struct.unpack_from(">QQQ", cd, 64)
+    return {"slot": slot, "magic": m, "version": version, "flags": flags,
+            "hash_at": hash_at, "nspecial": nspecial, "nslots": nslots,
+            "code_limit": climit, "hash_size": hsize, "hash_type": htype,
+            "platform": platform, "page_shift": pshift,
+            "identifier": cd[ident_at:cd.index(b"\0", ident_at)].decode(),
+            "exec": (exec_base, exec_limit, exec_flags),
+            "hashes": [cd[hash_at + hsize * i: hash_at + hsize * (i + 1)]
+                       for i in range(nslots)]}
+
+
+class TestMacOS:
+    """A Mach-O, linked with no toolchain, taken apart again. NOT RUN."""
+
+    def _build(self, tmp_path: Path, source: str,
+               target: str = "x86_64-macos") -> tuple[bytes, dict]:
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        path = _write(tmp_path, source)
+        out = tmp_path / "prog"
+        got = _cli("build", str(path), "--target", target,
+                   "--link", "-ln", "builtin", "-o", str(out),
+                   "--workdir", str(tmp_path / ".uasm"))
+        assert got.returncode == 0, got.stderr[-3000:]
+        blob = out.read_bytes()
+        return blob, _macho(blob)
+
+    def test_the_floor_program_links_into_an_executable(self, tmp_path):
+        blob, image = self._build(tmp_path, FLOOR_PROGRAM)
+        assert image["cputype"] == 0x01000007, "CPU_TYPE_X86_64"
+        assert image["filetype"] == 2, "MH_EXECUTE"
+        assert image["flags"] & 0x1, "MH_NOUNDEFS"
+        # NOT MH_PIE (0x200000): this image carries no relocation
+        # information, so it cannot be moved and must not say it can.
+        assert not image["flags"] & 0x200000, "MH_PIE would be a lie here"
+
+    def test_it_starts_with_pagezero_then_text_at_four_gigabytes(self,
+                                                                 tmp_path):
+        blob, image = self._build(tmp_path, FLOOR_PROGRAM)
+        names = [s["name"] for s in image["segments"]]
+        assert names[0] == "__PAGEZERO", names
+        assert names[1] == "__TEXT", names
+        zero = image["segments"][0]
+        assert (zero["vmaddr"], zero["vmsize"]) == (0, 0x100000000)
+        assert zero["initprot"] == 0, "nothing may touch the first 4 GiB"
+        text = image["segments"][1]
+        assert text["vmaddr"] == 0x100000000, hex(text["vmaddr"])
+        # `__TEXT` REACHES BACK TO FILE OFFSET ZERO, because the Mach header
+        # and the load commands are inside it.
+        assert text["fileoff"] == 0
+        assert text["initprot"] == 5, "r-x"
+
+    def test_every_segment_is_page_aligned(self, tmp_path):
+        """4 KiB on Intel and 16 KiB on Apple Silicon, which the kernel
+        enforces for the machine it is running."""
+        for target, page in (("x86_64-macos", 0x1000),
+                             ("aarch64-macos", 0x4000)):
+            blob, image = self._build(tmp_path / target, FLOOR_PROGRAM,
+                                      target)
+            for seg in image["segments"]:
+                assert seg["vmaddr"] % page == 0, (target, seg["name"])
+                assert seg["fileoff"] % page == 0, (target, seg["name"])
+
+    def test_the_entry_is_a_register_state_and_not_an_offset(self, tmp_path):
+        """`LC_UNIXTHREAD` and not `LC_MAIN`.
+
+        XNU'S `load_main` SAYS IN SO MANY WORDS that the kernel does not use
+        `LC_MAIN`'s entry offset -- dyld does. A static image has no dyld, so
+        the entry has to arrive as a whole register state with the program
+        counter in it, which is what this checks.
+        """
+        for target, flavour, count in (("x86_64-macos", 4, 42),
+                                       ("aarch64-macos", 6, 68)):
+            blob, image = self._build(tmp_path / target, FLOOR_PROGRAM,
+                                      target)
+            assert image["thread"] == (flavour, count), (target,
+                                                         image["thread"])
+            text = next(s for s in image["segments"] if s["name"] == "__TEXT")
+            code = next(s for s in text["sections"] if s["name"] == "__text")
+            assert image["entry"] == code["addr"], (target, image["entry"])
+
+    def test_the_signature_hashes_the_file_it_says_it_does(self, tmp_path):
+        """The one claim here that is not structural.
+
+        RE-HASHED FROM THE FILE. An ad-hoc signature is nothing but SHA-256
+        over every 4 KiB page up to where the signature begins, so a wrong
+        `codeLimit`, a wrong page size or a hash of the wrong bytes all
+        show up as a mismatch -- and an arm64 Mac would refuse the image
+        for any of them.
+        """
+        import hashlib
+        blob, image = self._build(tmp_path, FLOOR_PROGRAM)
+        assert image["signature"] is not None, "an unsigned image"
+        off, length = image["signature"]
+        assert off + length == len(blob), "the signature must be last"
+        cd = _code_directory(blob, image["signature"])
+        assert cd["magic"] == 0xFADE0C02
+        assert cd["flags"] & 0x2, "CS_ADHOC"
+        assert cd["hash_type"] == 2 and cd["hash_size"] == 32, "SHA-256"
+        assert cd["page_shift"] == 12, "the hash page is 4 KiB on both"
+        assert cd["code_limit"] == off, (cd["code_limit"], off)
+        assert cd["nslots"] == -(-off // 4096), cd["nslots"]
+        for i, want in enumerate(cd["hashes"]):
+            got = hashlib.sha256(blob[i * 4096:(i + 1) * 4096]).digest()
+            assert want == got, f"page {i} is not the page it was signed as"
+
+    def test_the_signature_describes_the_executable_segment(self, tmp_path):
+        """`execSegBase`/`execSegLimit`, which an arm64 kernel reads."""
+        blob, image = self._build(tmp_path, FLOOR_PROGRAM)
+        cd = _code_directory(blob, image["signature"])
+        text = next(s for s in image["segments"] if s["name"] == "__TEXT")
+        base, limit, flags = cd["exec"]
+        assert base == text["fileoff"], (base, text["fileoff"])
+        assert limit == text["filesize"], (limit, text["filesize"])
+        assert flags & 0x1, "CS_EXECSEG_MAINBINARY"
+
+    def test_a_whole_python_program_links(self, tmp_path):
+        """`print("hello")`, object runtime and all, into a Mach-O."""
+        blob, image = self._build(tmp_path, 'print("hello")\n')
+        placed = {(s["segment"], s["name"])
+                  for seg in image["segments"] for s in seg["sections"]}
+        assert ("__TEXT", "__text") in placed, placed
+        assert ("__DATA", "__data") in placed, placed
+        # A `__bss` occupies memory and no file, which is the Mach-O
+        # `S_ZEROFILL` section type and a zero file offset.
+        bss = [s for seg in image["segments"] for s in seg["sections"]
+               if s["name"] == "__bss"]
+        assert bss and bss[0]["flags"] & 0xFF == 0x1, bss
+        assert bss[0]["offset"] == 0, "a zerofill section has no file offset"
+
+    def test_the_underscore_is_the_platforms_and_not_forgotten(self,
+                                                               tmp_path):
+        """Every C name on macOS wears a leading underscore.
+
+        THE FLOOR HAS TO MATCH IT. A floor defining `plat_write` where the
+        backend emits a call to `_plat_write` would link against nothing --
+        and the runtime survey has to strip it back off, or every runtime
+        symbol is compiled a second time and defined twice.
+        """
+        from uasm.link.freestanding import floor_object, provides
+        from uasm.backend.objfile import machoread
+
+        got = machoread.read(floor_object(0x01000007, fmt="macho"), "<floor>")
+        defined = {s.name for s in got.symbols if not s.is_undefined}
+        assert defined == set(provides("macho")), defined
+        assert "_plat_write" in defined and "plat_write" not in defined

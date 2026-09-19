@@ -10,13 +10,14 @@ bytes back, so it can be tested by handing it hand-built objects and running
 the result, with no `Target`, no workdir and no options. Everything that knows
 what a `LinkRequest` is lives here.
 
-WHAT IT CAN AND CANNOT LINK. ELF64 and PE/COFF relocatables, for x86-64 and
-AArch64, into a STATIC executable with no libc and no dynamic loader. That is
-exactly what a program built on the platform floor needs -- `plat_write`,
-`plat_exit` and `plat_heap` are three syscalls on Linux and three calls into
-`kernel32.dll` on Windows -- and it is not enough for a program that calls
-`printf`. A missing symbol is reported by name, which is the honest failure:
-the alternative is finding libc and becoming `cc` with extra steps.
+WHAT IT CAN AND CANNOT LINK. ELF64, PE/COFF and Mach-O relocatables, for
+x86-64 and AArch64, into a STATIC executable with no libc and no dynamic
+loader. That is exactly what a program built on the platform floor needs --
+`plat_write`, `plat_exit` and `plat_heap` are three syscalls on Linux and on
+macOS, and three calls into `kernel32.dll` on Windows -- and it is not enough
+for a program that calls `printf`. A missing symbol is reported by name,
+which is the honest failure: the alternative is finding libc and becoming
+`cc` with extra steps.
 
 THE CONTAINER IS READ OFF THE OBJECTS, not taken from the target. `uasm link
 a.obj` says nothing about Windows and the object says everything; a target
@@ -30,15 +31,14 @@ from ..backend.objfile import EM_AARCH64, EM_X86_64
 from ..backend.objfile.coffread import (
     IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
 )
+from ..backend.objfile.macho import CPU_TYPE_ARM64, CPU_TYPE_X86_64
 from ..target import Target
 from .base import LinkError, LinkRequest, Toolchain
-from .freestanding import PROVIDES, floor_object
+from .freestanding import floor_object, provides
 from .pewrite import IMP_PREFIX
 from .registry import register
 from .runtimeobj import RuntimeBuildFailed, runtime_object
-from .staticlink import (
-    DEFAULT_BASE, LinkFailed, executable, link, read_object,
-)
+from .staticlink import LinkFailed, executable, link, read_object
 
 #: WHICH BACKEND BUILT AN OBJECT, read back off the object. The runtime has
 #: to be compiled for the same machine and into the same container as the
@@ -50,6 +50,8 @@ _BACKEND_OF = {
     ("elf", EM_AARCH64): "arm64",
     ("coff", IMAGE_FILE_MACHINE_AMD64): "x86-64",
     ("coff", IMAGE_FILE_MACHINE_ARM64): "arm64",
+    ("macho", CPU_TYPE_X86_64): "x86-64",
+    ("macho", CPU_TYPE_ARM64): "arm64",
 }
 
 #: The architecture names that go with each, for deciding whether a target
@@ -59,6 +61,8 @@ _ARCH_OF = {
     ("elf", EM_AARCH64): ("aarch64",),
     ("coff", IMAGE_FILE_MACHINE_AMD64): ("x86_64",),
     ("coff", IMAGE_FILE_MACHINE_ARM64): ("aarch64",),
+    ("macho", CPU_TYPE_X86_64): ("x86_64",),
+    ("macho", CPU_TYPE_ARM64): ("aarch64",),
 }
 
 #: And which TARGET to compile it for, since the container is part of the
@@ -68,6 +72,8 @@ _TARGET_OF = {
     ("elf", EM_AARCH64): "aarch64-linux",
     ("coff", IMAGE_FILE_MACHINE_AMD64): "x86_64-windows",
     ("coff", IMAGE_FILE_MACHINE_ARM64): "aarch64-windows",
+    ("macho", CPU_TYPE_X86_64): "x86_64-macos",
+    ("macho", CPU_TYPE_ARM64): "aarch64-macos",
 }
 
 #: The symbol the program starts at. `_start` and not `main`: there is no
@@ -101,7 +107,7 @@ class BuiltinToolchain(Toolchain):
         that is not served yet.
         """
         fmt = getattr(target, "object_format", None)
-        return fmt in (None, "elf", "coff")
+        return fmt in (None, "elf", "coff", "macho")
 
     def link(self, request: LinkRequest) -> Path:
         inputs: list[tuple[str, bytes]] = []
@@ -138,8 +144,12 @@ class BuiltinToolchain(Toolchain):
         inputs = _with_runtime(inputs, request)
         inputs = _with_floor(inputs)
         try:
-            image = link(inputs, entry=ENTRY, base=DEFAULT_BASE)
-            blob = executable(image, base=DEFAULT_BASE)
+            # NO BASE GIVEN. Where an image is loaded is the container's
+            # to say -- 0x400000 for ELF and PE, 0x100000000 for Mach-O,
+            # which is where `__PAGEZERO` ends -- and the container is not
+            # known until the objects have been read.
+            image = link(inputs, entry=ENTRY)
+            blob = executable(image)
         except LinkFailed as exc:
             raise LinkError(exc.message, detail=exc.detail) from None
 
@@ -184,6 +194,21 @@ def _survey(inputs: list[tuple[str, bytes]]) -> tuple[
     return defined, wanted - defined, kind
 
 
+def _c_names(names: set[str], fmt: str) -> set[str]:
+    """The same symbols, spelled the way the C they came from spells them.
+
+    MACH-O PUTS AN UNDERSCORE IN FRONT OF EVERY C NAME, so a program object
+    for macOS defines `_apy_err_slots` where the C it was compiled from says
+    `apy_err_slots`. `runtimeobj.runtime_source` decides what to leave OUT of
+    the runtime by matching those names -- so handing it the platform's
+    spelling left everything in, and the link then had every runtime symbol
+    defined twice.
+    """
+    if fmt != "macho":
+        return names
+    return {name[1:] if name.startswith("_") else name for name in names}
+
+
 def _imports(wanted: set[str], kind: tuple[str, int] | None) -> set[str]:
     """The names the CONTAINER answers rather than an object.
 
@@ -207,14 +232,15 @@ def _with_runtime(inputs: list[tuple[str, bytes]],
     program already linked against one must not get a second.
     """
     defined, wanted, kind = _survey(inputs)
-    wanted = wanted - set(PROVIDES) - _imports(wanted, kind)
+    fmt = kind[0] if kind else "elf"
+    wanted = wanted - set(provides(fmt)) - _imports(wanted, kind)
     if not wanted:
         return inputs
     backend = _BACKEND_OF.get(kind)
     if backend is None:
         return inputs
     try:
-        blob = runtime_object(defined, backend=backend,
+        blob = runtime_object(_c_names(defined, fmt), backend=backend,
                               target=_target_for(kind, request.target),
                               workdir=request.workdir,
                               verbose=request.verbose)
@@ -263,7 +289,7 @@ def _with_floor(inputs: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
     if not inputs:
         return inputs
     defined, _, kind = _survey(inputs)
-    if kind is None or not defined.isdisjoint(PROVIDES):
+    if kind is None or not defined.isdisjoint(provides(kind[0])):
         return inputs
     fmt, machine = kind
     try:
