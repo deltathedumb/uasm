@@ -121,6 +121,32 @@ def _x86_64_object(entry: str) -> ElfObject:
     text += b"\x0F\x0B"                                    # ud2
     end("plat_exit", at)
 
+    # ── putchar(c) -> int ───────────────────────────────────────────────────
+    #
+    # NOT PART OF THE FLOOR, and here for a reason worth stating. The Python
+    # frontend emits a CALL to `putchar` -- it is how `print` writes the
+    # space between arguments and the newline at the end (`lower.py`) -- so a
+    # linked program names it whether or not a runtime was asked for. libc
+    # supplies it in a hosted build; uasm's own `<stdio.h>` declares it
+    # `static`, so the runtime object compiled from that header never exports
+    # one. `link/baremetal.py` reached the same conclusion and defines its
+    # own; this is that, as machine code.
+    at = begin("putchar")
+    text += b"\x48\x83\xEC\x10"                            # sub $16,%rsp
+    text += b"\x40\x88\x3C\x24"                            # mov %dil,(%rsp)
+    text += b"\xB8" + struct.pack("<I", sc["write"])       # mov $write,%eax
+    text += b"\xBF\x01\x00\x00\x00"                        # mov $1,%edi
+    text += b"\x48\x89\xE6"                                # mov %rsp,%rsi
+    text += b"\xBA\x01\x00\x00\x00"                        # mov $1,%edx
+    text += b"\x0F\x05"                                    # syscall
+    # THE CHARACTER IS THE ANSWER, read back out of the buffer rather than
+    # kept in a register: `%edi` held it and the fd overwrote it, and every
+    # register that survives a syscall is one more thing to have got right.
+    text += b"\x0F\xB6\x04\x24"                            # movzbl (%rsp),%eax
+    text += b"\x48\x83\xC4\x10"                            # add $16,%rsp
+    text += b"\xC3"                                        # ret
+    end("putchar", at)
+
     # ── plat_heap(n) -> ptr ─────────────────────────────────────────────────
     #
     # `mmap(NULL, n, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)`.
@@ -221,6 +247,23 @@ def _aarch64_object(entry: str) -> ElfObject:
     words.append(BRK0)
     end("plat_exit", at)
 
+    # ── putchar(c) -> int ───────────────────────────────────────────────────
+    #
+    # See the x86-64 twin for why this is here at all.
+    at = here()
+    words.append(0xD10043FF)                       # sub sp, sp, #16
+    words.append(0x390003E0)                       # strb w0, [sp]
+    words.append(0xAA0003E9)                       # mov x9, x0   (keep it)
+    words.append(0xD2800020)                       # mov x0, #1   (fd)
+    words.append(0x910003E1)                       # mov x1, sp   (buf)
+    words.append(0xD2800022)                       # mov x2, #1   (len)
+    words.append(movz(8, sc["write"]))
+    words.append(SVC0)
+    words.append(0x12001D20)                       # and w0, w9, #0xff
+    words.append(0x910043FF)                       # add sp, sp, #16
+    words.append(RET)
+    end("putchar", at)
+
     # ── plat_heap(n) -> ptr ─────────────────────────────────────────────────
     at = here()
     words.append(0xF100001F)                       # cmp x0, #0
@@ -258,9 +301,14 @@ def _aarch64_object(entry: str) -> ElfObject:
 #: Which builder serves which ELF machine.
 _BUILDERS = {EM_X86_64: _x86_64_object, EM_AARCH64: _aarch64_object}
 
-#: The names this object defines, for the test that asserts the floor is still
-#: three functions and for a caller deciding whether it is needed at all.
-PROVIDES = ("_start", "plat_write", "plat_exit", "plat_heap")
+#: The names this object defines.
+#:
+#: THE FLOOR IS STILL THREE FUNCTIONS -- `objects/floor.py` says which, and
+#: `test_platform_floor.py` holds it to that. This object is not the floor: it
+#: is what a FREESTANDING IMAGE needs from the platform, which is the floor
+#: plus the entry point the C runtime start files would have supplied, plus
+#: the one libc function the Python frontend emits a call to.
+PROVIDES = ("_start", "plat_write", "plat_exit", "plat_heap", "putchar")
 
 
 def floor_object(machine: int, *, entry: str = "uasm_main") -> bytes:

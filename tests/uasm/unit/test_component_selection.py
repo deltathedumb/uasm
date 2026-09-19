@@ -19,6 +19,7 @@ from tests import harness
 from uasm import backend as backend_registry
 from uasm import frontend as frontend_registry
 from uasm import link as link_registry
+from uasm import target as target_registry
 from uasm.backend.families import SelectionError
 from uasm.driver.select import (
     choose, choose_backend, choose_frontend, choose_linker,
@@ -135,17 +136,29 @@ class TestTheDeclarationsNameRealBackends:
 #: reading the algorithm, and a change that moves any row is a change to what
 #: the command means.
 #:
-#: ONLY THE FIRST AND LAST ROWS MATCH the driver's old hardcoded `c` and `cc`.
-#: Every other one was previously a build of C that the user had to correct by
-#: naming a backend.
+#: THE FIRST AND LAST ROWS MOVED when the builtin linker arrived, and the move
+#: is the point of it: an output that names no linker used to fall back to
+#: `cc`, and `choose_backend` asks the LINKER what it takes input from -- so
+#: `CcToolchain.backends` listing `"c"` first was the whole of "the default
+#: backend is C". The builtin linker takes input from the machine backends,
+#: so the same mechanism now answers `x86-64` on an x86-64 host. Every other
+#: row is untouched: a spelling a linker or a backend claims is not a
+#: fallback at all.
+#: THE NATIVE BACKEND IS THE HOST'S, so the two rows that reach it are
+#: derived rather than written: this file would otherwise pass on x86-64 and
+#: fail on an ARM machine, which is a test asserting where it is running.
+NATIVE = {"x86_64": "x86-64", "aarch64": "arm64",
+          "x86": "x86-32", "arm": "arm32"}.get(
+              getattr(target_registry.host(), "arch", ""), "x86-64")
+
 RESOLVES = [
-    ("thing",      "python", "c",      "cc"),
+    ("thing",      "python", NATIVE,   "builtin"),
     ("thing.wasm", "python", "wasm",   "none"),
     ("thing.so",   "python", "cpyext", "cpyext"),
     ("thing.jar",  "python", "jvm",    "jar"),
     ("thing.pyc",  "python", "pybc",   "pyc"),
     ("thing.ll",   "python", "llvm",   "none"),
-    (None,         "python", "c",      "cc"),
+    (None,         "python", NATIVE,   "builtin"),
 ]
 
 

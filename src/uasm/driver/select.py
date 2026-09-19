@@ -31,6 +31,10 @@ from pathlib import Path
 
 from ..backend.families import SelectionError
 
+#: The linker a request that names none gets. See `choose` for why this one
+#: line is also the answer to "which backend is the default".
+DEFAULT_LINKER = "builtin"
+
 
 @dataclass(frozen=True)
 class Choice:
@@ -152,8 +156,22 @@ def choose_backend(output: Path | None, named: str | None, linker: str,
                 f"{', '.join(wanted)}, and none of them is registered")
         return ready[0]
     if output is not None:
-        picked = _one(_claimants(output.suffix, backends, "artifacts"),
-                      what="backend", spelling=output.suffix,
+        claimed = _claimants(output.suffix, backends, "artifacts")
+        # THE MACHINE SETTLES A TIE BETWEEN MACHINE BACKENDS, and only that.
+        # `-o thing.o` is claimed by all four of them, which is a real
+        # ambiguity in general and not one here: an object for a machine this
+        # is not running on is a cross build, and a cross build says so with
+        # `--target` or `-bk`. Refusing the plain case sent every user of
+        # `build --emit -o x.o` to a flag to say the obvious.
+        #
+        # A TIE BETWEEN UNLIKE BACKENDS IS STILL REFUSED. This only ever
+        # picks from candidates that all emit for an architecture, so `c` and
+        # `cpyext` both claiming `.c` is untouched by it.
+        if len(claimed) > 1:
+            native = _host_backend(claimed)
+            if native is not None:
+                return native
+        picked = _one(claimed, what="backend", spelling=output.suffix,
                       flag="-bk/--backend")
         if picked is not None:
             return picked
@@ -161,6 +179,50 @@ def choose_backend(output: Path | None, named: str | None, linker: str,
         f"the {linker} linker takes input from any backend and "
         f"{'the output names none' if output is None else repr(output.suffix)}"
         f" does not say which; pick one with -bk/--backend")
+
+
+def _takes(linkers, linker: str, backend: str) -> bool:
+    """Whether `linker` declares that it can take input from `backend`.
+
+    AN EMPTY DECLARATION MEANS ANY, which only `none` can honestly say -- it
+    writes what the backend produced and never reads it. See
+    `Toolchain.backends`.
+    """
+    wanted = getattr(linkers.get(linker), "backends", ())
+    return not wanted or backend in wanted
+
+
+def _linker_for(linkers, backend: str) -> str | None:
+    """A registered linker that takes input from `backend`, or None.
+
+    SORTED AND FIRST, which is arbitrary between equals and is not a tie in
+    practice: the registered linkers each name a disjoint set of backends
+    apart from the machine ones, and those are ordered by the preference
+    their own declarations state.
+    """
+    for name in sorted(linkers.available()):
+        wanted = getattr(linkers.get(name), "backends", ())
+        if wanted and backend in wanted:
+            return name
+    return None
+
+
+def _host_backend(candidates: list[str]) -> str | None:
+    """The candidate that emits for the machine this is running on.
+
+    None when no candidate does, which is every case this must not answer:
+    a tie between backends that are not machine backends, and a host whose
+    architecture nothing here targets.
+    """
+    from ..backend.families import _ARCH_OF
+    from .. import target as target_registry
+    try:
+        host = target_registry.host()
+    except Exception:                                  # noqa: BLE001
+        return None
+    arch = getattr(host, "arch", None)
+    matching = [c for c in candidates if _ARCH_OF.get(c) == arch]
+    return matching[0] if len(matching) == 1 else None
 
 
 def choose(source: Path, output: Path | None, *, frontend: str | None,
@@ -192,20 +254,43 @@ def choose(source: Path, output: Path | None, *, frontend: str | None,
     names = choose_linker(
         output, linker, linkers,
         # An artifact the backend itself writes needs no linker; a program
-        # does. `cc` is named here rather than derived because "the one that
-        # makes a native executable" is a fact about this driver's host and
-        # not something a registry can be asked.
+        # does. `builtin` is named here rather than derived because "the one
+        # that makes a native executable" is a fact about this driver and not
+        # something a registry can be asked.
+        #
+        # IT USED TO BE `cc`, AND THAT IS WHERE "the default backend is C"
+        # CAME FROM -- by a hop nobody reading this line would guess.
+        # `choose_backend` below asks the LINKER what it takes input from,
+        # and `CcToolchain.backends` lists `"c"` first; so the linker falling
+        # back to `cc` chose the backend too. The builtin linker takes input
+        # from the machine backends only, which is the same mechanism
+        # answering the other way.
         fallback=("none" if (output is not None
                              and _claimants(output.suffix, backends,
                                             "artifacts"))
-                  else "cc"))
+                  else DEFAULT_LINKER))
     # POSITIVELY DETERMINED, rather than fallen back to: either the user
     # named it or the output's extension is one a linker claims.
     named = bool(linker) or bool(
         output is not None and _claimants(output.suffix, linkers, "artifacts"))
+    chosen = choose_backend(output, backend, names, backends, linkers)
+    # AND THE BACKEND GETS TO CORRECT THE LINKER, which is the same coupling
+    # read the other way. `choose_backend` asks the LINKER what it takes
+    # input from, so a linker nobody named implies a backend; when the user
+    # NAMES the backend instead, the implication runs backwards and a linker
+    # that cannot read what that backend writes is not a choice anyone made.
+    #
+    # `-bk c` IS THE CASE THAT MATTERS. The C backend writes C, the builtin
+    # linker reads objects, and the two together were a build that failed
+    # after compiling everything -- with a message telling the user to name
+    # a flag the request had already implied.
+    if not named and not _takes(linkers, names, chosen):
+        instead = _linker_for(linkers, chosen)
+        if instead is not None:
+            names = instead
     return Choice(
         frontend=fe,
-        backend=choose_backend(output, backend, names, backends, linkers),
+        backend=chosen,
         # `--emit` TRUNCATES THE PIPELINE, it does not choose a different
         # one. An explicitly named linker still wins, because a user who
         # types both has said which they meant.

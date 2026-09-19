@@ -33,6 +33,10 @@ NO_ARTIFACTS_BY_DESIGN = {
     # A native executable on a Unix has no extension at all, so `-o thing`
     # is what this means and nothing can be told apart from it by spelling.
     "cc",
+    # The same answer, for the same reason: it produces a native executable
+    # too, and the difference between the two is what they need on the
+    # machine, not what the result is called.
+    "builtin",
     # Writes the BACKEND's artifacts under the backend's own names, so the
     # spelling belongs to the backend and never to this.
     "none",

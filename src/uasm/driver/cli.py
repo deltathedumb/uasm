@@ -114,11 +114,23 @@ def _options(args) -> Options:
         backend=backend,
         backend_options=dict(getattr(args, "backend_options", None) or {}),
         target=(target_registry.get(target_name) if target_name else None),
+        # `build` PRODUCES ARTIFACTS; `link` PRODUCES A PROGRAM. The two
+        # verbs used to be one: `build` linked unless `--emit` said not to,
+        # which made "compile this" and "compile and link this" the same
+        # request and gave the second no name. Now the split is the default
+        # and `--link` is how a one-step build is still asked for.
+        #
+        # `--emit` IS KEPT AND MEANS WHAT IT ALWAYS DID, which is now also
+        # what happens anyway. Every documented invocation and every script
+        # that passes it keeps working, and it still OVERRIDES `--link` --
+        # a user who types both has asked for artifacts last.
+        #
         # `--emit-asm` IMPLIES `--emit`: assembly is not something the
         # toolchain in this driver links, and asking it to would fail after
         # the user already has the file they wanted.
-        link=not (getattr(args, "emit", False)
-                  or getattr(args, "emit_asm", False)),
+        link=(getattr(args, "link", False)
+              and not (getattr(args, "emit", False)
+                       or getattr(args, "emit_asm", False))),
         toolchain=choice.linker,
         toolchain_chosen=choice.linker_named,
         linker_options=linker_options,
@@ -292,10 +304,12 @@ def _link_objects(args, inputs, sink) -> int:
     # and there is not one: nothing here is compiled, so no frontend and no
     # backend are chosen. What the output spells still picks the linker
     # exactly as it does for a build -- `-o thing.so` is an extension module
-    # here too -- and `cc` is the fallback for the same reason it is there:
-    # an output with no extension of its own is a native program.
+    # here too -- and the builtin linker is the fallback for the same reason
+    # it is there: an output with no extension of its own is a native
+    # program, and making one needs no external tool.
     name = selector.choose_linker(Path(args.output), args.toolchain,
-                                  link_registry, fallback="cc")
+                                  link_registry,
+                                  fallback=selector.DEFAULT_LINKER)
     toolchain = link_registry.get(name)
     if not toolchain.supports(target):
         sink.report(
@@ -1217,8 +1231,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "--target when those already imply one")
     b.add_argument("--target",
                    help="platform to emit for; see `uasm plugin targets`")
+    b.add_argument("--link", action="store_true",
+                   help="also link the artifacts into a program. Without it "
+                        "`build` writes unlinked objects and `uasm link` "
+                        "turns them into a program")
     b.add_argument("--emit", action="store_true",
-                   help="write backend artifacts and stop; do not link")
+                   help="write backend artifacts and stop; do not link. The "
+                        "default, and kept because it says so explicitly")
     b.add_argument("--emit-asm", action="store_true",
                    help="write the backend's assembly instead of its object "
                         "file, and stop. For reading what was generated; a "

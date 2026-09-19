@@ -49,7 +49,8 @@ uasm toolchains                    # lists it
 
 | name | what it does |
 |------|--------------|
-| `cc` | hands everything to `gcc`/`clang`. Assembles `.s`, compiles `.c`, links, and finds the system libraries. The default. |
+| `builtin` | links ELF objects into a static executable with no external tool at all: uasm's own linker, its own `_start`, and the platform floor as syscalls. The object runtime is compiled by uasm's own C frontend. The default for a machine backend. |
+| `cc` | hands everything to `gcc`/`clang`. Assembles `.s`, compiles `.c`, links, and finds the system libraries. What the `c` backend needs, and what a program linking against real libraries wants. |
 | `jar` | packages class files into a runnable jar. Chosen automatically by the `jvm` target, which names it in `default_toolchain`. |
 | `baremetal` | a freestanding image: no libc, no start files, a linker script, and a runtime built from source. Chosen automatically when the target's `os` is `"none"`. |
 | `cpyext` | compiles and links a CPython extension module — a `.so` or a `.pyd` that `import` finds. Chosen automatically by the `cpyext` target. |

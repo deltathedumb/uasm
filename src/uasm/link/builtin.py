@@ -21,11 +21,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..backend.objfile import EM_AARCH64, EM_X86_64
 from ..backend.objfile.elfread import ElfError, read
 from ..target import Target
 from .base import LinkError, LinkRequest, Toolchain
 from .freestanding import PROVIDES, floor_object
 from .registry import register
+from .runtimeobj import RuntimeBuildFailed, runtime_object
 from .staticlink import DEFAULT_BASE, LinkFailed, executable, link
 
 #: The symbol the program starts at. `_start` and not `main`: there is no
@@ -92,6 +94,7 @@ class BuiltinToolchain(Toolchain):
                      "objects it is handed; there is no library search path "
                      "and no `-l` handling")
 
+        inputs = _with_runtime(inputs, request)
         inputs = _with_floor(inputs)
         try:
             image = link(inputs, entry=ENTRY, base=DEFAULT_BASE)
@@ -111,6 +114,53 @@ class BuiltinToolchain(Toolchain):
             ["<builtin linker>", "-o", str(request.output),
              *(name for name, _ in inputs)])
         return request.output
+
+
+def _needs(inputs: list[tuple[str, bytes]]) -> tuple[set[str], set[str], int]:
+    """What the inputs define, what they still need, and their machine."""
+    defined: set[str] = set()
+    wanted: set[str] = set()
+    machine = 0
+    for origin, blob in inputs:
+        try:
+            got = read(blob, origin)
+        except ElfError:
+            return set(), set(), 0
+        machine = machine or got.machine
+        for sym in got.symbols:
+            if not sym.name:
+                continue
+            (wanted if sym.is_undefined else defined).add(sym.name)
+    return defined, wanted - defined, machine
+
+
+def _with_runtime(inputs: list[tuple[str, bytes]],
+                  request: LinkRequest) -> list[tuple[str, bytes]]:
+    """The inputs, plus the object runtime when the program still needs it.
+
+    COMPILED BY UASM, from C generated to match what these objects already
+    define -- see `runtimeobj.py`. Added only when something is missing that
+    is not the floor: an object that needs nothing needs no runtime, and a
+    program already linked against one must not get a second.
+    """
+    defined, wanted, machine = _needs(inputs)
+    if not wanted or wanted <= set(PROVIDES):
+        return inputs
+    backend = {EM_X86_64: "x86-64", EM_AARCH64: "arm64"}.get(machine)
+    if backend is None:
+        return inputs
+    try:
+        blob = runtime_object(defined, backend=backend,
+                              target=request.target, workdir=request.workdir,
+                              verbose=request.verbose)
+    except RuntimeBuildFailed as exc:
+        raise LinkError(exc.message, detail=exc.detail,
+                        help="the object runtime is compiled by uasm itself; "
+                             "this is a compiler failure, not a missing "
+                             "tool") from None
+    request.commands.append(["<uasm>", "--object-runtime", "c",
+                             "the object runtime"])
+    return [*inputs, ("<runtime>", blob)]
 
 
 def _with_floor(inputs: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
