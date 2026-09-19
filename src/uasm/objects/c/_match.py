@@ -856,10 +856,7 @@ APY_API apy_value apy_mview_item(apy_value v, int64_t i) {
     buf = apy_mview_buf(v);
     at = apy_mview_at(v, i * wide);
     if (fmt == 'c') {
-        apy_value one = apy_str_copy(buf + at, 1);
-        if (!one) return 0;
-        O(one)->kind = APY_BYTES_K;
-        return one;
+        return apy_bytes_copy(buf + at, 1);
     }
     for (k = 0; k < wide; k++)
         raw |= (uint64_t)(unsigned char)buf[at + k] << (8 * k);
@@ -883,9 +880,8 @@ APY_API apy_value apy_mview_item(apy_value v, int64_t i) {
         char eight[8];
         apy_value held;
         for (k = 0; k < 8; k++) eight[k] = (char)((raw >> (8 * k)) & 0xFF);
-        held = apy_str_copy(eight, 8);
+        held = apy_bytes_copy(eight, 8);
         if (!held) return 0;
-        O(held)->kind = APY_BYTES_K;
         return apy_from_bytes_n(held, apy_lit("little"));
     }
     return apy_from_int((int64_t)raw);
@@ -983,9 +979,7 @@ APY_API apy_value apy_mview_bytes(apy_value v) {
     if (!out) { fputs("uasm: out of memory\n", stderr); exit(1); }
     for (i = 0; i < n; i++) out[i] = buf[apy_mview_at(v, i)];
     out[n] = 0;
-    { apy_value r = apy_str_take(out, n);
-      O(r)->kind = APY_BYTES_K;
-      return r; }
+    return apy_bytes_take(out, n);
     }
 }
 
@@ -1127,6 +1121,19 @@ APY_API apy_value apy_slice(apy_value seq, int64_t start, int64_t stop,
         if (stop > n) stop = n;
     }
 
+    /* A WHOLE SLICE OF AN IMMUTABLE SEQUENCE IS THE SEQUENCE. `s[:] is s`,
+       `b[:] is b` and `t[:] is t` are all True in CPython, and so is
+       `s[::1] is s`; `xs[:] is xs` is False for a LIST, because copying is
+       what `xs[:]` is for, and a bytearray copies for the same reason. A
+       step of anything but 1 never answers the receiver -- `s[::-1]` on a
+       longer string is a different string, and on a one-character one the
+       shared cell makes the comparison True anyway. */
+    if (step == 1 && start == 0 && stop == n
+            && (O(seq)->kind == APY_STR_K
+                || (O(seq)->kind == APY_BYTES_K && !O(seq)->v.s.mut)
+                || O(seq)->kind == APY_TUPLE_K))
+        return seq;
+
     if (O(seq)->kind == APY_STR_K) {
         /* THE BYTE OFFSET OF EACH CHARACTER, walked once. A slice with a step
            reaches characters in any order, so the offsets are needed as a
@@ -1158,19 +1165,18 @@ APY_API apy_value apy_slice(apy_value seq, int64_t start, int64_t stop,
         for (i = start; step > 0 ? i < stop : i > stop; i += step)
             buf[out_n++] = O(seq)->v.s.p[i];
         buf[out_n] = 0;
-        { apy_value r = apy_str_take(buf, out_n);
-          /* A slice of bytes is bytes. Indexing gives an int and slicing does
-             not, which is the one asymmetry a reader will not expect. */
-          O(r)->kind = O(seq)->kind;
-          /* And a slice of a bytearray is a bytearray -- a fresh one, whose
-             buffer this just malloc'd, so it is writable as it must be. */
-          O(r)->v.s.mut = O(seq)->v.s.mut;
-          return r; }
+        /* A slice of bytes is bytes. Indexing gives an int and slicing
+           does not, which is the one asymmetry a reader will not expect.
+           And a slice of a bytearray is a bytearray -- a fresh one, whose
+           buffer this just malloc'd, so it is writable as it must be, and
+           so it must not be one of the shared cells. */
+        if (O(seq)->v.s.mut) return apy_bytes_own(buf, out_n, 1);
+        return apy_bytes_take(buf, out_n);
     }
     out = apy_seq_new(O(seq)->kind, n + 1);
     for (i = start; step > 0 ? i < stop : i > stop; i += step)
         apy_seq_push(out, O(seq)->v.q.items[i]);
-    return out;
+    return apy_tuple_done(out);
 }
 
 """

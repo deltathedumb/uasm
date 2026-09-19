@@ -699,6 +699,11 @@ class DynamicLowering:
             return self.b.call(T.PTR, "apy_from_complex",
                                [self.b.const(T.F64, v.real),
                                 self.b.const(T.F64, v.imag)])
+        if not v:
+            # `()` IS THE ONE EMPTY TUPLE, asked for rather than built: a cell
+            # of this module's own would be a second empty tuple, and
+            # `() is tuple()` would answer False. See `apy_tuple_empty`.
+            return self.b.call(T.PTR, "apy_tuple_empty", [])
         out = self.b.call(T.PTR, "apy_tuple_new",
                           [self.b.const(T.I64, max(1, len(v)))])
         for item in v:
@@ -881,6 +886,12 @@ class DynamicLowering:
         # of the runtime reads `v.s.p` as a C string in 200-odd places
         # (`APY_CSTR`, `strcmp`, `snprintf`), so the terminator is load-bearing
         # even though it is not part of the value.
+        # AND THE TINY ONES ARE SHARED, which needs nothing here: CPython
+        # keeps one empty string and one per latin-1 character, and
+        # `apy_from_bytes` -- the cell constructor every string in the
+        # runtime is made by -- answers those from its table. A literal takes
+        # the same route as a slice or a `chr`, so `"" is str()` and
+        # `"a" is chr(97)` are True without the compiler knowing about it.
         return self.b.call(T.PTR, "apy_from_bytes",
                            [self._dyn_text_addr(text),
                             self.b.const(T.I64, len(raw) - 1)])
@@ -2902,10 +2913,13 @@ class DynamicLowering:
             # conversion of nothing, and the conversion path reads an argument
             # that is not there.
             if not node.args:
-                return self.b.call(
-                    T.PTR,
-                    "apy_tuple_new" if name == "tuple" else "apy_list_new",
-                    [self.b.const(T.I64, 1)])
+                # AND `tuple()` IS THE ONE EMPTY TUPLE, which `apy_tuple_new`
+                # would not be -- see `apy_tuple_empty`. `list()` is a fresh
+                # list every time, because a list can be written to.
+                if name == "tuple":
+                    return self.b.call(T.PTR, "apy_tuple_empty", [])
+                return self.b.call(T.PTR, "apy_list_new",
+                                   [self.b.const(T.I64, 1)])
             return self._dyn_convert_sequence(node, name)
         if name == "object" and not node.args:
             # `object()` -- A BARE INSTANCE, which is what a program uses as a
@@ -6415,6 +6429,12 @@ class DynamicLowering:
         self.b.jump(test)
         self.b.switch_to(done)
         built = self.b.load(T.PTR, out_slot)
+        if name == "tuple":
+            # AN EMPTY TUPLE IS THE ONE EMPTY TUPLE. `tuple([]) is ()` is
+            # True in CPython, and the walk above builds a fresh cell -- so
+            # the finished value goes through the runtime's filter. A list
+            # never does: two empty lists are two objects.
+            built = self.b.call(T.PTR, "apy_tuple_done", [built])
         if join is None:
             return built
         self.b.store(T.PTR, built, result)

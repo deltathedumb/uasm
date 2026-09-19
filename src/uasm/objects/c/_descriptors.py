@@ -1538,9 +1538,7 @@ APY_API apy_value apy_bytes_maketrans(apy_value a, apy_value b) {
     for (i = 0; i < n; i++) buf[ap[i]] = (char)bp[i];
     buf[256] = '\0';
     {
-        apy_value out = apy_str_take(buf, 256);
-        O(out)->kind = APY_BYTES_K;
-        return out;
+        return apy_bytes_take(buf, 256);
     }
 }
 

@@ -494,10 +494,7 @@ APY_API apy_value apy_copy(apy_value v) {
     apy_value out;
     if (O(v)->kind == APY_FROZEN_K) return v;
     if (O(v)->kind == APY_BYTES_K && O(v)->v.s.mut) {
-        out = apy_str_copy(O(v)->v.s.p, O(v)->v.s.n);
-        O(out)->kind = APY_BYTES_K;
-        O(out)->v.s.mut = 1;
-        return out;
+        return apy_bytearray_copy(O(v)->v.s.p, O(v)->v.s.n);
     }
     if (O(v)->kind == APY_DICT_K) {
         out = apy_dict_new_cap(O(v)->v.d.n + 1);

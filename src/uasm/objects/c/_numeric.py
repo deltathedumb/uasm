@@ -353,15 +353,21 @@ APY_API apy_value apy_add(apy_value a, apy_value b) {
     if (apy_either_complex(a, b)) return apy_complex_binop("+", a, b);
     if (O(a)->kind == APY_BYTES_K && O(b)->kind == APY_BYTES_K) {
         int64_t n = O(a)->v.s.n + O(b)->v.s.n;
+        /* CONCATENATING NOTHING ONTO IMMUTABLE BYTES IS THOSE BYTES.
+           `b + b"" is b` and `b"" + b is b` are both True in CPython. Two
+           BYTEARRAYS always make a third, because either may be written to
+           afterwards -- which is why the flag is tested on both sides. */
+        if (!O(a)->v.s.mut && !O(b)->v.s.mut) {
+            if (O(b)->v.s.n == 0) return a;
+            if (O(a)->v.s.n == 0) return b;
+        }
         char *buf = (char *)malloc((size_t)n + 1);
         if (!buf) { fputs("uasm: out of memory\n", stderr); exit(1); }
         memcpy(buf, O(a)->v.s.p, (size_t)O(a)->v.s.n);
         memcpy(buf + O(a)->v.s.n, O(b)->v.s.p, (size_t)O(b)->v.s.n);
         buf[n] = 0;
-        { apy_value r = apy_str_take(buf, n);
-          O(r)->kind = APY_BYTES_K;
-          O(r)->v.s.mut = O(a)->v.s.mut;
-          return r; }
+        if (O(a)->v.s.mut) return apy_bytes_own(buf, n, 1);
+        return apy_bytes_take(buf, n);
     }
     /* MIXING BYTES AND str IS A TypeError, which is the whole point of PEP
        3112 -- they are different types and `+` will not bridge them. An
@@ -372,7 +378,12 @@ APY_API apy_value apy_add(apy_value a, apy_value b) {
                          apy_kind_name(b), apy_kind_name(a));
     if (O(a)->kind == APY_STR_K && O(b)->kind == APY_STR_K) {
         int64_t n = O(a)->v.s.n + O(b)->v.s.n;
-        char *buf = (char *)malloc((size_t)n + 1);
+        char *buf;
+        /* AND THE SAME FOR str: `s + "" is s` and `"" + s is s`. A str is
+           immutable whichever side it is on, so there is no flag to test. */
+        if (O(b)->v.s.n == 0) return a;
+        if (O(a)->v.s.n == 0) return b;
+        buf = (char *)malloc((size_t)n + 1);
         memcpy(buf, O(a)->v.s.p, (size_t)O(a)->v.s.n);
         memcpy(buf + O(a)->v.s.n, O(b)->v.s.p, (size_t)O(b)->v.s.n);
         buf[n] = '\0';
@@ -412,8 +423,17 @@ APY_API apy_value apy_add(apy_value a, apy_value b) {
                          "can only concatenate str (not \"%s\") to str%s",
                          apy_kind_name(b), "");
     if (apy_is_seq(a) && apy_is_seq(b) && O(a)->kind == O(b)->kind) {
-        apy_value out = apy_seq_new(O(a)->kind, O(a)->v.q.n + O(b)->v.q.n + 1);
+        apy_value out;
         int64_t i;
+        /* `t + () IS t`, and so is `() + t`. Concatenating nothing onto an
+           immutable sequence has nothing to copy, and CPython hands the
+           other operand back; two LISTS always make a third, because either
+           may be written to afterwards. */
+        if (O(a)->kind == APY_TUPLE_K) {
+            if (O(b)->v.q.n == 0) return a;
+            if (O(a)->v.q.n == 0) return b;
+        }
+        out = apy_seq_new(O(a)->kind, O(a)->v.q.n + O(b)->v.q.n + 1);
         for (i = 0; i < O(a)->v.q.n; i++) apy_seq_push(out, O(a)->v.q.items[i]);
         for (i = 0; i < O(b)->v.q.n; i++) apy_seq_push(out, O(b)->v.q.items[i]);
         return out;
@@ -473,6 +493,8 @@ APY_API apy_value apy_sub(apy_value a, apy_value b) {
 static apy_value apy_str_repeat(apy_value s, int64_t k) {
     int64_t n, i;
     char *buf;
+    /* `s * 1 IS s`, exactly as `t * 1 is t` -- see `apy_seq_repeat`. */
+    if (k == 1) return s;
     if (k < 0) k = 0;
     n = O(s)->v.s.n * k;
     buf = (char *)malloc((size_t)n + 1);
@@ -482,11 +504,16 @@ static apy_value apy_str_repeat(apy_value s, int64_t k) {
 }
 
 static apy_value apy_seq_repeat(apy_value seq, int64_t k) {
-    apy_value out = apy_seq_new(O(seq)->kind, O(seq)->v.q.n * (k > 0 ? k : 1) + 1);
+    apy_value out;
     int64_t r, i;
+    /* `t * 1 IS t`. An immutable sequence repeated once has nothing to copy,
+       and CPython hands the receiver back -- while `xs * 1` on a LIST is a
+       copy, because one of the two may be written to. */
+    if (k == 1 && O(seq)->kind == APY_TUPLE_K) return seq;
+    out = apy_seq_new(O(seq)->kind, O(seq)->v.q.n * (k > 0 ? k : 1) + 1);
     for (r = 0; r < k; r++)
         for (i = 0; i < O(seq)->v.q.n; i++) apy_seq_push(out, O(seq)->v.q.items[i]);
-    return out;
+    return apy_tuple_done(out);
 }
 
 /* `a @ b`. NO BUILT-IN KIND IMPLEMENTS IT -- there are no matrices here --

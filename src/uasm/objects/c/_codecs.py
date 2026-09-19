@@ -301,9 +301,7 @@ APY_API apy_value apy_str_encode(apy_value s, apy_value encoding,
             seen++;
         }
         if (i >= n) {
-            out = apy_str_copy(O(s)->v.s.p, n);
-            O(out)->kind = APY_BYTES_K;
-            return out;
+            return apy_bytes_copy(O(s)->v.s.p, n);
         }
         /* FOUR BYTES PER CHARACTER covers `\Uxxxxxxxx`, the widest thing any
            handler writes for one. */
@@ -658,10 +656,7 @@ APY_API apy_value apy_bytes_ctor(apy_value v, apy_value encoding,
         /* A BYTEARRAY IS A FRESH CELL and not a re-tagged one: `encode`
            answers bytes, and writing `mut` into it would make the caller's
            own value writable. */
-        apy_value out = apy_str_copy(O(made)->v.s.p, O(made)->v.s.n);
-        O(out)->kind = APY_BYTES_K;
-        O(out)->v.s.mut = 1;
-        return out;
+        return apy_bytearray_copy(O(made)->v.s.p, O(made)->v.s.n);
     }
     return made;
 }
@@ -810,11 +805,9 @@ APY_API apy_value apy_bytes_fromhex(apy_value self, apy_value text) {
                         "non-hexadecimal number found in fromhex() arg");
     }
     {
-        apy_value v = apy_str_take(buf, out);
-        O(v)->kind = APY_BYTES_K;
         if (self && O(self)->kind == APY_BYTES_K && O(self)->v.s.mut)
-            O(v)->v.s.mut = 1;
-        return v;
+            return apy_bytes_own(buf, out, 1);
+        return apy_bytes_take(buf, out);
     }
 }
 
@@ -962,9 +955,7 @@ APY_API apy_value apy_to_bytes_n(apy_value v, apy_value length,
         }
     }
     {
-        apy_value out = apy_str_take(buf, n);
-        O(out)->kind = APY_BYTES_K;
-        return out;
+        return apy_bytes_take(buf, n);
     }
 }
 

@@ -861,10 +861,7 @@ APY_API apy_value apy_lit(const char *p) {
 }
 
 APY_API apy_value apy_from_cstr(apy_value p) {
-    apy_obj *o = apy_alloc(APY_STR_K);
-    o->v.s.p = (const char *)p;
-    o->v.s.n = (int64_t)strlen(o->v.s.p);
-    return V(o);
+    return apy_from_bytes(p, (int64_t)strlen((const char *)(uintptr_t)p));
 }
 
 /* The same, with the length given rather than found. `apy_from_cstr` stops at
@@ -906,8 +903,28 @@ APY_API apy_value apy_from_complex(double re, double im) {
     return V(o);
 }
 
+/* THE TWO SHARED-CELL TABLES, declared ahead of the constructors that
+   answer from them. Both are defined below, next to the storage they read;
+   both are `APY_API` because a PORTED build replaces them (see
+   `REPLACES["str_cell.py"]`) and a build must have exactly one of each. */
+APY_API apy_value apy_shared_str(int64_t cp);
+APY_API apy_value apy_shared_bytes(int64_t b);
+/* THE CODE POINT A ONE-CHARACTER UTF-8 SEQUENCE SPELLS, or -1. Defined with
+   the tables; declared here because `apy_from_bytes` is the first caller. */
+static int apy_shared_cp(const char *p, int64_t n);
+
 APY_API apy_value apy_bytes_literal(apy_value p, int64_t n) {
-    apy_obj *o = apy_alloc(APY_BYTES_K);
+    apy_obj *o;
+    /* THE SHARED ONES FIRST. CPython keeps one empty bytes and one per
+       octet, and a program sees it: `b"" is bytes()` and
+       `b"a" is bytes([97])` are True there. A LITERAL comes through here, so
+       the module's own `b""` has to be the one every other path answers
+       with -- a cell of its own would compare unequal to all of them. */
+    if (n == 0) return apy_shared_bytes(256);
+    if (n == 1)
+        return apy_shared_bytes(
+            (unsigned char)((const char *)(uintptr_t)p)[0]);
+    o = apy_alloc(APY_BYTES_K);
     o->v.s.p = (const char *)(uintptr_t)p;
     o->v.s.n = n;
     return V(o);
@@ -953,16 +970,162 @@ APY_API apy_value apy_str_bytes(apy_value s) {
     return (apy_value)(uintptr_t)O(s)->v.s.p;
 }
 
+/* THE str CELL, AND THE ONE PLACE THE SHARED STRINGS ARE ANSWERED FROM.
+   Every string this runtime builds is a cell, and every cell is made here --
+   `apy_str_take` for the ones that own their bytes, `apy_str_copy_bytes` for
+   the ones that copy, and the frontend's literals. Putting the test in the
+   constructor is what makes `"" is str()`, `"a" is chr(97)` and
+   `"abc"[0:1] is "a"` all True without fifty call sites knowing about it. */
 APY_API apy_value apy_from_bytes(apy_value p, int64_t n) {
-    apy_obj *o = apy_alloc(APY_STR_K);
+    apy_obj *o;
+    int cp;
+    if (n == 0) return apy_shared_str(256);
+    cp = apy_shared_cp((const char *)(uintptr_t)p, n);
+    if (cp >= 0) return apy_shared_str(cp);
+    o = apy_alloc(APY_STR_K);
     o->v.s.p = (const char *)p;
     o->v.s.n = n;
     return V(o);
 }
 
-/* AND THIS IS `apy_from_bytes`. See `apy_lit` above. */
+/* THE SHARED EMPTY STRING AND THE 256 ONE-CHARACTER ONES, and the same for
+   bytes. CPython keeps exactly these -- `"" is str()`, `"a" is chr(97)` and
+   `"abc"[0:1] is "a"` are all True, and a character ABOVE U+00FF is not
+   cached, so `chr(256) is chr(256)` is False. A program sees the difference
+   with `is` and with `id()`, which is the only reason a runtime would
+   bother.
+
+   BUILT ON FIRST ASK and never freed, which is what a singleton is. The
+   bytes they point at are static storage here, so there is nothing to own
+   and nothing to copy.
+
+   INDEX 256 IS THE EMPTY ONE, which keeps the two tables one lookup each.
+
+   THE str TABLE IS FILLED FROM `apy_str_take` AND THE bytes TABLE FROM
+   `apy_bytes_take`, which are the two funnels every string and every bytes
+   this runtime builds comes out of. Putting the test anywhere else would
+   mean putting it in fifty places. */
+static apy_value apy_str_shared[257];
+static apy_value apy_bytes_shared[257];
+static char apy_shared_utf8[256][3];
+static char apy_shared_byte[256][2];
+
+/* THE SHARED STRING FOR ONE CODE POINT, or for NOTHING at index 256.
+
+   EXPORTED, AND PORTED, because a build must have exactly ONE of these
+   tables. `apy_str_take` is C and stays C; `apy_str_copy_bytes` is replaced
+   by IR on a ported build -- and if each kept its own table, a literal built
+   through one and a slice built through the other would be two empty strings
+   that compare unequal. Both call this instead, and `REPLACES["str_cell.py"]`
+   names it, so the ported build has the IR's table and the plain build has
+   this one. */
+APY_API apy_value apy_shared_str(int64_t cp) {
+    if (!apy_str_shared[cp]) {
+        /* THE CELL IS BUILT HERE AND NOT THROUGH `apy_from_bytes`, which
+           asks this function first: the constructor is where the sharing
+           test lives, so the one call that must not take it is this one. */
+        apy_obj *o = apy_alloc(APY_STR_K);
+        int64_t n = 0;
+        char *b = (char *)"";
+        if (cp != 256) {
+            b = apy_shared_utf8[cp];
+            if (cp < 0x80) { b[0] = (char)cp; n = 1; }
+            else {
+                b[0] = (char)(0xC0 | (cp >> 6));
+                b[1] = (char)(0x80 | (cp & 0x3F));
+                n = 2;
+            }
+            b[n] = '\0';
+        }
+        o->v.s.p = b;
+        o->v.s.n = n;
+        apy_str_shared[cp] = V(o);
+    }
+    return apy_str_shared[cp];
+}
+
+/* THE CODE POINT A ONE-CHARACTER UTF-8 SEQUENCE SPELLS, or -1 for anything
+   this shares nothing for -- more than one character, or a character above
+   U+00FF. One latin-1 character is one or two bytes, which is the whole of
+   what the two arms decode. */
+static int apy_shared_cp(const char *p, int64_t n) {
+    const unsigned char *b = (const unsigned char *)p;
+    if (n == 1 && b[0] < 0x80) return (int)b[0];
+    if (n == 2 && (b[0] & 0xE0) == 0xC0 && (b[1] & 0xC0) == 0x80) {
+        int cp = ((b[0] & 0x1F) << 6) | (b[1] & 0x3F);
+        if (cp >= 0x80 && cp < 256) return cp;
+    }
+    return -1;
+}
+
+/* AND THIS IS `apy_from_bytes`. See `apy_lit` above.
+
+   THE BUFFER IS ABANDONED AND NOT FREED when the constructor answers a
+   shared cell. Callers hand this `malloc`'d storage, arena storage and, in
+   two places, a stack array; there is no one `free` that is right for all
+   three, and this runtime releases no string's bytes anywhere --
+   `apy_str_copy_bytes` says why at length. Two bytes per tiny string built
+   is the price of not having to know which kind arrived. */
 APY_API apy_value apy_str_take(char *p, int64_t n) {
     return apy_from_bytes((apy_value)(uintptr_t)p, n);
+}
+
+/* THE SAME BUFFER UNDER THE bytes TAG, and the funnel that replaced writing
+   `O(x)->kind = APY_BYTES_K` over a cell somebody else might be holding.
+
+   `mut` IS A PARAMETER AND NOT SOMETHING THE CALLER WRITES AFTERWARDS. A
+   bytearray is written into, so it can never be one of the shared cells:
+   `bytearray(b"")` made writable in place would be `b""` made writable, for
+   every later use of it in the program. Asking for the flag here is what
+   makes "a fresh cell" and "a bytearray" the same decision. */
+static apy_value apy_bytes_own(char *p, int64_t n, int mut) {
+    apy_obj *o = apy_alloc(APY_BYTES_K);
+    o->v.s.p = p;
+    o->v.s.n = n;
+    o->v.s.mut = mut;
+    return V(o);
+}
+
+/* THE SHARED BYTES FOR ONE OCTET, or for NOTHING at index 256 -- the bytes
+   half of `apy_shared_str`, exported and ported for the same reason. */
+APY_API apy_value apy_shared_bytes(int64_t b) {
+    if (!apy_bytes_shared[b]) {
+        char *s = (char *)"";
+        int64_t n = 0;
+        if (b != 256) {
+            s = apy_shared_byte[b];
+            s[0] = (char)b;
+            s[1] = '\0';
+            n = 1;
+        }
+        apy_bytes_shared[b] = apy_bytes_own(s, n, 0);
+    }
+    return apy_bytes_shared[b];
+}
+
+/* IMMUTABLE BYTES OVER A BUFFER, shared when CPython shares it: the one
+   empty and the 256 one-byte values. The buffer is abandoned in that case
+   for the reason `apy_str_take` gives. */
+static apy_value apy_bytes_take(char *p, int64_t n) {
+    if (n == 0) return apy_shared_bytes(256);
+    if (n == 1) return apy_shared_bytes((unsigned char)p[0]);
+    return apy_bytes_own(p, n, 0);
+}
+
+/* `n` BYTES COPIED INTO A CELL OF ITS OWN, which is what the bytearray
+   constructors and every method that re-reads its receiver want. */
+static apy_value apy_bytes_dup(const char *p, int64_t n, int mut) {
+    char *buf;
+    if (!mut) {
+        /* The shared ones need no buffer at all. */
+        if (n == 0) return apy_shared_bytes(256);
+        if (n == 1) return apy_shared_bytes((unsigned char)p[0]);
+    }
+    buf = (char *)malloc((size_t)n + 1);
+    if (!buf) { fputs("uasm: out of memory\n", stderr); exit(1); }
+    if (n) memcpy(buf, p, (size_t)n);
+    buf[n] = '\0';
+    return apy_bytes_own(buf, n, mut);
 }
 
 /* THE ONE THE RUNTIME BUILDS EVERY STRING WITH, split in two so the half
@@ -979,27 +1142,42 @@ APY_API apy_value apy_str_take(char *p, int64_t n) {
    `apy_str_copy` itself would have meant a cast at every slice, join, case
    transform and repr in this file -- a mechanical sweep through the one
    function every string operation flows through, where a wrong cast gives
-   plausible wrong strings rather than a crash. */
+   plausible wrong strings rather than a crash.
+
+   THE SHARED ONES ARE ANSWERED BEFORE THE ALLOCATION rather than after it,
+   so that a one-character string costs nothing. `apy_str_take` would answer
+   them anyway; this only saves the `malloc`. The IR's copy of this function
+   (`runtime/str_cell.py`) keeps its own table for the same reason -- on a
+   ported build that one is live and this one is not, and a build has exactly
+   one table either way. */
 APY_API apy_value apy_str_copy_bytes(apy_value p, int64_t n) {
-    char *buf = (char *)malloc((size_t)n + 1);
+    char *buf;
+    int cp;
+    if (n == 0) return apy_shared_str(256);
+    cp = apy_shared_cp((const char *)(uintptr_t)p, n);
+    if (cp >= 0) return apy_shared_str(cp);
+    buf = (char *)malloc((size_t)n + 1);
     if (!buf) { fputs("uasm: out of memory\n", stderr); exit(1); }
     memcpy(buf, (const char *)(uintptr_t)p, (size_t)n);
     buf[n] = '\0';
-    return apy_str_take(buf, n);
+    return apy_from_bytes((apy_value)(uintptr_t)buf, n);
 }
 
 APY_API apy_value apy_str_copy(const char *p, int64_t n) {
     return apy_str_copy_bytes((apy_value)(uintptr_t)p, n);
 }
 
-/* The same bytes under a different kind. Written in terms of `apy_str_copy`
-   rather than beside it: the allocation, the NUL and the out-of-memory exit
-   are one implementation, and a second copy of them would be a second thing
-   to keep right. */
+/* The same bytes under a different kind -- its OWN copy, and not
+   `apy_str_copy` re-tagged: that funnel answers SHARED cells now, and
+   re-tagging one would turn every later `""` into `b""` at once. */
 APY_API apy_value apy_bytes_copy(const char *p, int64_t n) {
-    apy_value v = apy_str_copy(p, n);
-    O(v)->kind = APY_BYTES_K;
-    return v;
+    return apy_bytes_dup(p, n, 0);
+}
+
+/* AND THE WRITABLE ONE. `bytearray(b)` must not share a cell with anything,
+   least of all with the empty bytes every program holds. */
+APY_API apy_value apy_bytearray_copy(const char *p, int64_t n) {
+    return apy_bytes_dup(p, n, 1);
 }
 
 

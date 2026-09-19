@@ -62,11 +62,12 @@ def apy_str_translate(s: ptr, table: ptr) -> ptr:
     # directly, which is the only thing that tells them apart. `b""` is the
     # default CPython's own signature declares.
     if i64(load(i32, offset(s, 0))) == apy_bytes_kind():
-        empty: ptr = apy_from_bytes(rodata(b"\0"), 0)
-        if not empty:
-            return empty
-        store(i32, i32(apy_bytes_kind()), offset(empty, 0))
-        return apy_bytes_translate(s, table, empty)
+        # THE SHARED EMPTY BYTES, asked for rather than built. It used to be
+        # `apy_from_bytes` with the bytes kind written over the cell, which
+        # stopped being safe the moment that constructor began answering the
+        # SHARED empty string: re-tagging it turned every later `""` in the
+        # program into `b""`, silently and all at once.
+        return apy_bytes_translate(s, table, apy_shared_bytes(256))
     if i64(load(i32, offset(table, 0))) != apy_dict_kind():
         return apy_raise_fmt(
             rodata(b"TypeError\0"),

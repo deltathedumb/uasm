@@ -635,9 +635,12 @@ APY_API apy_value apy_to_bytes(apy_value src) {
         zeros = (char *)malloc((size_t)(count ? count : 1) + 1);
         if (!zeros) { fputs("uasm: out of memory\n", stderr); exit(1); }
         for (k = 0; k <= count; k++) zeros[k] = 0;
-        { apy_value r = apy_str_take(zeros, count);
-          O(r)->kind = APY_BYTES_K;
-          return r; }
+        /* NOT `apy_bytes_take`: CPython builds this one straight rather
+           than through the constructor that consults its cache, so
+           `bytes(1) is bytes(1)` is False there -- while `bytes(0)` still
+           answers the one empty. */
+        if (count == 0) return apy_bytes_copy("", 0);
+        return apy_bytes_own(zeros, count, 0);
     }
     /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
     src = apy_iterable(src);
@@ -658,9 +661,7 @@ APY_API apy_value apy_to_bytes(apy_value src) {
         buf[i] = (char)byte;
     }
     buf[n] = 0;
-    { apy_value r = apy_str_take(buf, n);
-      O(r)->kind = APY_BYTES_K;
-      return r; }
+    return apy_bytes_take(buf, n);
 }
 
 /* `bytearray(...)`. Always a fresh heap buffer, never the argument's --
@@ -677,14 +678,16 @@ APY_API apy_value apy_to_bytearray(apy_value src) {
         buf = (char *)malloc((size_t)(n ? n : 1) + 1);
         if (!buf) { fputs("uasm: out of memory\n", stderr); exit(1); }
         for (i = 0; i <= n; i++) buf[i] = 0;
-        out = apy_str_take(buf, n);
-        O(out)->kind = APY_BYTES_K;
+        out = apy_bytes_own(buf, n, 1);
     } else {
         out = apy_to_bytes(src);
         if (!out) return 0;
         /* `apy_to_bytes` hands back its argument unchanged when it is already
-           bytes; copy so the flag lands on a buffer this owns. */
-        out = apy_bytes_copy(O(out)->v.s.p, O(out)->v.s.n);
+           bytes; copy so the flag lands on a buffer this owns. A BYTEARRAY
+           COPY AND NOT A BYTES ONE: the plain copy answers a SHARED cell for
+           the empty and the one-byte values, and `bytearray(b"")` made
+           writable in place would be `b""` made writable. */
+        out = apy_bytearray_copy(O(out)->v.s.p, O(out)->v.s.n);
     }
     O(out)->v.s.mut = 1;
     return out;

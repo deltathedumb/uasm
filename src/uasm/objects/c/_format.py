@@ -977,12 +977,11 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
                         "formatting");
     }
     out[out_n] = 0;
-    { apy_value r = apy_str_take(out, out_n);
-      /* `b"%d" % 3` IS BYTES. The whole of the difference is the kind: the
-         format string's own bytes are ASCII either way, and every conversion
-         above produced text. */
-      if (O(fmt)->kind == APY_BYTES_K) O(r)->kind = APY_BYTES_K;
-      return r; }
+    /* `b"%d" % 3` IS BYTES. The whole of the difference is the kind: the
+       format string's own bytes are ASCII either way, and every conversion
+       above produced text. */
+    if (O(fmt)->kind == APY_BYTES_K) return apy_bytes_take(out, out_n);
+    return apy_str_take(out, out_n);
 }
 
 /* Re-tag a str METHOD'S RESULT to match its receiver.
@@ -1001,14 +1000,13 @@ APY_API apy_value apy_str_like(apy_value recv, apy_value out) {
     if (O(out)->kind == APY_STR_K
             || (O(out)->kind == APY_BYTES_K
                 && O(out)->v.s.mut != O(recv)->v.s.mut)) {
-        apy_value made = apy_str_copy(O(out)->v.s.p, O(out)->v.s.n);
-        O(made)->kind = APY_BYTES_K;
         /* A BYTEARRAY'S METHODS ANSWER A BYTEARRAY. `mut` is the whole of
            what separates the two kinds, so it has to travel with the tag:
            `bytearray(b"ab").upper()` is a bytearray in Python and came back
            as bytes here -- which a program then could not write into. */
-        O(made)->v.s.mut = O(recv)->v.s.mut;
-        return made;
+        if (O(recv)->v.s.mut)
+            return apy_bytearray_copy(O(out)->v.s.p, O(out)->v.s.n);
+        return apy_bytes_copy(O(out)->v.s.p, O(out)->v.s.n);
     }
     if (apy_is_seq(out)) {
         int64_t i;

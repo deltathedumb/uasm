@@ -160,10 +160,7 @@ static apy_value apy_text_arg(const char *meth, int argno, int indexy,
             { apy_fail("ValueError", "byte must be in range(0, 256)");
               return 0; }
         one[0] = (char)byte;
-        { apy_value made = apy_str_copy(one, 1);
-          if (!made) return 0;
-          O(made)->kind = APY_BYTES_K;
-          return made; }
+        return apy_bytes_copy(one, 1);
     }
     if (!want_bytes) {
         apy_arg_must_be_str(meth, argno, v);

@@ -146,7 +146,8 @@ REPLACES: dict[str, tuple[str, ...]] = {
     # It could only be named once the promotion made it visible, and it needed
     # an `apy_value` parameter because that is what an IR `ptr` compiles to.
     "str_cell.py": ("apy_from_cstr", "apy_from_bytes", "apy_bytes_literal",
-                    "apy_str_copy_bytes"),
+                    "apy_str_copy_bytes", "apy_shared_str",
+                    "apy_shared_bytes"),
     # THE BUFFERS, which is the prerequisite docs/INERT-RUNTIME.md names ahead
     # of `list` and `dict`: those two grow by DOUBLING and release the block
     # they grew out of, and stage 4's bump arena can neither resize nor

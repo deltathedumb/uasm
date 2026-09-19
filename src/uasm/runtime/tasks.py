@@ -152,13 +152,12 @@ def apy_str_like(recv: ptr, out: ptr) -> ptr:
         if i64(load(i32, offset(out, apy_s_mut_offset()))) != want:
             retag = 1
     if retag:
-        made: ptr = apy_str_copy_bytes(apy_str_data(out),
-                                       apy_str_byte_len(out))
-        if not made:
-            return made
-        store(i32, i32(apy_bytes_kind()), offset(made, 0))
-        store(i32, i32(want), offset(made, apy_s_mut_offset()))
-        return made
+        # THROUGH THE BYTES CONSTRUCTOR, not a string re-tagged in place: the
+        # string constructor answers SHARED cells now, and writing the bytes
+        # kind over the shared empty string turns every later `""` into `b""`
+        # at once. See `apy_bytes_made_of`.
+        return apy_bytes_made_of(apy_str_data(out), apy_str_byte_len(out),
+                                 want)
     if apy_is_seq_of(out):
         n: i64 = load(i64, offset(out, apy_q_n_offset()))
         items: ptr = ptr(load(u64, offset(out, apy_q_items_offset())))

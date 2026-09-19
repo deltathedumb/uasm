@@ -1523,12 +1523,12 @@ def apy_copy(v: ptr) -> ptr:
         return v
     if k == apy_bytes_kind():
         if i64(load(i32, offset(v, apy_s_mut_offset()))) != 0:
-            ba: ptr = apy_str_copy_bytes(apy_str_data(v), apy_str_byte_len(v))
-            if not ba:
-                return ba
-            store(i32, i32(apy_bytes_kind()), offset(ba, 0))
-            store(i32, i32(1), offset(ba, apy_s_mut_offset()))
-            return ba
+            # A BYTES CELL OF ITS OWN, and not a string re-tagged: the string
+            # constructor answers SHARED cells for the empty and the
+            # one-character values, and writing the bytes kind and the `mut`
+            # flag over one of those would make every later `""` a writable
+            # `b""`. See `apy_bytes_made_of`.
+            return apy_bytes_made_of(apy_str_data(v), apy_str_byte_len(v), 1)
     if k == apy_dict_kind():
         n: i64 = load(i64, offset(v, apy_d_n_offset()))
         out: ptr = apy_dict_new(n + 1)

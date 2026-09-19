@@ -125,12 +125,16 @@ def apy_raise_byte_range() -> i64:
 # part of the value, so the LENGTH stored here never counts it.
 
 
-def apy_from_bytes(p: ptr, n: i64) -> ptr:
-    """A str cell over `n` bytes at `p`, borrowed.
+def apy_str_cell(p: ptr, n: i64) -> ptr:
+    """A str cell over `n` bytes at `p`, borrowed, WITHOUT the shared test.
 
     The whole constructor: allocate, tag, store two fields. `mut` is left zero
     by the arena rather than written, which is the difference between a str
     and a bytearray.
+
+    SPLIT OUT OF `apy_from_bytes` so that `apy_shared_str` has something to
+    build its cells with: the constructor asks the table first, so the one
+    call that must not is the table's own.
     """
     cell: ptr = apy_obj_alloc(apy_str_kind())
     if not cell:
@@ -140,19 +144,183 @@ def apy_from_bytes(p: ptr, n: i64) -> ptr:
     return cell
 
 
-def apy_bytes_literal(p: ptr, n: i64) -> ptr:
-    """The same cell with the `bytes` tag.
+def apy_bytes_cell(p: ptr, n: i64, mut: i64) -> ptr:
+    """The same cell with the `bytes` tag and a chosen `mut`, no test either.
 
-    A SEPARATE FUNCTION RATHER THAN A FLAG, because that is what the C has and
-    the two are reached from different places in the frontend. The only
-    difference is the kind.
+    `mut` IS A PARAMETER AND NOT SOMETHING THE CALLER WRITES AFTERWARDS: a
+    bytearray is written into, so it can never be one of the shared cells,
+    and asking for the flag here makes "a fresh cell" and "a bytearray" one
+    decision. See `apy_bytes_own` in `objects/c/_core.py`, which is the same
+    function on the other side.
     """
     cell: ptr = apy_obj_alloc(apy_bytes_kind())
     if not cell:
         return cell
     store(u64, u64(p), offset(cell, apy_str_ptr_offset()))
     store(i64, n, offset(cell, apy_str_len_offset()))
+    store(i32, i32(mut), offset(cell, apy_str_mut_offset()))
     return cell
+
+
+def apy_from_bytes(p: ptr, n: i64) -> ptr:
+    """A str cell over `n` bytes at `p`, borrowed -- or the SHARED one.
+
+    THE ONE PLACE THE SHARED STRINGS ARE ANSWERED FROM. Every string this
+    runtime builds is a cell and every cell is made here, so putting the test
+    in the constructor is what makes `"" is str()`, `"a" is chr(97)` and
+    `"abc"[0:1] is "a"` all True without fifty call sites knowing about it.
+
+    THE BUFFER IS ABANDONED when a shared cell answers. It is arena storage,
+    which this runtime never releases anyway.
+    """
+    if n == 0:
+        return apy_shared_str(256)
+    cp: i64 = apy_shared_cp_of(p, n)
+    if cp >= 0:
+        return apy_shared_str(cp)
+    return apy_str_cell(p, n)
+
+
+def apy_bytes_literal(p: ptr, n: i64) -> ptr:
+    """The same cell with the `bytes` tag.
+
+    A SEPARATE FUNCTION RATHER THAN A FLAG, because that is what the C has and
+    the two are reached from different places in the frontend. The only
+    difference is the kind -- and the table it asks, since CPython keeps one
+    empty bytes and one per octet as well.
+    """
+    if n == 0:
+        return apy_shared_bytes(256)
+    if n == 1:
+        return apy_shared_bytes(i64(load(u8, p)))
+    return apy_bytes_cell(p, n, 0)
+
+
+# ── the shared empty and one-character strings ──────────────────────────────
+#
+# CPython keeps one empty string and one string per latin-1 character, and a
+# program SEES it: `"" is str()`, `"a" is chr(97)` and `"abc"[0:1] is "a"` are
+# all True, while a character above U+00FF is not cached, so
+# `chr(256) is chr(256)` is False.
+#
+# 257 SLOTS, the last one for the empty string, plus three bytes per character
+# for the UTF-8 it is spelled with and its terminator. `reserve` gives static
+# storage that is ZEROED, so a null slot means "not built yet" and no separate
+# flag is needed -- the same trick `int_cell.py` plays for the small integers.
+#
+# THIS DISPLACES THE C'S TABLE AND DOES NOT SIT BESIDE IT. A build must have
+# exactly one: `apy_str_take` stays in C and `apy_str_copy_bytes` is this
+# file's, and two tables would make a literal built through one and a slice
+# built through the other two empty strings that compare unequal. The C's
+# `apy_shared_str` is an `APY_API` for that reason and this name is in
+# `REPLACES["str_cell.py"]`.
+
+
+def apy_str_shared_slot(cp: i64) -> ptr:
+    return offset(reserve("apy_str_shared_ir", 2056), cp * 8)
+
+
+def apy_shared_utf8_slot(cp: i64) -> ptr:
+    return offset(reserve("apy_shared_utf8_ir", 768), cp * 3)
+
+
+def apy_shared_str(cp: i64) -> ptr:
+    """The shared string for one code point, or for NOTHING at index 256."""
+    slot: ptr = apy_str_shared_slot(cp)
+    shared: ptr = ptr(load(u64, slot))
+    if shared:
+        return shared
+    if cp == 256:
+        shared = apy_str_cell(rodata(b"\0"), 0)
+        store(u64, u64(shared), slot)
+        return shared
+    b: ptr = apy_shared_utf8_slot(cp)
+    n: i64 = 1
+    if cp < 128:
+        store(u8, u8(cp), b)
+    else:
+        store(u8, u8(192 + (cp >> 6)), b)
+        store(u8, u8(128 + (cp & 63)), offset(b, 1))
+        n = 2
+    store(u8, u8(0), offset(b, n))
+    shared = apy_str_cell(b, n)
+    store(u64, u64(shared), slot)
+    return shared
+
+
+def apy_bytes_shared_slot(b: i64) -> ptr:
+    return offset(reserve("apy_bytes_shared_ir", 2056), b * 8)
+
+
+def apy_shared_byte_slot(b: i64) -> ptr:
+    return offset(reserve("apy_shared_byte_ir", 512), b * 2)
+
+
+def apy_shared_bytes(b: i64) -> ptr:
+    """The shared bytes for one octet, or for NOTHING at index 256."""
+    slot: ptr = apy_bytes_shared_slot(b)
+    shared: ptr = ptr(load(u64, slot))
+    if shared:
+        return shared
+    if b == 256:
+        shared = apy_bytes_cell(rodata(b"\0"), 0, 0)
+        store(u64, u64(shared), slot)
+        return shared
+    one: ptr = apy_shared_byte_slot(b)
+    store(u8, u8(b), one)
+    store(u8, u8(0), offset(one, 1))
+    shared = apy_bytes_cell(one, 1, 0)
+    store(u64, u64(shared), slot)
+    return shared
+
+
+def apy_bytes_made_of(p: ptr, n: i64, mut: i64) -> ptr:
+    """`n` bytes COPIED into a bytes cell, shared when it may be shared.
+
+    WHAT THE TWO PLACES THAT USED TO RE-TAG A STRING NOW CALL. Building a str
+    and writing the bytes kind over it was safe while every constructor
+    answered a fresh cell; it stopped being safe the moment `apy_from_bytes`
+    began answering shared ones, because re-tagging the shared empty STRING
+    turns every later `""` into `b""` at once, everywhere.
+    """
+    if mut == 0:
+        if n == 0:
+            return apy_shared_bytes(256)
+        if n == 1:
+            return apy_shared_bytes(i64(load(u8, p)))
+    buf: ptr = apy_alloc_bytes(n + 1)
+    if not buf:
+        return buf
+    i: i64 = 0
+    while i < n:
+        store(u8, load(u8, offset(p, i)), offset(buf, i))
+        i = i + 1
+    store(u8, u8(0), offset(buf, n))
+    return apy_bytes_cell(buf, n, mut)
+
+
+def apy_shared_cp_of(p: ptr, n: i64) -> i64:
+    """The code point `n` bytes spell when the runtime shares that string.
+
+    -1 FOR EVERYTHING ELSE -- more than one character, or a character above
+    U+00FF. One latin-1 character is one or two UTF-8 bytes, which is the
+    whole of what the two arms decode.
+    """
+    if n == 1:
+        lead: i64 = i64(load(u8, p))
+        if lead < 128:
+            return lead
+        return -1
+    if n == 2:
+        b0: i64 = i64(load(u8, p))
+        b1: i64 = i64(load(u8, offset(p, 1)))
+        if (b0 & 224) == 192:
+            if (b1 & 192) == 128:
+                cp: i64 = ((b0 & 31) << 6) | (b1 & 63)
+                if cp >= 128:
+                    if cp < 256:
+                        return cp
+    return -1
 
 
 def apy_str_copy_bytes(p: ptr, n: i64) -> ptr:
@@ -176,6 +344,11 @@ def apy_str_copy_bytes(p: ptr, n: i64) -> ptr:
     without one is a cell the rest of the runtime reads off the end of. The
     arena is asked for `n + 1` for exactly that byte.
     """
+    if n == 0:
+        return apy_shared_str(256)
+    cp: i64 = apy_shared_cp_of(p, n)
+    if cp >= 0:
+        return apy_shared_str(cp)
     buf: ptr = apy_alloc_bytes(n + 1)
     if not buf:
         return buf

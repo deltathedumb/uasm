@@ -3918,6 +3918,55 @@ PROGRAMS = {
 
         asyncio.run(drive())
     """,
+    # THE EMPTY AND ONE-CHARACTER SINGLETONS, and the identity rules that go
+    # with them. CPython keeps one empty string, one string per latin-1
+    # character, one empty bytes, one bytes per octet and one empty tuple --
+    # and nothing else about a str, a bytes or a tuple is shared, so
+    # `chr(256) is chr(256)` is False at the boundary. It also hands the
+    # RECEIVER back where an immutable sequence operation has nothing to do:
+    # a whole slice, a repeat by one, a concatenation with nothing. A list
+    # and a bytearray copy in all three, because either can be written to
+    # afterwards, and that is what `xs[:]` is for.
+    #
+    # Every one of these was False here. The runtime built a fresh cell for
+    # each, so `"" is str()` and `s[:] is s` answered no, and a program that
+    # printed either got a different answer from CPython.
+    "the_empty_and_one_character_values_are_shared": """
+        s = "abcd"
+        b = b"abcd"
+        t = (1, 2, 3)
+        xs = [1, 2]
+        ba = bytearray(b"ab")
+        e = ""
+        eb = b""
+        et = ()
+        one = "a"
+        oneb = b"a"
+        print("slice self:", s[:] is s, b[:] is b, t[:] is t)
+        print("slice step1:", s[::1] is s, b[::1] is b, t[::1] is t)
+        print("slice copies:", xs[:] is xs, ba[:] is ba)
+        print("empties:", str() is e, bytes() is eb, tuple() is et)
+        print("empty slices:", s[0:0] is e, b[0:0] is eb, t[0:0] is et)
+        print("one char:", s[0:1] is one, b[0:1] is oneb)
+        print("chr:", chr(97) is one, chr(233) is chr(233),
+              chr(256) is chr(256))
+        print("join:", "".join([]) is e, "-".join([]) is e)
+        print("bjoin:", b"".join([]) is eb)
+        print("mult one:", s * 1 is s, t * 1 is t, b * 1 is b)
+        print("mult zero:", s * 0 is e, t * 0 is et)
+        print("concat:", s + e is s, e + s is s, t + et is t, et + t is t)
+        print("tuple conv:", tuple([]) is et, tuple(t) is t)
+        print("bytes seq:", bytes([97]) is oneb, bytes(b) is b)
+        print("ba fresh:", bytearray(b"") is not eb,
+              bytearray() is not bytearray())
+        # AND THE VALUES ARE STILL RIGHT, which is the half a sharing bug
+        # would break silently: a bytearray that came back as the shared
+        # empty bytes would be unwritable, and a bytes cell re-tagged from a
+        # shared string would turn every later `""` into `b""`.
+        ba.append(99)
+        print("values:", repr(s[:]), repr(t[0:0]), repr(s[0:1]), repr(ba),
+              repr(e), repr(eb))
+    """,
     # A BUILTIN'S `__new__` BUILDS THE SUBCLASS IT IS HANDED. It is an
     # implicit staticmethod, so its first argument is the CLASS TO BUILD and
     # not a receiver of that type -- and the unbound-method check that every

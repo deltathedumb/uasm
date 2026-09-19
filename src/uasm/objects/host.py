@@ -431,6 +431,31 @@ class ObjectHost:
             raise IndexError(h)
         return self._cells[i]
 
+    def _builder(self, obj) -> int:
+        """A handle for a cell the builder will REPLACE, enrolled in nothing.
+
+        `apy_tuple_new` followed by one `apy_seq_push` per element is how a
+        tuple is built, and a Python tuple cannot be pushed onto -- so the
+        CELL is swapped for a longer one each time (see `_apy_seq_push`).
+        That makes the starting `()` a placeholder rather than a value, and
+        `_new` would record it in `_identity` as the one handle for the empty
+        tuple: the next push would leave that entry pointing at a cell that
+        is no longer empty, and `()` would stop being a singleton.
+
+        THE SHADOW REFCOUNT IS STILL ENROLLED, and leaving it out was a real
+        bug for the hour it existed: a container holds a reference to every
+        element pushed into it, and `_held_by` releases those when the
+        container's own count reaches zero. A container with no entry never
+        reaches zero, so nothing it held was ever released -- two `__del__`s
+        in `tests/stdlib/weakref.py` moved from their `del` statement to the
+        end of the program. It is only the IDENTITY record that a builder
+        must not make.
+        """
+        self._cells.append(obj)
+        made = len(self._cells) - 1 + _HANDLE_BASE
+        self._refcount[made] = 0
+        return made
+
     def _new(self, obj) -> int:
         self._cells.append(obj)
         made = len(self._cells) - 1 + _HANDLE_BASE
@@ -846,6 +871,17 @@ class ObjectHost:
 
     def _value(self, obj) -> int:
         """A handle for a computed result, interning what the C interns."""
+        if type(obj) is bytes and len(obj) == 1:
+            # CPYTHON CACHES THE 256 ONE-BYTE BYTES OBJECTS, and most of the
+            # ways to make one answer from that cache: a literal, a slice of
+            # a longer bytes, `bytes([n])`. Reading one out of the
+            # interpreter's own memory does NOT -- `bytes(buf[i:i + 1])` goes
+            # through the buffer protocol, which allocates -- so an equal
+            # object arrives with a different `id` and gets a second handle,
+            # and `b"abcd"[0:1] is b"a"` answers False where CPython says
+            # True. Normalised here rather than at the four constructors that
+            # read memory, because this is where identity is decided.
+            obj = _ONE_BYTE[obj[0]]
         if obj is None:
             return self._none
         if obj is NotImplemented:
@@ -2347,13 +2383,17 @@ def _read_cstr(h, addr: int) -> str:
 
 
 def _apy_from_cstr(h, a):
-    return h._new(_read_cstr(h, int(a[0])))
+    return h._value(_read_cstr(h, int(a[0])))
 
 
 def _apy_from_bytes(h, a):
+    # THROUGH `_value`, like every other string constructor here: this is the
+    # cell constructor the compiled runtimes answer their shared empty and
+    # one-character strings from, and a fresh handle per call would make
+    # `"" is str()` False on this path alone.
     addr, n = int(a[0]), int(a[1])
     buf = h._interp.mem.buf
-    return h._new(_decode_cell(bytes(buf[addr:addr + n])))
+    return h._value(_decode_cell(bytes(buf[addr:addr + n])))
 
 
 # ── extraction ──────────────────────────────────────────────────────────────
@@ -2364,6 +2404,12 @@ def _apy_from_bytes(h, a):
 #: `1 << 62` so that adding a length cannot overflow; the host matches it so
 #: the two clamp to the same place.
 _HUGE_BOUND = 1 << 62
+
+#: See `Host._value`: the 256 shared one-byte bytes objects, as CPython keeps
+#: them. SLICED OUT OF ONE LONGER BYTES, which is the spelling that reaches
+#: the cache -- `bytes(some_buffer)` does not.
+_ALL_BYTES = bytes(range(256))
+_ONE_BYTE = tuple(_ALL_BYTES[i:i + 1] for i in range(256))
 
 
 def _apy_slice_bound(h, a):
@@ -3558,7 +3604,9 @@ def _apy_seq_new_of(h, a):
     kind = int(a[0])
     from uasm.objects.ir import PORTED  # noqa: F401  (import kept local)
     made = {9: set(), 10: frozenset(), 7: (), 6: []}.get(kind)
-    return h._new([] if made is None else made)
+    # THROUGH `_builder` for the same reason `apy_tuple_new` is: what comes
+    # back here is pushed into, so it is a placeholder and not an answer.
+    return h._builder([] if made is None else made)
 
 
 def _apy_kind_name_of(h, a):
@@ -3748,7 +3796,26 @@ def _apy_list_new(h, a):
 
 
 def _apy_tuple_new(h, a):
-    return h._new(())
+    # A BUILDER AND NOT A VALUE -- see `Host._builder`. `apy_tuple_empty` is
+    # what answers the one empty tuple.
+    return h._builder(())
+
+
+def _apy_tuple_empty(h, a):
+    """THE ONE EMPTY TUPLE. `() is tuple()` and `(1, 2)[0:0] is ()` are True
+    in CPython, and the host's tuples ARE CPython's -- so this is the value,
+    and `_value` interning by `id` is what makes it one handle."""
+    return h._value(())
+
+
+def _apy_tuple_done(h, a):
+    """The tuple to answer with, once one has been built: see the C's
+    `apy_tuple_done`. Only an EMPTY one is replaced; everything else is
+    itself, handle and all."""
+    v = h._get(a[0], "apy_tuple_done")
+    if isinstance(v, tuple) and not v:
+        return h._value(())
+    return int(a[0])
 
 
 def _apy_seq_push(h, a):
@@ -3778,7 +3845,14 @@ def _apy_seq_push(h, a):
         # adding the new one is what keeps that from happening.
         made = seq + (item,)
         h._cells[int(a[0]) - _HANDLE_BASE] = made
-        h._identity.pop(id(seq), None)
+        if seq:
+            # NOT THE EMPTY ONE, which is a SINGLETON: `() is tuple()` is
+            # True and `apy_tuple_empty` answers one handle for it, so the
+            # pop below would take that handle's entry away the first time
+            # anything pushed onto a fresh builder. The empty tuple is also
+            # the one tuple CPython never frees, so the `id` reuse this
+            # guards against cannot happen for it.
+            h._identity.pop(id(seq), None)
         h._identity[id(made)] = int(a[0])
         # The tuple holds a reference now, like the list below, and
         # `_held_by` releases it when the tuple itself reaches zero.
@@ -3877,14 +3951,14 @@ def _apy_getitem(h, a):
         # A SLICE OF A VIEW IS STILL A VIEW -- `mv[1:3][0] = 9` writes to the
         # original buffer, which a copy here would silently lose.
         try:
-            return h._new(seq[index])
+            return h._value(seq[index])
         except (TypeError, IndexError) as exc:
             return h._fail_like(exc)
     if isinstance(index, slice) and isinstance(seq, (list, tuple, str, bytes)):
         # `xs[slice(1, 5)]`. `xs[1:5]` never comes this way -- the frontend
         # slices it directly -- but a slice built as a VALUE has to work as a
         # subscript too.
-        return h._new(seq[index])
+        return h._value(seq[index])
     if not _is_int_like(index) and isinstance(index, Instance)             and index.cls.find("__index__") is not None:
         # `__index__` -- how a user object BECOMES an index. PEP 357, and a
         # separate dunder from `__int__` for a reason: a float has `__int__`
@@ -3951,7 +4025,7 @@ def _apy_getitem(h, a):
         # ARITHMETIC, not a walk: the element at an index is one
         # multiplication whatever the range's length.
         try:
-            return h._new(seq[i])
+            return h._value(seq[i])
         except IndexError:
             return h._fail("IndexError", "range object index out of range")
     if isinstance(seq, str):
@@ -3963,7 +4037,7 @@ def _apy_getitem(h, a):
             i += len(seq)
         if not 0 <= i < len(seq):
             return h._fail("IndexError", "string index out of range")
-        return h._new(seq[i])
+        return h._value(seq[i])
     return h._fail("TypeError",
                    f"'{h.kind_name(seq)}' object is not subscriptable")
 
@@ -4449,7 +4523,7 @@ def _apy_str_encode(h, a):
         return h._fail("LookupError",
                        f"unknown encoding: {h._get(a[1], 'encode')}")
     try:
-        return h._new(v.encode(name, handler))
+        return h._value(v.encode(name, handler))
     except UnicodeEncodeError as exc:
         # CPYTHON'S OWN SENTENCE, character, position and reason included:
         # `'utf-8' codec can't encode character '\udcff' in position 1:
@@ -4571,7 +4645,7 @@ def _apy_bytes_decode(h, a):
         return h._fail("LookupError",
                        f"unknown encoding: {h._get(a[1], 'decode')}")
     try:
-        return h._new(bytes(v).decode(name, handler))
+        return h._value(bytes(v).decode(name, handler))
     except UnicodeDecodeError as exc:
         # CPYTHON'S OWN SENTENCE again -- the byte, the position and which of
         # its three reasons it was. See `apy_utf8_why` for the C's copy.
@@ -4644,8 +4718,12 @@ def _apy_bytes_fromhex(h, a):
         got = bytes.fromhex(text)
     except ValueError as exc:
         return h._fail_like(exc)
-    # AND THE ANSWER IS THE KIND IT WAS REACHED THROUGH.
-    return h._new(bytearray(got) if isinstance(held, bytearray) else got)
+    # AND THE ANSWER IS THE KIND IT WAS REACHED THROUGH. A bytearray is a
+    # fresh object either way; the bytes go through `_value` so that
+    # `bytes.fromhex("61") is b"a"` answers True, as it does in CPython.
+    if isinstance(held, bytearray):
+        return h._new(bytearray(got))
+    return h._value(got)
 
 
 def _mview_live(h, view) -> bool:
@@ -12642,13 +12720,19 @@ def _apy_slice(h, a):
     # A SLICE OF A RANGE IS A RANGE, not a list -- Python's own `range`
     # answers one, which is the behaviour the C reproduces.
     if isinstance(v, range):
-        return h._new(v[sl])
+        return h._value(v[sl])
     if not isinstance(v, (list, tuple, str, bytes, bytearray, memoryview)):
         return h._fail("TypeError",
                        f"'{h.kind_name(v)}' object is not subscriptable")
     # SLICING A MEMORYVIEW ANSWERS A MEMORYVIEW, not a copy -- Python's own
     # type does that, which is why this one line covers it.
-    return h._new(v[sl])
+    #
+    # THROUGH `_value`, so that the object CPython hands back is the object a
+    # program compares. `s[:]` and `t[:]` answer the RECEIVER for a str, a
+    # bytes and a tuple -- and not for a list or a bytearray, which copy --
+    # and `s[0:0]` is the one empty string. Minting a fresh handle hid every
+    # one of those: the answer was equal to its receiver and never `is` it.
+    return h._value(v[sl])
 
 
 # ── list and dict methods ───────────────────────────────────────────────────
@@ -13706,7 +13790,7 @@ def _apy_bytes_literal(h, a):
     kind exists.
     """
     addr, n = int(a[0]), int(a[1])
-    return h._new(bytes(h._interp.mem.buf[addr:addr + n]))
+    return h._value(bytes(h._interp.mem.buf[addr:addr + n]))
 
 
 _TABLE["apy_bytes_literal"] = _apy_bytes_literal
@@ -14006,15 +14090,25 @@ _TABLE["apy_str_bytes"] = _apy_str_bytes
 # make a str" -- and the distinction they encode is one the interpreter
 # genuinely does not have.
 
+# THROUGH `_value` AND NOT `_new`, which is what gives this path CPython's
+# own singletons for free. `_new` mints a FRESH handle every time and only
+# records an identity for an object it has not seen; `_value` looks the
+# object up first, so one Python object is one handle however many routes
+# reach it. The host's strings ARE CPython's strings, and CPython shares the
+# empty one, the 256 latin-1 one-character ones, the empty bytes, the 256
+# one-byte ones and the empty tuple -- so `str() is ""`, `chr(97) is "a"` and
+# `s[0:0] is ""` all come out right here without a table of our own. The
+# compiled runtimes have to BUILD those singletons (see `apy_str_copy_bytes`
+# in `objects/c/_core.py`); this path only has to stop hiding them.
 def _apy_lit(h, a):
     """A NUL-terminated literal. Interned in the C; a value here."""
-    return h._new(_read_cstr(h, int(a[0])))
+    return h._value(_read_cstr(h, int(a[0])))
 
 
 def _apy_str_take(h, a):
     addr, n = int(a[0]), int(a[1])
-    return h._new(bytes(h._interp.mem.buf[addr:addr + n])
-                  .decode("utf-8", "surrogateescape"))
+    return h._value(bytes(h._interp.mem.buf[addr:addr + n])
+                    .decode("utf-8", "surrogateescape"))
 
 
 def _apy_str_copy(h, a):
@@ -14023,7 +14117,7 @@ def _apy_str_copy(h, a):
 
 def _apy_bytes_copy(h, a):
     addr, n = int(a[0]), int(a[1])
-    return h._new(bytes(h._interp.mem.buf[addr:addr + n]))
+    return h._value(bytes(h._interp.mem.buf[addr:addr + n]))
 
 
 _TABLE["apy_lit"] = _apy_lit
@@ -14045,6 +14139,47 @@ def _apy_str_copy_bytes(h, a):
 
 _TABLE["apy_str_copy_bytes"] = _apy_str_copy_bytes
 _TABLE["apy_bytes_copy"] = _apy_bytes_copy
+
+
+def _apy_bytearray_copy(h, a):
+    """`bytearray(b)` -- the writable copy.
+
+    A BYTEARRAY IS A REAL `bytearray` HERE, so there is no flag to set and
+    no shared cell to avoid: the copy the compiled runtime has to make by
+    hand is what the constructor does.
+    """
+    addr, n = int(a[0]), int(a[1])
+    return h._new(bytearray(h._interp.mem.buf[addr:addr + n]))
+
+
+_TABLE["apy_bytearray_copy"] = _apy_bytearray_copy
+
+
+# ── the shared cells, which this path gets for free ─────────────────────────
+#
+# THE HOST'S STRINGS ARE CPYTHON'S STRINGS, and CPython shares the empty one,
+# the 256 latin-1 one-character ones, the empty bytes, the 256 one-byte ones
+# and the empty tuple. The compiled runtimes keep tables for those (see
+# `apy_shared_str` in `objects/c/_core.py` and `runtime/str_cell.py`); here
+# the answer is just the value, and `_value` -- which interns by `id` -- makes
+# one handle of it.
+#
+# THE ARGUMENT IS A PLAIN NUMBER AND NOT A HANDLE, as it is for
+# `apy_type_builtin`: the C takes an `int64_t`, so what arrives is the code
+# point itself and `h._get` would refuse it.
+
+def _apy_shared_str(h, a):
+    cp = int(a[0])
+    return h._value("" if cp == 256 else chr(cp))
+
+
+def _apy_shared_bytes(h, a):
+    b = int(a[0])
+    return h._value(b"" if b == 256 else bytes([b]))
+
+
+_TABLE["apy_shared_str"] = _apy_shared_str
+_TABLE["apy_shared_bytes"] = _apy_shared_bytes
 
 
 def _apy_delitem(h, a):
@@ -14431,7 +14566,10 @@ def _apy_chr(h, a):
                        f"an integer is required (got type {h.kind_name(v)})")
     if not 0 <= v <= 0x10FFFF:
         return h._fail("ValueError", "chr() arg not in range(0x110000)")
-    return h._new(chr(v))
+    # `chr(97) is "a"` IS TRUE IN CPYTHON, and the host's strings are
+    # CPython's -- so the shared cell is already what `chr` built, and only
+    # the handle for it had to stop being a fresh one.
+    return h._value(chr(v))
 
 
 def _apy_callable(h, a):
@@ -16806,7 +16944,8 @@ def _apy_to_bytes(h, a):
         if not 0 <= value <= 255:
             return h._fail("ValueError", "bytes must be in range(0, 256)")
         out.append(value)
-    return h._new(bytes(out))
+    # `bytes([97]) is b"a"` IS TRUE IN CPYTHON -- see `_apy_chr`.
+    return h._value(bytes(out))
 
 
 _TABLE.update({

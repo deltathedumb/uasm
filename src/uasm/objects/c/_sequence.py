@@ -423,6 +423,33 @@ static apy_value apy_seq_new(int kind, int64_t cap) {
 APY_API apy_value apy_list_new(int64_t cap) { return apy_seq_new(APY_LIST_K, cap); }
 APY_API apy_value apy_tuple_new(int64_t cap) { return apy_seq_new(APY_TUPLE_K, cap); }
 
+/* THE ONE EMPTY TUPLE. CPython keeps exactly one and nothing else about a
+   tuple is shared: `() is tuple()`, `(1, 2)[0:0] is ()` and `t * 0 is ()` are
+   all True there, while two equal non-empty tuples built separately are two
+   objects. A program sees it with `is` and with `id()`.
+
+   BUILT ON FIRST ASK and never freed, like the string singletons in
+   `_core.py`. Nothing may ever push into it -- a tuple is immutable, so the
+   only way one grows is the constructor that has not finished yet, and this
+   is only ever handed out as a FINISHED value. */
+static apy_value apy_tuple_shared;
+
+APY_API apy_value apy_tuple_empty(void) {
+    if (!apy_tuple_shared) apy_tuple_shared = apy_seq_new(APY_TUPLE_K, 1);
+    return apy_tuple_shared;
+}
+
+/* THE TUPLE TO ANSWER WITH, once one has been built. An empty one becomes
+   the shared cell; everything else is itself. Written as a filter over a
+   finished value rather than as a test inside `apy_tuple_new`, because a
+   tuple is allocated with room and filled afterwards -- at the moment it is
+   made nobody knows yet whether it will stay empty. */
+APY_API apy_value apy_tuple_done(apy_value q) {
+    if (q && O(q)->kind == APY_TUPLE_K && O(q)->v.q.n == 0)
+        return apy_tuple_empty();
+    return q;
+}
+
 /* Append with NO checking at all -- not that the cell is a list, not that a
    set already holds an equal element. Split out from `apy_seq_push` because
    the set code appends to a `v.q` that `apy_is_seq` rejects, and because a set
@@ -543,19 +570,23 @@ static apy_value apy_bytes_getitem(apy_value seq, int64_t i) {
 static apy_value apy_bytes_repeat(apy_value v, apy_value count) {
     int64_t k, n, i;
     if (!apy_index_arg(count, &k, APY_IDX_SUB)) return 0;
+    /* `b * 1 IS b` for immutable bytes, exactly as `s * 1 is s` and
+       `t * 1 is t` -- see `apy_str_repeat`. A BYTEARRAY repeated once is a
+       fresh bytearray, because it can be written to. */
+    if (k == 1 && !O(v)->v.s.mut) return v;
     if (k < 0) k = 0;
     n = O(v)->v.s.n;
     { char *out = (char *)malloc((size_t)(n * k) + 1);
       if (!out) { fputs("uasm: out of memory\n", stderr); exit(1); }
       for (i = 0; i < k; i++) memcpy(out + i * n, O(v)->v.s.p, (size_t)n);
       out[n * k] = 0;
-      { apy_value r = apy_str_take(out, n * k);
-        O(r)->kind = APY_BYTES_K;
-        /* A BYTEARRAY REPEATS INTO A BYTEARRAY, as `+` already carried:
-           `mut` is the whole of what separates the two kinds and it has to
-           travel with the tag. */
-        O(r)->v.s.mut = O(v)->v.s.mut;
-        return r; } }
+      /* A BYTEARRAY REPEATS INTO A BYTEARRAY, as `+` already carried:
+         `mut` is the whole of what separates the two kinds and it has to
+         travel with the tag.
+         AND NOT THROUGH THE SHARED CELLS. CPython allocates a repetition
+         directly rather than through the constructor that consults its
+         cache, so `b"ab" * 0 is b""` is False there. */
+      return apy_bytes_own(out, n * k, O(v)->v.s.mut); }
 }
 
 
