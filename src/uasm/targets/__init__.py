@@ -51,6 +51,15 @@ AARCH64_LINUX = register(Target(
     cc_names=("aarch64-linux-gnu-gcc", "aarch64-none-linux-gnu-gcc"),
 ), aliases=("arm64", "arm64-linux"))
 
+#: WINDOWS ON ARM. The ABI is AAPCS64 with Microsoft's variations, and the
+#: one that matters to a code generator is that `x18` is the thread
+#: environment block's -- which this backend already leaves alone, because
+#: the AAPCS calls it the platform register and says not to touch it.
+AARCH64_WINDOWS = register(Target(
+    "aarch64-windows", arch="aarch64", os="windows", abi="aapcs64",
+    object_format="coff", object_suffix=".obj", executable_suffix=".exe",
+), aliases=("arm64-windows", "aarch64-pc-windows-msvc"))
+
 AARCH64_MACOS = register(Target(
     "aarch64-macos", arch="aarch64", os="macos", abi="aapcs64",
     object_format="macho", object_suffix=".o", executable_suffix="",

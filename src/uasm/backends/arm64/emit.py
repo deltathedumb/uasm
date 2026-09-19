@@ -465,8 +465,11 @@ class Arm64Backend(Backend):
         if target.object_format == "macho":
             from .machoemit import object_bytes as macho_bytes
             return {"out.o": macho_bytes(self, module, abi, dialect)}
+        if target.object_format == "coff":
+            from .coffemit import object_bytes as coff_bytes
+            return {"out.obj": coff_bytes(self, module, abi, dialect)}
         if target.object_format == "elf":
-            # THE BACKEND DECIDES EVERY WORD. See `encode.py` and the two
+            # THE BACKEND DECIDES EVERY WORD. See `encode.py` and the three
             # object emitters beside it.
             from .objemit import object_bytes
             return {"out.o": object_bytes(self, module, abi, dialect)}

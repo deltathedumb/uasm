@@ -528,10 +528,29 @@ def _patch_coff_arm64(buf: bytearray, at: int, rel: InReloc, s: int,
     of most of this: the arithmetic is the architecture's and the numbering
     is the container's.
     """
-    same = {0x0001: 257,          # ADDR64            -> R_AARCH64_ABS64
-            0x0003: 283,          # BRANCH26          -> CALL26
+    # COFF'S ARM64 NUMBERING IS NOT COFF'S x86-64 NUMBERING: `1` is
+    # a 32-bit absolute here and a 64-bit one there, and ARM64's ADDR64 is
+    # fourteen. Read back off objects llvm assembled rather than recalled.
+    same = {0x0003: 283,          # BRANCH26          -> CALL26
             0x0004: 275,          # PAGEBASE_REL21    -> ADR_PREL_PG_HI21
-            0x0006: 277}          # PAGEOFFSET_12A    -> ADD_ABS_LO12_NC
+            0x0006: 277,          # PAGEOFFSET_12A    -> ADD_ABS_LO12_NC
+            0x000E: 257}          # ADDR64            -> R_AARCH64_ABS64
+    if rel.kind == 0x0007:
+        # PAGEOFFSET_12L IS THE LOAD FORM, where `12A` is the add form -- one
+        # number each where ELF names the access width, so the shift comes
+        # from the instruction exactly as it does in Mach-O.
+        word, = struct.unpack_from("<I", buf, at)
+        same = {**same, 0x0007: _pageoff_kind(word)}
+    if rel.kind in (0x0001, 0x0002):
+        # ADDR32 and ADDR32NB: a four-byte absolute, and the same minus the
+        # image base. Neither is a bitfield, so neither goes through
+        # `_patch_aarch64`.
+        value = s + rel.addend - (_IMAGE_BASE[0] if rel.kind == 0x0002 else 0)
+        if not 0 <= value < (1 << 32):
+            raise LinkFailed(
+                f"{name!r} does not fit a 32-bit field")
+        struct.pack_into("<I", buf, at, value)
+        return
     if rel.kind not in same:
         raise LinkFailed(
             f"COFF AArch64 relocation type {rel.kind:#x} is not implemented",

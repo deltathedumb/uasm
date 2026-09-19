@@ -731,11 +731,175 @@ def _macos_aarch64_object(entry: str):
     return obj
 
 
+def _windows_aarch64_object(entry: str):
+    """The floor and the entry point for Windows on ARM.
+
+    THE SAME IMPORT TABLE AS x86-64 WINDOWS and none of the same
+    instructions. `kernel32.dll` is still the only way to the kernel, so
+    every call here goes through the IAT -- but AArch64 has no indirect call
+    through a PC-relative memory operand, so reaching a slot takes three
+    instructions rather than one:
+
+        adrp x16, __imp_WriteFile          ; the slot's page
+        ldr  x16, [x16, :lo12:__imp_...]   ; the function's address
+        blr  x16
+
+    x16 IS THE RIGHT REGISTER FOR IT. The AAPCS calls it IP0 and reserves it
+    for exactly this -- a scratch a veneer may use between the caller and the
+    callee -- which is also why `emit.py` keeps it out of the allocator.
+
+    AND THE CONVENTION IS AAPCS64, not the x64 one: arguments in x0 through
+    x7, NO SHADOW SPACE (that is an x86-64 Windows rule and not an ARM one),
+    and the stack 16-aligned at all times. `x18` is the thread environment
+    block's on this platform and nothing here touches it.
+
+    NOTHING HERE HAS BEEN EXECUTED. Every word was taken from `llvm-mc
+    -show-encoding` and checked back by disassembling the linked image; see
+    the x86-64 Windows twin, which says the same.
+    """
+    from ..backend.objfile import (
+        CoffObject, CoffRelocation, CoffSymbol, IMAGE_FILE_MACHINE_ARM64,
+        IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ,
+    )
+
+    BRANCH26 = 0x0003
+    PAGEBASE_REL21 = 0x0004
+    PAGEOFFSET_12L = 0x0007
+    words: list[int] = []
+    symbols: list = []
+    relocs: list = []
+
+    def here() -> int:
+        return len(words) * 4
+
+    def call(name: str) -> None:
+        """`blr` through the IAT slot `__imp_<name>`."""
+        slot = "__imp_" + name
+        relocs.append(CoffRelocation(here(), slot, PAGEBASE_REL21))
+        words.append(0x90000010)                  # adrp x16, slot
+        relocs.append(CoffRelocation(here(), slot, PAGEOFFSET_12L))
+        words.append(0xF9400210)                  # ldr x16, [x16, :lo12:]
+        words.append(0xD63F0200)                  # blr x16
+
+    def end(name: str, at: int) -> None:
+        symbols.append(CoffSymbol(name=name, section=".text", value=at,
+                                  size=here() - at, binding=1, kind=2))
+
+    RET = 0xD65F03C0
+    BRK0 = 0xD4200000
+    PUSH_FP = 0xA9BF7BFD          # stp x29, x30, [sp, #-16]!
+    POP_FP = 0xA8C17BFD           # ldp x29, x30, [sp], #16
+    PUSH_48 = 0xA9BD7BFD          # stp x29, x30, [sp, #-48]!
+    POP_48 = 0xA8C37BFD           # ldp x29, x30, [sp], #48
+    MOV_FP_SP = 0x910003FD        # mov x29, sp
+
+    # ── _start ──────────────────────────────────────────────────────────────
+    at = here()
+    # THE STACK IS ALIGNED BY HAND rather than trusted. The loader starts a
+    # thread with `sp` 16-aligned, and an unaligned one faults on the first
+    # store rather than misbehaving quietly -- so three instructions buy the
+    # difference between a program that cannot start and one that cannot
+    # start FOR A REASON NOBODY WOULD GUESS.
+    words.append(0x910003E9)                      # mov x9, sp
+    words.append(0x927CED29)                      # and x9, x9, #-16
+    words.append(0x9100013F)                      # mov sp, x9
+    relocs.append(CoffRelocation(here(), entry, BRANCH26))
+    words.append(0x94000000)                      # bl uasm_main
+    call("ExitProcess")                           # the status is in w0
+    words.append(BRK0)
+    end("_start", at)
+
+    # ── plat_write(fd, buf, n) -> i64 ───────────────────────────────────────
+    at = here()
+    words.append(PUSH_48)
+    words.append(MOV_FP_SP)
+    words.append(0xF9000BE1)                      # str x1, [sp, #16]  (buf)
+    words.append(0xF9000FE2)                      # str x2, [sp, #24]  (n)
+    words.append(0xF100081F)                      # cmp x0, #2
+    words.append(0x12800140)                      # mov w0, #-11 (STD_OUTPUT)
+    words.append(0x12800169)                      # mov w9, #-12 (STD_ERROR)
+    words.append(0x1A800120)                      # csel w0, w9, w0, eq
+    call("GetStdHandle")                          # x0 = the handle
+    words.append(0xF9400BE1)                      # ldr x1, [sp, #16]
+    words.append(0xF9400FE2)                      # ldr x2, [sp, #24]
+    words.append(0x910083E3)                      # add x3, sp, #32 (written)
+    words.append(0xAA1F03E4)                      # mov x4, xzr (lpOverlapped)
+    call("WriteFile")                             # w0 = the BOOL
+    words.append(0x7100001F)                      # cmp w0, #0
+    words.append(0xF9400FE0)                      # ldr x0, [sp, #24]  (n)
+    words.append(0x54000041)                      # b.ne +8  (it worked)
+    words.append(0x92800000)                      # mov x0, #-1
+    words.append(POP_48)
+    words.append(RET)
+    end("plat_write", at)
+
+    # ── plat_exit(code) ─────────────────────────────────────────────────────
+    #
+    # NO FRAME. AArch64 pushes no return address, so `sp` is still aligned on
+    # entry and `blr` only clobbers x30 -- which this never returns to use.
+    at = here()
+    call("ExitProcess")
+    words.append(BRK0)
+    end("plat_exit", at)
+
+    # ── putchar(c) -> int ───────────────────────────────────────────────────
+    at = here()
+    words.append(PUSH_48)
+    words.append(MOV_FP_SP)
+    words.append(0x390043E0)                      # strb w0, [sp, #16]
+    words.append(0xF9000FE0)                      # str x0, [sp, #24] (keep c)
+    words.append(0x12800140)                      # mov w0, #-11
+    call("GetStdHandle")
+    words.append(0x910043E1)                      # add x1, sp, #16 (the byte)
+    words.append(0xD2800022)                      # mov x2, #1
+    words.append(0x910083E3)                      # add x3, sp, #32 (written)
+    words.append(0xAA1F03E4)                      # mov x4, xzr
+    call("WriteFile")
+    words.append(0xF9400FE0)                      # ldr x0, [sp, #24]
+    words.append(0x12001C00)                      # and w0, w0, #0xff
+    words.append(POP_48)
+    words.append(RET)
+    end("putchar", at)
+
+    # ── plat_heap(n) -> ptr ─────────────────────────────────────────────────
+    at = here()
+    words.append(PUSH_FP)
+    words.append(MOV_FP_SP)
+    words.append(0xF100001F)                      # cmp x0, #0
+    words.append(0x5400008C)                      # b.gt +16 (the allocation)
+    words.append(0xAA1F03E0)                      # mov x0, xzr
+    words.append(POP_FP)
+    words.append(RET)
+    words.append(0xAA0003E1)                      # mov x1, x0   (size)
+    words.append(0xAA1F03E0)                      # mov x0, xzr  (address)
+    words.append(0x52860002)                      # mov w2, #0x3000
+    words.append(0x52800083)                      # mov w3, #4
+    call("VirtualAlloc")
+    words.append(POP_FP)
+    words.append(RET)
+    end("plat_heap", at)
+
+    text = b"".join(struct.pack("<I", w) for w in words)
+    obj = CoffObject(IMAGE_FILE_MACHINE_ARM64)
+    obj.section(".text", text, align=4,
+                characteristics=IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE
+                                | IMAGE_SCN_MEM_READ)
+    for sym in symbols:
+        obj.symbol(sym)
+    for name in (entry, "__imp_ExitProcess", "__imp_WriteFile",
+                 "__imp_GetStdHandle", "__imp_VirtualAlloc"):
+        obj.symbol(CoffSymbol(name=name, section="", binding=1))
+    for rel in relocs:
+        obj.relocate(".text", rel)
+    return obj
+
+
 #: Which builder serves which (container, machine).
 _BUILDERS = {
     ("elf", EM_X86_64): _x86_64_object,
     ("elf", EM_AARCH64): _aarch64_object,
     ("coff", 0x8664): _windows_x86_64_object,
+    ("coff", 0xAA64): _windows_aarch64_object,
     ("macho", 0x01000007): _macos_x86_64_object,     # CPU_TYPE_X86_64
     ("macho", 0x0100000C): _macos_aarch64_object,    # CPU_TYPE_ARM64
 }

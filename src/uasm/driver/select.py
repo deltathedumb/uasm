@@ -132,6 +132,12 @@ def choose_linker(output: Path | None, named: str | None, registry,
     return picked if picked is not None else fallback
 
 
+def _all_machines(candidates: list[str]) -> bool:
+    """Whether every candidate emits for a machine rather than for a tool."""
+    from ..backend.families import _ARCH_OF
+    return all(name in _ARCH_OF for name in candidates)
+
+
 def _target_backend(candidates: list[str], target: str | None) -> str | None:
     """The candidate that emits for the named target's architecture.
 
@@ -173,17 +179,22 @@ def choose_backend(output: Path | None, named: str | None, linker: str,
             raise SelectionError(
                 f"the {linker} linker takes input from "
                 f"{', '.join(wanted)}, and none of them is registered")
-        if len(ready) > 1:
-            # THE TARGET DECIDES WHICH MACHINE, when there is more than one
-            # to decide between. The builtin linker takes input from both
-            # machine backends, so `--target aarch64-macos` with no `-bk`
-            # reached the x86-64 backend and was refused for declaring an
-            # ABI it does not implement -- a failure whose cause is two
-            # flags away from what it says.
+        if len(ready) > 1 and _all_machines(ready):
+            # THE TARGET DECIDES WHICH MACHINE, when every candidate IS a
+            # machine and there is more than one to decide between. The
+            # builtin linker takes input from both, so `--target
+            # aarch64-macos` with no `-bk` reached the x86-64 backend and
+            # was refused for declaring an ABI it does not implement -- a
+            # failure whose cause is two flags away from what it says.
             #
             # AND THE HOST DECIDES WHEN NOTHING ELSE DOES, because a build
             # that names no target is a build for the machine it is running
             # on. Only then does the order in `backends` break the tie.
+            #
+            # `_all_machines` IS WHAT KEEPS THIS OFF `cc`. That toolchain
+            # declares `c` first and means it -- the order IS the preference
+            # -- and a list holding both `c` and a machine backend is not a
+            # question about which machine.
             picked = (_target_backend(ready, target)
                       or _host_backend(ready))
             if picked is not None:

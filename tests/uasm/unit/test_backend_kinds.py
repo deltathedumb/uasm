@@ -211,9 +211,13 @@ class TestBinaryBackendsEmitBytes:
                 "not a 64-bit Mach-O object")
         else:
             # COFF HAS NO MAGIC. The first field is the machine number, which
-            # is the only thing at a fixed offset that says what this is.
-            assert struct.unpack_from("<H", data, 0)[0] == 0x8664, (
-                "not an AMD64 COFF object")
+            # is the only thing at a fixed offset that says what this is --
+            # and it is the ARCHITECTURE'S, so a Windows-on-ARM object says
+            # 0xAA64 where an x86-64 one says 0x8664.
+            wanted = {"x86_64": 0x8664, "aarch64": 0xAA64}[
+                target_registry.get(target).arch]
+            assert struct.unpack_from("<H", data, 0)[0] == wanted, (
+                f"not a COFF object for {target_registry.get(target).arch}")
 
 
 class TestAnUnfinishedBackendRefuses:

@@ -67,15 +67,25 @@ _ADDEND_WIDTH = {
     (IMAGE_FILE_MACHINE_AMD64, 0x0007): (4, True),    # REL32_3
     (IMAGE_FILE_MACHINE_AMD64, 0x0008): (4, True),    # REL32_4
     (IMAGE_FILE_MACHINE_AMD64, 0x0009): (4, True),    # REL32_5
-    # ARM64's are bitfields inside one instruction word, so the "addend" is
-    # not a plain integer in the data at all. None of them carries one in
-    # anything this compiler emits, and a reader that pretended to recover
-    # one would be inventing it -- see `_addend_of`.
-    (IMAGE_FILE_MACHINE_ARM64, 0x0001): (8, True),    # ADDR64
+    # ARM64's instruction relocations are bitfields inside one word, so the
+    # "addend" is not a plain integer in the data at all. None of them
+    # carries one in anything this compiler emits, and a reader that
+    # pretended to recover one would be inventing it -- see `_addend_of`.
+    #
+    # THE NUMBERS ARE NOT x86-64'S, and that is worth stating because they
+    # look like they should be: `1` is ADDR32 here where it is ADDR64 there,
+    # and ARM64's ADDR64 is FOURTEEN. The first version of this table read
+    # `1` as eight bytes of addend and patched eight bytes over a four-byte
+    # field. The numbers below are read back off objects `llvm-mc -triple
+    # aarch64-pc-windows-msvc` assembled, not from memory.
+    (IMAGE_FILE_MACHINE_ARM64, 0x0001): (4, False),   # ADDR32
+    (IMAGE_FILE_MACHINE_ARM64, 0x0002): (4, False),   # ADDR32NB
     (IMAGE_FILE_MACHINE_ARM64, 0x0003): (0, False),   # BRANCH26
     (IMAGE_FILE_MACHINE_ARM64, 0x0004): (0, False),   # PAGEBASE_REL21
+    (IMAGE_FILE_MACHINE_ARM64, 0x0005): (0, False),   # REL21
     (IMAGE_FILE_MACHINE_ARM64, 0x0006): (0, False),   # PAGEOFFSET_12A
     (IMAGE_FILE_MACHINE_ARM64, 0x0007): (0, False),   # PAGEOFFSET_12L
+    (IMAGE_FILE_MACHINE_ARM64, 0x000E): (8, True),    # ADDR64
 }
 
 #: The machines a backend here targets, so an object for another is refused

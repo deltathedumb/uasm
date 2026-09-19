@@ -380,15 +380,55 @@ def _imports(blob: bytes, image: dict) -> dict[str, list[str]]:
 class TestWindows:
     """A PE, linked with no toolchain, taken apart again. NOT RUN."""
 
-    def _build(self, tmp_path: Path, source: str) -> tuple[bytes, dict]:
+    def _build(self, tmp_path: Path, source: str,
+               target: str = "x86_64-windows") -> tuple[bytes, dict]:
+        tmp_path.mkdir(parents=True, exist_ok=True)
         path = _write(tmp_path, source)
         out = tmp_path / "prog.exe"
-        got = _cli("build", str(path), "--target", "x86_64-windows",
+        got = _cli("build", str(path), "--target", target,
                    "--link", "-ln", "builtin", "-o", str(out),
                    "--workdir", str(tmp_path / ".uasm"))
         assert got.returncode == 0, got.stderr[-3000:]
         blob = out.read_bytes()
         return blob, _pe(blob)
+
+    def test_windows_on_arm_links_too(self, tmp_path):
+        """THE SAME IMPORT TABLE AND NONE OF THE SAME INSTRUCTIONS.
+
+        AArch64 has no indirect call through a PC-relative memory operand,
+        so reaching an IAT slot is `adrp`/`ldr`/`blr` rather than one
+        `call` -- which means `PAGEBASE_REL21` and `PAGEOFFSET_12L`, and the
+        second of those is one COFF number where ELF has six. The linker
+        works the access width out of the instruction, and this checks it
+        landed: every `ldr x16, [x16, #n]` here must reach a slot.
+        """
+        import struct
+        blob, image = self._build(tmp_path, FLOOR_PROGRAM, "aarch64-windows")
+        assert image["machine"] == 0xAA64, hex(image["machine"])
+        assert _imports(blob, image)["kernel32.dll"]
+        iat_rva, iat_size = image["dirs"][12]
+        slots = set(range(iat_rva, iat_rva + iat_size - 8, 8))
+
+        text = next(s for s in image["sections"] if s["name"] == ".text")
+        code = blob[text["rawptr"]:text["rawptr"] + text["vsize"]]
+        seen = 0
+        for at in range(0, len(code) - 8, 4):
+            adrp, = struct.unpack_from("<I", code, at)
+            load, = struct.unpack_from("<I", code, at + 4)
+            # `adrp x16, page` then `ldr x16, [x16, #n]`.
+            if adrp & 0x9F00001F != 0x90000010 or load & 0xFFC003FF != \
+                    0xF9400210:
+                continue
+            page = ((adrp >> 29) & 3) | (((adrp >> 5) & 0x7FFFF) << 2)
+            if page & (1 << 20):
+                page -= 1 << 21
+            here = text["vaddr"] + at
+            target = ((here >> 12) + page) << 12
+            target += ((load >> 10) & 0xFFF) * 8
+            assert target in slots, \
+                f"the load at {at:#x} reaches {target:#x}, which is no slot"
+            seen += 1
+        assert seen >= 4, f"only {seen} loads through the table found"
 
     def test_the_floor_program_links_into_a_pe(self, tmp_path):
         blob, image = self._build(tmp_path, FLOOR_PROGRAM)
