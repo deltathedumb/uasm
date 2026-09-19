@@ -3874,6 +3874,50 @@ PROGRAMS = {
 
         print("variadic:", list(gen_both(1, 2, 3, z=4)))
     """,
+    # `c.__await__()` ANSWERS A WRAPPER, not the coroutine. CPython has a
+    # `coroutine_wrapper` type and a program can see all three differences:
+    # the wrapper is not `c`, `type(...).__name__` says so, and `dir()` of it
+    # holds `close`, `send` and `throw` and nothing else -- none of the `cr_`
+    # introspection the coroutine carries. Handing the coroutine back made
+    # `w is c` True and `dir(w)` eight names longer.
+    "an_await_answers_a_wrapper_and_not_the_coroutine": """
+        import asyncio
+
+        async def inner(n):
+            await asyncio.sleep(0)
+            return n * 2
+
+        async def drive():
+            co = inner(1)
+            w = co.__await__()
+            print("type:", type(w).__name__)
+            print("not the coroutine:", w is co)
+            print("iter:", iter(w) is w)
+            print("dir:", sorted(n for n in dir(w) if not n.startswith("_")))
+            # THE WRAPPER HAS NO BODY OF ITS OWN: every step goes to the
+            # coroutine, and what it returned is what the StopIteration
+            # carries.
+            try:
+                while True:
+                    next(w)
+            except StopIteration as e:
+                print("drove:", e.value)
+            # AND CLOSING ONE CLOSES WHAT IT WRAPS.
+            second = inner(2)
+            w2 = second.__await__()
+            w2.close()
+            print("closed:", type(w2).__name__)
+            # THE COROUTINE ITSELF IS UNCHANGED, and so is a generator.
+            third = inner(3)
+            print("coroutine:", type(third).__name__,
+                  "cr_code" in dir(third))
+            print("awaited:", await third)
+            g = (i for i in (1, 2))
+            print("generator:", type(g).__name__, "gi_code" in dir(g))
+            return 0
+
+        asyncio.run(drive())
+    """,
     # A BUILTIN'S `__new__` BUILDS THE SUBCLASS IT IS HANDED. It is an
     # implicit staticmethod, so its first argument is the CLASS TO BUILD and
     # not a receiver of that type -- and the unbound-method check that every

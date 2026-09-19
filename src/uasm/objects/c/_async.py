@@ -50,7 +50,39 @@ APY_API apy_value apy_gen_new(apy_value step, int64_t nslots) {
     o->v.g.cancel = 0;
     o->v.g.yieldfrom = 0;
     o->v.g.sig = 0;
+    o->v.g.wrapper = 0;
     return V(o);
+}
+
+/* `c.__await__()` -- THE OBJECT BETWEEN THE COROUTINE AND WHAT DRIVES IT.
+
+   CPython answers a `coroutine_wrapper`, not the coroutine, and a program
+   can see all three differences: it is not `c`, `type(...).__name__` is
+   `coroutine_wrapper`, and `dir()` of it holds `close`, `send` and `throw`
+   and nothing else -- none of the `cr_` introspection the coroutine carries.
+   Handing the coroutine back made `w is c` True and `dir(w)` eight names
+   longer.
+
+   IT HAS NO BODY OF ITS OWN. Every `send`, `throw` and `close` goes to the
+   coroutine, which is in `yieldfrom` -- which is what `yieldfrom` has always
+   meant, the thing this frame is delegating to. */
+APY_API apy_value apy_coro_wrapper(apy_value co) {
+    apy_value w;
+    if (O(co)->kind != APY_GEN_K) return co;
+    w = apy_gen_new(0, 0);
+    if (!w) return 0;
+    O(w)->v.g.wrapper = 1;
+    O(w)->v.g.yieldfrom = co;
+    return w;
+}
+
+/* The coroutine a wrapper stands in front of, or the value itself. One test
+   and one substitution, so it drops in front of an existing body rather than
+   beside it -- see `apy_coro_wrapper`. */
+APY_API apy_value apy_coro_wrapped(apy_value v) {
+    if (O(v)->kind == APY_GEN_K && O(v)->v.g.wrapper && O(v)->v.g.yieldfrom)
+        return O(v)->v.g.yieldfrom;
+    return v;
 }
 
 /* Mark a freshly built frame as a COROUTINE. Separate from `apy_gen_new` so
@@ -298,7 +330,9 @@ APY_API apy_value apy_gen_pending(apy_value g) {
    that returned None -- `e.value` is None either way, but only the second had
    a `return` statement, and `has_arg` keeps that distinction for `repr`. */
 APY_API apy_value apy_gen_stop(apy_value g) {
-    apy_value carried = O(g)->v.g.result;
+    /* A WRAPPER HAS NO RESULT OF ITS OWN -- the coroutine it delegates to
+       does, and `next(c.__await__())` carries what `c` returned. */
+    apy_value carried = O(apy_coro_wrapped(g))->v.g.result;
     if (!carried || O(carried)->kind == APY_NONE_K)
         return apy_fail("StopIteration", "");
     return apy_raise(apy_make_exc(apy_lit("StopIteration"), carried));
@@ -311,8 +345,15 @@ APY_API apy_value apy_gen_stop(apy_value g) {
 APY_API apy_value apy_gen_step_of(apy_value g, apy_value sent,
                                   apy_value done) {
     int64_t *out_done = (int64_t *)done;
-    apy_value out, arg = g;
+    apy_value out, arg;
     *out_done = 0;
+    /* A WRAPPER DELEGATES, having no body of its own -- see
+       `apy_coro_wrapper`. Unwrapped HERE, which is the one funnel every
+       driver goes through: `send`, `throw` and `close` each unwrap too, but
+       `next(w)` and a `for` over one reach the step directly, and a step
+       that is not there is a call through a null pointer. */
+    g = apy_coro_wrapped(g);
+    arg = g;
     if (O(g)->kind != APY_GEN_K) {
         apy_fail2("TypeError", "'%s' object is not a generator%s",
                   apy_kind_name(g), "");
@@ -377,6 +418,9 @@ APY_API apy_value apy_gen_next(apy_value g, apy_value fallback,
 APY_API apy_value apy_gen_send(apy_value g, apy_value v) {
     int done;
     apy_value out;
+    /* A WRAPPER DELEGATES, having no body of its own -- see
+       `apy_coro_wrapper`. */
+    g = apy_coro_wrapped(g);
     if (O(g)->kind == APY_GEN_K && O(g)->v.g.state == 0
         && O(g)->kind == APY_GEN_K && O(v)->kind != APY_NONE_K)
         return apy_fail("TypeError",
@@ -400,6 +444,9 @@ APY_API apy_value apy_gen_send(apy_value g, apy_value v) {
 APY_API apy_value apy_gen_throw(apy_value g, apy_value exc) {
     int done;
     apy_value out;
+    /* A WRAPPER DELEGATES, having no body of its own -- see
+       `apy_coro_wrapper`. */
+    g = apy_coro_wrapped(g);
     if (O(g)->kind != APY_GEN_K)
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'throw'%s",
@@ -424,6 +471,9 @@ APY_API apy_value apy_gen_throw(apy_value g, apy_value exc) {
    as CPython's does. */
 APY_API apy_value apy_gen_close(apy_value g) {
     int done;
+    /* A WRAPPER DELEGATES, having no body of its own -- see
+       `apy_coro_wrapper`. */
+    g = apy_coro_wrapped(g);
     if (O(g)->kind != APY_GEN_K)
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'close'%s",

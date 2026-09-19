@@ -293,6 +293,14 @@ struct apy_obj {
                and handed over here, so constructing a generator is a load
                rather than a second function object. See `_dyn_generator`. */
             apy_value sig;
+            /* A COROUTINE_WRAPPER, which `c.__await__()` answers and nothing
+               else builds. It has no body of its own: every `send`, `throw`
+               and `close` goes to the coroutine in `yieldfrom`, which is
+               what `yieldfrom` has always meant. CPython has a separate type
+               for it and a program can see the difference -- `type(
+               c.__await__()).__name__` is `coroutine_wrapper`, it is not the
+               coroutine, and `dir()` of it holds three names. */
+            int wrapper;
         } g;
         /* list, tuple, set and frozenset share ONE layout. They differ in
            what is allowed -- a tuple never grows, a set never holds two

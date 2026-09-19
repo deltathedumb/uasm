@@ -447,6 +447,7 @@ static const char *apy_kind_name(apy_value v) {
         default:                    return "property";
         }
     case APY_GEN_K:
+        if (O(v)->v.g.wrapper) return "coroutine_wrapper";
         if (O(v)->v.g.agen) return "async_generator";
         return O(v)->v.g.coro ? "coroutine" : "generator";
     default:          return "str";

@@ -1708,6 +1708,15 @@ def apy_kind_prototype(type_name: ptr) -> ptr:
         return apy_coro_mark(apy_gen_new(ptr(0), 0))
     if apy_name_is(type_name, rodata(b"async_generator\0")):
         return apy_agen_mark(apy_gen_new(ptr(0), 0))
+    # A WRAPPER PROTOTYPE WRAPS NOTHING, for the same reason: what the type
+    # carries is all that is asked of it. The flag is SET HERE rather than
+    # through the C's `apy_coro_wrapper`, because the ported runtime reaches
+    # nothing in the C but the `_slow` halves of a split.
+    if apy_name_is(type_name, rodata(b"coroutine_wrapper\0")):
+        made: ptr = apy_coro_mark(apy_gen_new(ptr(0), 0))
+        if made:
+            store(i32, i32(1), offset(made, apy_g_wrapper_offset()))
+        return made
     return ptr(0)
 
 

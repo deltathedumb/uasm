@@ -729,6 +729,8 @@ static const char *apy_kind_doc(const char *kind) {
                "The class bool is a subclass of the class int, and cannot be subclassed.";
     if (strcmp(kind, "NoneType") == 0)
         return "The type of the None singleton.";
+    if (strcmp(kind, "coroutine_wrapper") == 0)
+        return "A wrapper object implementing __await__ for coroutines.";
     if (strcmp(kind, "reversed") == 0)
         return "Return a reverse iterator over the values of the given sequence.";
     if (strcmp(kind, "enumerate") == 0)
@@ -1021,6 +1023,15 @@ static const char *apy_kind_dir(const char *kind) {
                "__sizeof__\0""__str__\0""__subclasshook__\0""aclose\0"
                "ag_await\0""ag_code\0""ag_frame\0""ag_running\0""ag_suspended\0"
                "asend\0""athrow\0"
+               "";
+    if (strcmp(kind, "coroutine_wrapper") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__lt__\0""__ne__\0""__new__\0""__next__\0"
+               "__reduce__\0""__reduce_ex__\0""__repr__\0""__setattr__\0"
+               "__sizeof__\0""__str__\0""__subclasshook__\0""close\0""send\0"
+               "throw\0"
                "";
     if (strcmp(kind, "list_iterator") == 0)
         return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
@@ -1784,8 +1795,9 @@ KINDMETH_WORDS = {
 
 
 
-# THE TWO SAMPLES THAT ARE NOT EXPRESSIONS. A coroutine and an
-# async generator cannot be written inline, so the table's
+# THE THREE SAMPLES THAT ARE NOT EXPRESSIONS. A coroutine, its
+# await wrapper and an async generator cannot be written
+# inline, so the table's
 # entries for them name these -- and every reader that evals
 # the table needs them in scope. Copied out of
 # `objects/c/_gen_kindmeth.py`, which is where they are
@@ -1802,6 +1814,16 @@ def _sample_coroutine():
     return made
 
 
+def _sample_coroutine_wrapper():
+    async def one():
+        return None
+
+    made = one()
+    wrapped = made.__await__()
+    made.close()
+    return wrapped
+
+
 def _sample_async_generator():
     async def one():
         yield None
@@ -1815,6 +1837,7 @@ CURSOR_SAMPLES = {
     'generator': '(_ for _ in ())',
     'coroutine': '_sample_coroutine()',
     'async_generator': '_sample_async_generator()',
+    'coroutine_wrapper': '_sample_coroutine_wrapper()',
     'list_iterator': 'iter([])',
     'list_reverseiterator': 'reversed([])',
     'tuple_iterator': 'iter(())',
@@ -1860,6 +1883,7 @@ KIND_DIR = {
     'generator': ['__class__', '__class_getitem__', '__del__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__lt__', '__name__', '__ne__', '__new__', '__next__', '__qualname__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', 'close', 'gi_code', 'gi_frame', 'gi_running', 'gi_suspended', 'gi_yieldfrom', 'send', 'throw'],
     'coroutine': ['__await__', '__class__', '__class_getitem__', '__del__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__name__', '__ne__', '__new__', '__qualname__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', 'close', 'cr_await', 'cr_code', 'cr_frame', 'cr_origin', 'cr_running', 'cr_suspended', 'send', 'throw'],
     'async_generator': ['__aiter__', '__anext__', '__class__', '__class_getitem__', '__del__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__name__', '__ne__', '__new__', '__qualname__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', 'aclose', 'ag_await', 'ag_code', 'ag_frame', 'ag_running', 'ag_suspended', 'asend', 'athrow'],
+    'coroutine_wrapper': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', 'close', 'send', 'throw'],
     'list_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
     'list_reverseiterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
     'tuple_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
@@ -1905,6 +1929,7 @@ KIND_DOC = {
     'generator': None,
     'coroutine': None,
     'async_generator': None,
+    'coroutine_wrapper': 'A wrapper object implementing __await__ for coroutines.',
     'list_iterator': None,
     'list_reverseiterator': None,
     'tuple_iterator': None,

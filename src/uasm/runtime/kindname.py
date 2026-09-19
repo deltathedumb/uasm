@@ -112,6 +112,11 @@ def apy_g_agen_offset2() -> i64:
     return 84
 
 
+def apy_g_wrapper_offset2() -> i64:
+    """Is this a coroutine_wrapper? See the C's `apy_coro_wrapper`."""
+    return 120
+
+
 def apy_s_mut_offset() -> i64:
     return 24
 
@@ -440,9 +445,13 @@ def apy_kind_name_of(v: ptr) -> ptr:
             return rodata(b"staticmethod\0")
         return rodata(b"property\0")
     if k == apy_gen_kind():
-        # ALL THREE SHARE EVERY FIELD and only the name differs, which a
+        # ALL FOUR SHARE EVERY FIELD and only the name differs, which a
         # program reads to tell them apart: `async def` with `yield` is an
-        # async generator, which is neither of the other two.
+        # async generator, which is neither of the other two, and what
+        # `c.__await__()` answers is a fourth.
+        #
+        if load(i32, offset(v, apy_g_wrapper_offset2())):
+            return rodata(b"coroutine_wrapper\0")
         if load(i32, offset(v, apy_g_agen_offset2())):
             return rodata(b"async_generator\0")
         if load(i32, offset(v, apy_g_coro_offset2())):

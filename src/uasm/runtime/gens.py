@@ -36,6 +36,17 @@ def apy_g_result_offset() -> i64:
     return 40
 
 
+def apy_g_yieldfrom_offset() -> i64:
+    """What this frame is delegating to -- and, for a coroutine_wrapper, the
+    coroutine it stands in front of. See the C's `apy_coro_wrapper`."""
+    return 104
+
+
+def apy_g_wrapper_offset() -> i64:
+    """Is this a coroutine_wrapper? See the C's `apy_coro_wrapper`."""
+    return 120
+
+
 def apy_g_pending_offset() -> i64:
     return 48
 
@@ -295,6 +306,15 @@ def apy_gen_step_of(g: ptr, sent: ptr, done: ptr) -> ptr:
     underneath rather than crashing here.
     """
     store(i64, 0, done)
+    # A WRAPPER DELEGATES, having no body of its own -- see the C's
+    # `apy_coro_wrapper`. Read out HERE rather than called for: the ported
+    # runtime reaches nothing in the C but the `_slow` halves of a split,
+    # which `test_ported_int.py` holds it to.
+    if i64(load(i32, offset(g, 0))) == apy_gen_kind():
+        if load(i32, offset(g, apy_g_wrapper_offset())):
+            held: ptr = ptr(load(u64, offset(g, apy_g_yieldfrom_offset())))
+            if held:
+                g = held
     if i64(load(i32, offset(g, 0))) != apy_gen_kind():
         apy_raise_fmt(rodata(b"TypeError\0"),
                       rodata(b"'%s' object is not a generator%s\0"),
@@ -375,6 +395,15 @@ def apy_gen_close(g: ptr) -> ptr:
     A GENERATOR NOT STARTED OR ALREADY FINISHED just goes to done, which is
     what `state > 0` gates: there is no frame to unwind.
     """
+    # A WRAPPER DELEGATES, having no body of its own -- see the C's
+    # `apy_coro_wrapper`. Read out here rather than called for: the ported
+    # runtime reaches nothing in the C but the `_slow` halves of a split,
+    # which `test_ported_int.py` holds it to.
+    if i64(load(i32, offset(g, 0))) == apy_gen_kind():
+        if load(i32, offset(g, apy_g_wrapper_offset())):
+            wrapped: ptr = ptr(load(u64, offset(g, apy_g_yieldfrom_offset())))
+            if wrapped:
+                g = wrapped
     if i64(load(i32, offset(g, 0))) != apy_gen_kind():
         return apy_raise_fmt(
             rodata(b"AttributeError\0"),
@@ -408,6 +437,15 @@ def apy_gen_throw(g: ptr, exc: ptr) -> ptr:
     FINISHING ON A THROW IS A StopIteration, because the generator ended --
     the exception was caught inside and the body returned.
     """
+    # A WRAPPER DELEGATES, having no body of its own -- see the C's
+    # `apy_coro_wrapper`. Read out here rather than called for: the ported
+    # runtime reaches nothing in the C but the `_slow` halves of a split,
+    # which `test_ported_int.py` holds it to.
+    if i64(load(i32, offset(g, 0))) == apy_gen_kind():
+        if load(i32, offset(g, apy_g_wrapper_offset())):
+            wrapped: ptr = ptr(load(u64, offset(g, apy_g_yieldfrom_offset())))
+            if wrapped:
+                g = wrapped
     if i64(load(i32, offset(g, 0))) != apy_gen_kind():
         return apy_raise_fmt(
             rodata(b"AttributeError\0"),
@@ -438,6 +476,17 @@ def apy_gen_stop(g: ptr) -> ptr:
     A BARE ONE FOR None, because `return` and `return None` end a generator
     the same way and neither carries anything worth attaching.
     """
+    # A WRAPPER HAS NO RESULT OF ITS OWN -- the coroutine it delegates to
+    # does, and `next(c.__await__())` carries what `c` returned. Read
+    # out here rather than called for; see the C's
+    # `apy_coro_wrapper`. Read out HERE rather than called for: the ported
+    # runtime reaches nothing in the C but the `_slow` halves of a split,
+    # which `test_ported_int.py` holds it to.
+    if i64(load(i32, offset(g, 0))) == apy_gen_kind():
+        if load(i32, offset(g, apy_g_wrapper_offset())):
+            held: ptr = ptr(load(u64, offset(g, apy_g_yieldfrom_offset())))
+            if held:
+                g = held
     carried: ptr = ptr(load(u64, offset(g, apy_g_result_offset())))
     if not carried:
         return apy_raise_at(rodata(b"StopIteration\0"), rodata(b"\0"))
@@ -473,6 +522,15 @@ def apy_gen_send(g: ptr, v: ptr) -> ptr:
     would have nowhere to go. `g.send(None)` is the same as `next(g)` and is
     how a generator is primed.
     """
+    # A WRAPPER DELEGATES, having no body of its own -- see the C's
+    # `apy_coro_wrapper`. Read out here rather than called for: the ported
+    # runtime reaches nothing in the C but the `_slow` halves of a split,
+    # which `test_ported_int.py` holds it to.
+    if i64(load(i32, offset(g, 0))) == apy_gen_kind():
+        if load(i32, offset(g, apy_g_wrapper_offset())):
+            wrapped: ptr = ptr(load(u64, offset(g, apy_g_yieldfrom_offset())))
+            if wrapped:
+                g = wrapped
     if i64(load(i32, offset(g, 0))) == apy_gen_kind():
         if load(i64, offset(g, apy_g_state_offset())) == 0:
             if i64(load(i32, offset(v, 0))) != apy_none_kind():

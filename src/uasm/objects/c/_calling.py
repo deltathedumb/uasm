@@ -719,6 +719,10 @@ APY_API apy_value apy_kind_prototype(apy_value type_namev) {
         return apy_coro_mark(apy_gen_new(0, 0));
     if (strcmp(type_name, "async_generator") == 0)
         return apy_agen_mark(apy_gen_new(0, 0));
+    /* A WRAPPER PROTOTYPE WRAPS NOTHING, for the same reason: what the type
+       carries is all that is asked of it. */
+    if (strcmp(type_name, "coroutine_wrapper") == 0)
+        return apy_coro_wrapper(apy_coro_mark(apy_gen_new(0, 0)));
     if (strcmp(type_name, "list") == 0)  return apy_list_new(1);
     if (strcmp(type_name, "tuple") == 0) return apy_tuple_new(1);
     if (strcmp(type_name, "dict") == 0)  return apy_dict_new(1);
@@ -1371,6 +1375,7 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
        `async for` walks and carries the two halves of that protocol; a plain
        generator has neither, which is what `dir()` over each says. */
     if (k == APY_GEN_K && O(obj)->v.g.coro && !O(obj)->v.g.agen
+            && !O(obj)->v.g.wrapper
             && strcmp(want, "__await__") == 0)
         return apy_kind_method(obj, 1, want, bind);
     if (k == APY_GEN_K && O(obj)->v.g.agen
@@ -1968,10 +1973,14 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
         if (strcmp(w, "__hash__") == 0) return apy_hash(a[0]);
         if (strcmp(w, "__len__") == 0) return apy_len(a[0]);
         if (strcmp(w, "__iter__") == 0) return apy_iter(a[0]);
-        /* `await c` WALKS THE COROUTINE ITSELF, so `__await__` hands it
-           back: there is no second object between the two here, and
-           `iter(x)` answers the same way for a generator. */
-        if (strcmp(w, "__await__") == 0 || strcmp(w, "__aiter__") == 0)
+        /* `c.__await__()` ANSWERS A WRAPPER, which is a second object and
+           not the coroutine: CPython's `coroutine_wrapper` is not `c`, names
+           itself differently and carries three methods rather than the
+           coroutine's eleven. `__aiter__` on an async generator does hand
+           the receiver back, because there is no second object there. */
+        if (strcmp(w, "__await__") == 0)
+            return apy_coro_wrapper(a[0]);
+        if (strcmp(w, "__aiter__") == 0)
             return a[0];
         /* AND `__anext__` IS `asend(None)`, which is what CPython's is. */
         if (strcmp(w, "__anext__") == 0)

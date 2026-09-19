@@ -1068,6 +1068,8 @@ class ObjectHost:
         if isinstance(v, Gen):
             # All three share every field; only the name differs, and a
             # program reads it to tell them apart.
+            if v.wrapper:
+                return "coroutine_wrapper"
             if v.agen:
                 return "async_generator"
             return "coroutine" if v.coro else "generator"
@@ -7930,10 +7932,14 @@ def _kind_prototype(name: str):
     # A GENERATOR PROTOTYPE IS A GENERATOR WITH NO STEP, for the reason a
     # cursor prototype has no source: nothing is ever run, and what the type
     # carries is all that is asked of it.
-    if name in ("generator", "coroutine", "async_generator"):
+    if name in ("generator", "coroutine", "async_generator",
+                "coroutine_wrapper"):
         made = Gen(None, 0)
         made.coro = name != "generator"
         made.agen = name == "async_generator"
+        # A WRAPPER PROTOTYPE WRAPS NOTHING, for the same reason: what the
+        # type carries is all that is asked of it.
+        made.wrapper = name == "coroutine_wrapper"
         return made
     mode = _CURSOR_PROTO_MODES.get(name)
     if mode is None:
@@ -8073,7 +8079,7 @@ from uasm.objects.c.kindmeth_table import (  # noqa: E402
     # THE TWO SAMPLES THAT ARE NOT EXPRESSIONS. The table names them
     # and the `eval` below needs them in scope; see the generated
     # file, which carries both.
-    _sample_coroutine, _sample_async_generator)
+    _sample_coroutine, _sample_coroutine_wrapper, _sample_async_generator)
 
 #: EVERY CURSOR TYPE JOINS THE ORACLE, through the same sample expressions
 #: the generated tables were built from. `type(iter([])).__next__` is a
@@ -8878,12 +8884,15 @@ def _kind_attr(h, obj, want: str):
     # `async for` walks and carries the two halves of that protocol; a plain
     # generator has neither, which is what `dir()` over each says.
     #
-    # `__await__` AND `__aiter__` HAND THE RECEIVER BACK: there is no second
-    # object between the two here, and `iter(x)` answers the same way for a
-    # generator. `__anext__` is `asend(None)`, which is what CPython's is.
-    if isinstance(obj, Gen) and obj.coro and not obj.agen:
+    # `c.__await__()` ANSWERS A WRAPPER, which is a second object and not
+    # the coroutine -- see `_apy_coro_wrapper`. `__aiter__` on an async
+    # generator does hand the receiver back, because there is no second
+    # object there. `__anext__` is `asend(None)`, which is what CPython's is.
+    if isinstance(obj, Gen) and obj.coro and not obj.agen and not obj.wrapper:
         if want == "__await__":
-            return made("__await__", lambda: obj)
+            return made("__await__",
+                        lambda: _unwrap(h, _apy_coro_wrapper(
+                            h, [h._new(obj)])))
     if isinstance(obj, Gen) and obj.agen:
         if want == "__aiter__":
             return made("__aiter__", lambda: obj)
@@ -14795,7 +14804,7 @@ class Gen:
 
     __slots__ = ("step", "slots", "state", "sent", "running", "cache",
                  "pending", "result", "coro", "builtin", "deadline",
-                 "agen", "cancel", "yieldfrom", "sig")
+                 "agen", "cancel", "yieldfrom", "sig", "wrapper")
 
     def __init__(self, step, nslots: int) -> None:
         self.step = step
@@ -14828,6 +14837,12 @@ class Gen:
         #: otherwise lives in a frame slot the outside cannot name. Set and
         #: cleared by the lowered loop; see `_dyn_yield_from`.
         self.yieldfrom = None
+        #: A COROUTINE_WRAPPER, which `c.__await__()` answers and nothing
+        #: else builds. It has no body of its own: every `send`, `throw` and
+        #: `close` goes to the coroutine in `yieldfrom`, which is what
+        #: `yieldfrom` has always meant. CPython has a separate type for it
+        #: and a program can see the difference.
+        self.wrapper = False
         #: THE `def`'S OWN SIGNATURE, as a Func that describes it and is
         #: never called. `g.gi_code` is the code of the function the
         #: generator came from, and the STEP cannot carry it: the step is an
@@ -14961,7 +14976,12 @@ def _apy_gen_result(h, a):
 def _gen_stop(h, g):
     """The exhaustion signal, carrying whatever `return` gave. A generator
     that returned nothing raises a bare StopIteration, which is not the same
-    as one that returned None."""
+    as one that returned None.
+
+    A WRAPPER HAS NO RESULT OF ITS OWN -- the coroutine it delegates to does,
+    and `next(c.__await__())` carries what `c` returned.
+    """
+    g = _coro_wrapped(g)
     if g.result is None:
         return h._fail("StopIteration", "")
     return h._fail_raised(Exc("StopIteration", g.result))
@@ -14995,6 +15015,11 @@ def _gen_step(h, g, sent):
     `g` is a ValueError, and without the guard it would corrupt the slots it
     is halfway through writing.
     """
+    # A WRAPPER DELEGATES, having no body of its own -- see
+    # `_apy_coro_wrapper`. Unwrapped HERE, which is the one funnel every
+    # driver goes through: `send`, `throw` and `close` each unwrap too, but
+    # `next(w)` and a `for` over one reach the step directly.
+    g = _coro_wrapped(g)
     if not isinstance(g, Gen):
         h._fail("TypeError", f"'{h.kind_name(g)}' object is not a generator")
         return None, None
@@ -15086,6 +15111,37 @@ def _wake_note(when):
 #: What a suspension hands back. An OPAQUE token carrying nothing, so anything
 #: a program yields on purpose is unambiguous.
 _SUSPEND = "<suspend>"
+
+
+def _apy_coro_wrapper(h, a):
+    """`c.__await__()` -- THE OBJECT BETWEEN THE COROUTINE AND WHAT DRIVES IT.
+
+    CPython answers a `coroutine_wrapper`, not the coroutine, and a program
+    can see all three differences: it is not `c`, `type(...).__name__` is
+    `coroutine_wrapper`, and `dir()` of it holds `close`, `send` and `throw`
+    and nothing else. Handing the coroutine back made `w is c` True and
+    `dir(w)` eight names longer.
+    """
+    co = h._get(a[0], "apy_coro_wrapper")
+    if not isinstance(co, Gen):
+        return a[0]
+    made = Gen(None, 0)
+    made.wrapper = True
+    made.yieldfrom = co
+    return h._new(made)
+
+
+def _apy_coro_wrapped(h, a):
+    """The coroutine a wrapper stands in front of, or the value itself."""
+    return h._value(_coro_wrapped(h._get(a[0], "apy_coro_wrapped")))
+
+
+def _coro_wrapped(v):
+    """The same, as a plain function: one test and one substitution, so it
+    drops in front of an existing body rather than beside it."""
+    if isinstance(v, Gen) and v.wrapper and v.yieldfrom is not None:
+        return v.yieldfrom
+    return v
 
 
 def _apy_coro_mark(h, a):
@@ -15944,7 +16000,9 @@ def _apy_gen_next(h, a):
 
 
 def _apy_gen_send(h, a):
-    g = h._get(a[0], "apy_gen_send")
+    # A WRAPPER DELEGATES, having no body of its own -- see
+    # `_apy_coro_wrapper`.
+    g = _coro_wrapped(h._get(a[0], "apy_gen_send"))
     v = h._get(a[1], "apy_gen_send")
     if isinstance(g, Gen) and g.state == 0 and v is not None:
         return h._fail("TypeError", "can't send non-None value to a "
@@ -15960,7 +16018,9 @@ def _apy_gen_send(h, a):
 def _apy_gen_throw(h, a):
     """`g.throw(exc)` -- raise AT the suspension point, so a `try` around the
     `yield` inside the body catches it."""
-    g = h._get(a[0], "apy_gen_throw")
+    # A WRAPPER DELEGATES, having no body of its own -- see
+    # `_apy_coro_wrapper`.
+    g = _coro_wrapped(h._get(a[0], "apy_gen_throw"))
     exc = h._get(a[1], "apy_gen_throw")
     if not isinstance(g, Gen):
         return h._fail("AttributeError",
@@ -15983,7 +16043,9 @@ def _apy_gen_close(h, a):
     """A GeneratorExit at the suspension point, so a `finally` in the body
     runs. The exception is SWALLOWED if it comes back out, which is what makes
     `close` quiet; anything else the body raised propagates."""
-    g = h._get(a[0], "apy_gen_close")
+    # A WRAPPER DELEGATES, having no body of its own -- see
+    # `_apy_coro_wrapper`.
+    g = _coro_wrapped(h._get(a[0], "apy_gen_close"))
     if not isinstance(g, Gen):
         return h._fail("AttributeError",
                        f"'{h.kind_name(g)}' object has no attribute 'close'")
@@ -16808,6 +16870,8 @@ _TABLE.update({
     "apy_type_object": _apy_type_object,
     "apy_prepare": _apy_prepare,
     "apy_builtin_new": _apy_builtin_new,
+    "apy_coro_wrapper": _apy_coro_wrapper,
+    "apy_coro_wrapped": _apy_coro_wrapped,
     "apy_type_builtin_pending": _apy_type_builtin_pending,
     "apy_class_build": _apy_class_build,
     "apy_class_build_kw": _apy_class_build_kw,

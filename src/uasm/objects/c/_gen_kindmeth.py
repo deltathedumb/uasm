@@ -436,6 +436,7 @@ CURSOR_SAMPLES = {
     "generator":                 "(_ for _ in ())",
     "coroutine":                 "_sample_coroutine()",
     "async_generator":           "_sample_async_generator()",
+    "coroutine_wrapper":         "_sample_coroutine_wrapper()",
     "list_iterator":             "iter([])",
     "list_reverseiterator":      "reversed([])",
     "tuple_iterator":            "iter(())",
@@ -475,6 +476,19 @@ def _sample_coroutine():
     made = one()
     made.close()
     return made
+
+
+def _sample_coroutine_wrapper():
+    """What `c.__await__()` answers -- a second object, and not the
+    coroutine. Closed rather than awaited, for the reason
+    `_sample_coroutine` gives."""
+    async def one():
+        return None
+
+    made = one()
+    wrapped = made.__await__()
+    made.close()
+    return wrapped
 
 
 def _sample_async_generator():
@@ -933,8 +947,9 @@ def emit_tables_py() -> str:
     answer.
     """
     lines = ["", "",
-             "# THE TWO SAMPLES THAT ARE NOT EXPRESSIONS. A coroutine and an",
-             "# async generator cannot be written inline, so the table's",
+             "# THE THREE SAMPLES THAT ARE NOT EXPRESSIONS. A coroutine, its",
+             "# await wrapper and an async generator cannot be written",
+             "# inline, so the table's",
              "# entries for them name these -- and every reader that evals",
              "# the table needs them in scope. Copied out of",
              "# `objects/c/_gen_kindmeth.py`, which is where they are",
@@ -949,6 +964,16 @@ def emit_tables_py() -> str:
              "    made = one()",
              "    made.close()",
              "    return made",
+             "",
+             "",
+             "def _sample_coroutine_wrapper():",
+             "    async def one():",
+             "        return None",
+             "",
+             "    made = one()",
+             "    wrapped = made.__await__()",
+             "    made.close()",
+             "    return wrapped",
              "",
              "",
              "def _sample_async_generator():",
