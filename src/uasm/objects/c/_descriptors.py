@@ -1555,6 +1555,8 @@ APY_API apy_value apy_bytes_translate(apy_value s, apy_value table,
                                       apy_value delete) {
     unsigned char map256[256], drop[256];
     int64_t i, n, out_n = 0;
+    /* WHETHER ANY BYTE ACTUALLY MOVED -- see the foot of this function. */
+    int changed = 0;
     char *buf;
     const unsigned char *p;
     if (!apy_str_self("translate", s)) return 0;
@@ -1581,9 +1583,26 @@ APY_API apy_value apy_bytes_translate(apy_value s, apy_value table,
     n = O(s)->v.s.n;
     p = (const unsigned char *)O(s)->v.s.p;
     buf = (char *)malloc((size_t)n + 1);
-    for (i = 0; i < n; i++)
-        if (!drop[p[i]]) buf[out_n++] = (char)map256[p[i]];
+    for (i = 0; i < n; i++) {
+        if (drop[p[i]]) { changed = 1; continue; }
+        if (map256[p[i]] != p[i]) changed = 1;
+        buf[out_n++] = (char)map256[p[i]];
+    }
     buf[out_n] = '\0';
+    /* NOTHING MOVED, so the answer IS the receiver: `bytes_translate` ends
+       both of its loops with `if (!changed && PyBytes_CheckExact(input_obj))
+       return input_obj`, which is what makes `b.translate(None) is b` True
+       -- the ordinary spelling of "delete these and change nothing else"
+       with nothing to delete. A table that maps every byte to itself and a
+       delete set that matches nothing reach it the same way, so the test is
+       what the walk DID and not what it was handed.
+
+       AND str.translate HAS NO SUCH SHORTCUT, which is the other half of
+       this row's asymmetry: `"abc".translate({}) is "abc"` is False in
+       CPython, because `_PyUnicode_TranslateCharmap` builds its result
+       through a writer and hands it back whatever it copied. That function
+       is above; leave it building. */
+    if (!changed && apy_str_may_return_self(s)) { free(buf); return s; }
     return apy_str_take(buf, out_n);
 }
 

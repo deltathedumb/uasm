@@ -4844,7 +4844,31 @@ def _apy_str_expandtabs(h, a):
     if not _is_int_like(width):
         return h._fail("TypeError", f"'{h.kind_name(width)}' object cannot "
                                     f"be interpreted as an integer")
-    return h._new(s.expandtabs(int(width)))
+    out = s.expandtabs(int(width))
+    # THE RECEIVER ITSELF WHEN THERE WAS NO TAB TO EXPAND, and for a str
+    # alone. CPython's `unicode_expandtabs` leaves through
+    # `unicode_result_unchanged(self)` once it has scanned the string and
+    # found no tab, so `"abc".expandtabs() is "abc"`; the bytes twin writes
+    # into a buffer it allocated before it knew whether anything would
+    # change, so `b"abc".expandtabs()` is a new object every time. THAT
+    # ASYMMETRY IS CPYTHON'S OWN and not an oversight on either side of it --
+    # matching CPython is the whole contract here, so do not "fix" the bytes
+    # half into agreement with the str half.
+    #
+    # ASKED OF THE ANSWER, NOT OF THE RECEIVER'S KIND. This host runs
+    # Python's own method, so "CPython kept the receiver" is a fact to be
+    # read off the result rather than a rule restated here that could drift
+    # from it -- and it is what keeps a BYTEARRAY out of this branch without
+    # a test naming bytearray: a mutable receiver always answers a fresh
+    # bytearray, and handing one back would give a program two names for one
+    # writable buffer.
+    #
+    # Handing the receiver back means handing back the HANDLE IT ARRIVED ON.
+    # `_new` mints a second handle for an object that already has one, and
+    # `is` compares handles -- which is the whole of why this row read False.
+    if out is s:
+        return a[0]
+    return h._new(out)
 
 
 #: The one class every `typing` special form is an instance of, made on first
@@ -5441,6 +5465,28 @@ def _apy_bytes_translate(h, a):
         return _bytes_like_bad(h, drop)
     out = bytes(s).translate(None if table is None else bytes(table),
                              bytes(drop))
+    # THE RECEIVER ITSELF WHEN NO BYTE CHANGED, which is what
+    # `b.translate(None)` is: the identity table and nothing to delete.
+    # CPython's `bytes_translate` tracks whether any byte came out different
+    # and, if none did, drops the buffer it built and increfs the input
+    # instead -- so `b"abc".translate(None) is b"abc"` is True. `str`'s
+    # `translate` has no such test: it walks code points into a writer and
+    # answers what the writer built, so `"abc".translate({}) is "abc"` is
+    # False. THAT ASYMMETRY IS CPYTHON'S OWN, and the two methods are meant
+    # to differ here -- the str side above must keep building.
+    #
+    # A BYTEARRAY CANNOT REACH THIS BRANCH, which is deliberate: `bytes(s)`
+    # above has already copied a mutable receiver, so `out` is a bytes and
+    # can never be the bytearray `s`, and the wrap below builds a fresh one.
+    # A mutable receiver handed back would be a second name for a buffer the
+    # program can still write through, and the bug would surface far from
+    # here.
+    #
+    # Handing the receiver back means handing back the HANDLE IT ARRIVED ON:
+    # `_new` would mint a second handle for the same object, and `is`
+    # compares handles.
+    if out is s:
+        return a[0]
     return h._new(bytearray(out) if isinstance(s, bytearray) else out)
 
 

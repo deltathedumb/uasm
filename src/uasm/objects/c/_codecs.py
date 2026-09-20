@@ -1018,6 +1018,21 @@ APY_API apy_value apy_str_expandtabs(apy_value s, apy_value width) {
     w = apy_is_big(width) ? 8 : O(width)->v.i;
     if (w < 1) w = 1;
     n = O(s)->v.s.n;
+    /* NO TAB, NOTHING TO EXPAND -- and a str then IS its own answer where
+       bytes builds the copy anyway. That asymmetry is CPython's and not a
+       slip to be tidied away: `unicode_expandtabs` ends its measuring pass
+       with `if (!found_tabs) return unicode_result_unchanged(self)`, and the
+       stringlib `expandtabs` that bytes and bytearray share has no such
+       test and returns what it built. So `"abc".expandtabs() is "abc"` is
+       True and `b"abc".expandtabs() is b"abc"` is False, which is why this
+       is gated on `wide` rather than on `apy_str_may_return_self`.
+
+       ONLY A TAB DECIDES IT. A newline resets the column and changes
+       nothing else, so a string full of them still answers itself. */
+    if (wide) {
+        for (i = 0; i < n; i++) if (APY_CSTR(s)[i] == '\t') break;
+        if (i == n) return s;
+    }
     cap = n * (w > 1 ? w : 1) + 8;
     buf = (char *)malloc((size_t)cap + 1);
     if (!buf) { fputs("uasm: out of memory\n", stderr); exit(1); }

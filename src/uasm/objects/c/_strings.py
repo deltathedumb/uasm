@@ -265,6 +265,36 @@ APY_API apy_value apy_str_slice_of(apy_value s, int64_t lo,
     return apy_str_copy(O(s)->v.s.p + lo, hi - lo);
 }
 
+/* WHETHER A METHOD MAY HAND ITS RECEIVER BACK instead of building the equal
+   copy it was about to build. CPython does this all through the string
+   methods -- `s.strip()` with nothing to strip IS `s`, and so is
+   `s.replace(a, b)` when `a` is not there -- and a program sees the
+   difference with `is` and with `id()`, which is the only reason a runtime
+   would bother.
+
+   TWO RECEIVERS MUST NEVER BE THE ANSWER, and both have been got wrong here
+   before:
+
+   * A BYTEARRAY, because it can be written into. Handing one back makes two
+     names for one buffer, so `ba.strip()` would change under the program the
+     moment it wrote into `ba`. CPython's bytearray methods copy for exactly
+     this reason -- `bytearray(b"abc").strip() is` it is False there -- and
+     `mut` is the whole of what tells the two kinds apart.
+   * ANYTHING THAT IS NOT EXACTLY str OR bytes. An instance of a class
+     extending str reaches these methods through `apy_str_self`, which lets
+     one through unconverted; CPython draws the same line, since
+     `unicode_result_unchanged` and stringlib's `return_self` both test
+     CheckExact and copy for a subclass.
+
+   THE SHORTCUT IS SPELLED AT EACH METHOD'S OWN TAIL and not inside
+   `apy_str_slice_of` above, which has two dozen other callers: whether there
+   was nothing to do is a question only the method can answer, and the
+   slicer's other callers want the fresh buffer they ask for. */
+static int apy_str_may_return_self(apy_value s) {
+    if (O(s)->kind == APY_STR_K) return 1;
+    return O(s)->kind == APY_BYTES_K && !O(s)->v.s.mut;
+}
+
 /* find / rfind / index / rindex, all four from one place. `want_index` picks
    the -1-on-failure form from the raise-on-failure one; that is the only
    difference between `find` and `index`, and CPython's message for the second
@@ -923,6 +953,16 @@ static apy_value apy_str_trim(apy_value s, apy_value chars, const char *meth,
             hi = last;
         }
     }
+    /* NOTHING WAS STRIPPED, so the answer IS the receiver. This is the tail
+       of all six strip methods and of nothing else, which is why the test
+       belongs here: `lo` and `hi` still spanning the whole receiver is what
+       "there was nothing to do" MEANS for a strip, and no other caller of
+       the slicer can say that about its own bounds. CPython's `do_strip`
+       ends with the same test -- `if (i == 0 && j == len &&
+       PyBytes_CheckExact(self)) return self` -- and `unicode_strip` with its
+       twin, so `s.strip() is s` and `b.strip() is b` are both True there for
+       every one of the six spellings, with chars or without. */
+    if (lo == 0 && hi == O(s)->v.s.n && apy_str_may_return_self(s)) return s;
     return apy_str_slice_of(s, lo, hi);
 }
 
@@ -1255,6 +1295,13 @@ APY_API apy_value apy_str_rpartition(apy_value s, apy_value sep) {
 APY_API apy_value apy_str_join(apy_value sep, apy_value parts) {
     int64_t n, i, len = 0, out = 0;
     apy_value *got;
+    /* THE FIRST ELEMENT AS THE SEQUENCE HELD IT, before `apy_text_like` and
+       the memoryview conversion below have had it. The one-element shortcut
+       at the foot of this function may hand an element back, and only an
+       element that arrived already being exactly str or bytes may be handed
+       back -- a converted one is a cell this call built, which CPython would
+       not have answered with. */
+    apy_value raw0 = 0;
     char *buf;
     if (!apy_str_self("join", sep)) return 0;
     /* THE CHECK COMES BEFORE THE FUNNEL, and is written out rather than left
@@ -1332,6 +1379,7 @@ APY_API apy_value apy_str_join(apy_value sep, apy_value parts) {
     for (i = 0; i < n; i++) {
         got[i] = apy_key_at(parts, i);
         if (!got[i]) { free(got); return 0; }
+        if (i == 0) raw0 = got[0];
         /* THE RECEIVER DECIDES what the parts must be, and CPython words the
            two refusals differently: `expected str instance` for a str
            separator and `expected a bytes-like object` for a bytes one --
@@ -1353,6 +1401,25 @@ APY_API apy_value apy_str_join(apy_value sep, apy_value parts) {
             return apy_fail("TypeError", msg);
         }
         len += O(got[i])->v.s.n;
+    }
+    /* ONE ELEMENT IS NOTHING TO JOIN, and CPython hands that element straight
+       back: both `PyUnicode_Join` and the `bytes_join` every bytes-like
+       shares test `seqlen == 1` and the element's exact type before they
+       write a byte, so the SEPARATOR is never even looked at and
+       `"-".join([s]) is s` is True. Nothing is copied because nothing was
+       going to be inserted.
+
+       THE KINDS MUST MATCH ON BOTH COUNTS, which is what the two tests
+       spell: `bytearray(b"-").join([b"abc"])` answers a BYTEARRAY in Python
+       and so cannot be the immutable element, and an element that is itself
+       a bytearray is a buffer the program can write into afterwards --
+       `bytearray(b"-").join([ba]) is ba` is False in CPython as well. */
+    if (n == 1 && got[0] == raw0 && O(got[0])->kind == O(sep)->kind
+            && apy_str_may_return_self(got[0])
+            && apy_str_may_return_self(sep)) {
+        apy_value one = got[0];
+        free(got);
+        return one;
     }
     if (n > 1) len += O(sep)->v.s.n * (n - 1);
     buf = (char *)malloc((size_t)len + 1);
@@ -1378,6 +1445,31 @@ static apy_value apy_replace_impl(apy_value s, apy_value old, apy_value new_,
     int64_t n = O(s)->v.s.n, m = O(old)->v.s.n, k = O(new_)->v.s.n;
     int64_t i, out = 0, hits = 0, cap;
     char *buf;
+    /* THE THREE WAYS TO HAVE NOTHING TO DO THAT ARE KNOWN BEFORE THE SCAN,
+       each of which CPython answers with the receiver rather than an equal
+       copy -- and answering them here also saves the buffer below.
+
+       A COUNT OF ZERO replaces nothing, which is what `maxcount == 0 ->
+       return_self` is in both of CPython's replacements.
+
+       AN EMPTY NEEDLE AND AN EMPTY REPLACEMENT put nothing between anything:
+       `b.replace(b"", b"") is b` is True, where `b.replace(b"", b"-")`
+       inserts at every gap.
+
+       AND, FOR str ONLY, `old` AND `new` BEING THE SAME OBJECT. This is the
+       asymmetry in the table and it is CPython's: `unicode_replace` opens
+       with `if (str1 == str2) goto nothing;` and the stringlib every
+       bytes-like shares has no such test, so `"abc".replace("a", "a") is
+       "abc"` is True and `b"abc".replace(b"a", b"a") is b"abc"` is False --
+       with the same literal written on both sides. Do not 'fix' it. The test
+       is IDENTITY and not equality there too: two equal strings that are not
+       the same object build a copy, which is why this compares the handles
+       rather than the bytes. */
+    if (apy_str_may_return_self(s)) {
+        if (limit == 0) return s;
+        if (m == 0 && k == 0) return s;
+        if (O(s)->kind == APY_STR_K && old == new_) return s;
+    }
     cap = (n + 1) * (k + 1) + n + 1;
     buf = (char *)malloc((size_t)cap + 1);
     if (m == 0) {
@@ -1410,6 +1502,14 @@ static apy_value apy_replace_impl(apy_value s, apy_value old, apy_value new_,
         } else buf[out++] = O(s)->v.s.p[i++];
     }
     buf[out] = '\0';
+    /* AND THE COMMONEST WAY OF ALL, which only the scan can report: the
+       needle was not there. `'abc'.replace('z', 'y') is 'abc'` is True in
+       CPython for str and for bytes alike -- every branch of both
+       implementations reaches a `goto nothing` or a `return_self` when the
+       count comes out zero. The buffer is freed rather than abandoned
+       because nothing has taken it: `apy_str_take` is what owns one, and it
+       is not being called. */
+    if (hits == 0 && apy_str_may_return_self(s)) { free(buf); return s; }
     return apy_str_take(buf, out);
 }
 
