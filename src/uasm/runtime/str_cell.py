@@ -73,6 +73,44 @@ def apy_is_bytearray_of(v: ptr) -> i64:
     return i64(load(i32, offset(v, apy_str_mut_offset())))
 
 
+def apy_str_may_return_self_of(v: ptr) -> bool:
+    """Whether a method with nothing to do may hand `v` back instead of
+    building the equal copy it was about to build.
+
+    THE SHORTCUT IS THE ONLY THING ABOUT A METHOD THAT `is` CAN SEE.
+    CPython hands the receiver straight back all through the string methods
+    -- `s.strip()` with nothing to strip IS `s`, and so is `s.replace(old,
+    new)` when `old` is not there -- and a program can tell only with `is`
+    and `id()`, which is the whole reason a runtime bothers to match it.
+    The C's `apy_str_may_return_self` asks this same question; there are two
+    because the C keeps its copy `static` and the C and the IR are ONE
+    translation unit, so this is the `_of` twin and not a second opinion.
+
+    TWO RECEIVERS MUST NEVER BE THE ANSWER, and both have been got wrong
+    before:
+
+    * A BYTEARRAY, because it can be written into. Handing one back gives
+      the program two names for one writable buffer, so `ba.strip()` would
+      change under it the moment it wrote into `ba`. CPython's bytearray
+      methods copy for exactly this reason -- `bytearray(b"abc").strip() is`
+      it is False there -- and `mut` is the whole of what tells the two
+      bytes kinds apart.
+    * ANYTHING THAT IS NOT EXACTLY str OR bytes. An instance of a class
+      extending str reaches these methods through `apy_str_self_of`, which
+      lets one through unconverted; CPython draws the same line, since
+      `unicode_result_unchanged` and stringlib's `return_self` both test
+      CheckExact and copy for a subclass.
+    """
+    k: i64 = i64(load(i32, offset(v, 0)))
+    if k == apy_str_kind():
+        return True
+    if k != apy_bytes_kind():
+        return False
+    if load(i32, offset(v, apy_str_mut_offset())):
+        return False
+    return True
+
+
 def apy_byte_arg_of(v: ptr) -> i64:
     """The octet a bytearray method's argument stands for, or -1 raising.
 

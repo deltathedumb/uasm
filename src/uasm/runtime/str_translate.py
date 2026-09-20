@@ -266,14 +266,43 @@ def apy_bytes_translate(s: ptr, table: ptr, delete: ptr) -> ptr:
     if not buf:
         return buf
     out: i64 = 0
+    changed: i64 = 0
     i = 0
     while i < n:
         c: i64 = i64(load(u8, offset(p, i)))
         if i64(load(u8, offset(drop, c))) == 0:
-            store(u8, load(u8, offset(map256, c)), offset(buf, out))
+            to: i64 = i64(load(u8, offset(map256, c)))
+            if to != c:
+                changed = 1
+            store(u8, u8(to), offset(buf, out))
             out = out + 1
+        else:
+            changed = 1
         i = i + 1
     store(u8, u8(0), offset(buf, out))
+    # NOTHING MOVED, SO THE ANSWER IS THE RECEIVER: `bytes_translate` ends
+    # both of its loops with `if (!changed && PyBytes_CheckExact(input_obj))
+    # return input_obj`, which is what makes `b.translate(None) is b` True --
+    # the ordinary spelling of "delete these and change nothing else" with
+    # nothing to delete. A table that maps every byte to itself and a delete
+    # set that matches nothing reach it the same way, so the test is what the
+    # walk DID and not what it was handed, and that is why `changed` is set
+    # in the walk rather than guessed from the arguments.
+    #
+    # AND str.translate HAS NO SUCH SHORTCUT, which is the other half of this
+    # row's asymmetry and is CPYTHON'S: `"abc".translate({}) is "abc"` is
+    # False there, because `_PyUnicode_TranslateCharmap` builds its result
+    # through a writer and hands back whatever it copied. A str receiver
+    # never reaches this line anyway -- it was refused at the top -- and
+    # `apy_str_translate` above must be left building.
+    #
+    # THE PREDICATE IS WHAT KEEPS A BYTEARRAY OUT. `ba.translate(None)` must
+    # answer a fresh bytearray, since handing the receiver back would give
+    # the program two names for one writable buffer; `mut` is the whole of
+    # what separates it from the bytes beside it. The buffer is abandoned
+    # rather than freed because the arena never takes one back.
+    if changed == 0 and apy_str_may_return_self_of(s):
+        return s
     return apy_from_bytes(buf, out)
 
 

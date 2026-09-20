@@ -466,6 +466,22 @@ def apy_splitlines_impl_of(s: ptr, keepends: i64) -> ptr:
     return out
 
 
+def apy_str_has_tab_of(p: ptr, n: i64) -> i64:
+    """Whether any of the `n` bytes at `p` is a tab.
+
+    THE MEASURING PASS, AND ONLY A TAB DECIDES IT. A newline resets the
+    column and changes nothing else, so a string full of them still has
+    nothing to expand; asking about byte 9 and nothing else is the whole
+    question CPython's own pass asks.
+    """
+    i: i64 = 0
+    while i < n:
+        if i64(load(u8, offset(p, i))) == 9:
+            return 1
+        i = i + 1
+    return 0
+
+
 def apy_str_expandtabs(s: ptr, width: ptr) -> ptr:
     """`s.expandtabs(width)`.
 
@@ -510,11 +526,23 @@ def apy_str_expandtabs(s: ptr, width: ptr) -> ptr:
     if i64(load(i32, offset(s, 0))) == apy_str_kind():
         wide = 1
     n: i64 = load(i64, offset(s, apy_str_len_offset()))
+    p: ptr = ptr(load(u64, offset(s, apy_str_ptr_offset())))
+    # NO TAB, NOTHING TO EXPAND -- and a str then IS its own answer where
+    # bytes builds the copy anyway. THAT ASYMMETRY IS CPYTHON'S and not a
+    # slip to be tidied away: `unicode_expandtabs` ends its measuring pass
+    # with `if (!found_tabs) return unicode_result_unchanged(self)`, and the
+    # stringlib `expandtabs` that bytes and bytearray share has no such test
+    # and hands back what it built. So `"abc".expandtabs() is "abc"` is True
+    # while `b"abc".expandtabs() is b"abc"` is False, which is why this is
+    # gated on `wide` and not on `apy_str_may_return_self_of`. The C half
+    # gates on its own `wide` in exactly the same place.
+    if wide:
+        if not apy_str_has_tab_of(p, n):
+            return s
     cap: i64 = n * w + 8
     buf: ptr = apy_alloc_bytes(cap + 1)
     if not buf:
         return buf
-    p: ptr = ptr(load(u64, offset(s, apy_str_ptr_offset())))
     col: i64 = 0
     out: i64 = 0
     i: i64 = 0

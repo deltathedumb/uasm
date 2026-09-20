@@ -107,7 +107,31 @@ def apy_str_slice_new(s: ptr, lo: i64, hi: i64) -> ptr:
 
 
 def apy_strip_run(s: ptr, chars: ptr, cn: i64, left: i64, right: i64) -> ptr:
-    """The body all six strips share."""
+    """The body all six strips share.
+
+    NOTHING STRIPPED IS THE RECEIVER ITSELF, not a copy of it that compares
+    equal. `lo` and `hi` still spanning the whole of `s` is what "there was
+    nothing to do" MEANS for a strip, and CPython's `do_strip` ends on that
+    same test -- `if (i == 0 && j == len && PyBytes_CheckExact(self))
+    return self`, with `unicode_strip` carrying its twin -- so `s.strip() is
+    s` and `b.strip() is b` are both True there, for all six spellings and
+    with `chars` or without. The C half tests it at the tail of
+    `apy_str_trim`, which is what the second rule of this runtime asks: a
+    shortcut the fast half takes must hold on the slow side too, or the
+    answer would depend on which half ran.
+
+    THE TEST BELONGS HERE AND NOT IN `apy_str_slice_new`. That is the
+    general slicer, and `split` and `partition` call it for pieces they are
+    about to hand out separately; whether there was nothing to do is a
+    question only the method can answer, so each method spells it at its own
+    tail. The C says the same about `apy_str_slice_of`.
+
+    THE PREDICATE IS SPELLED THOUGH THE GATE ABOVE ALREADY SETTLES IT: every
+    caller here has passed `apy_strip_gate`, so the receiver is exactly a
+    str and a bytearray cannot reach this. Asking anyway costs one compare
+    and keeps the rule with the shortcut, where a later caller of this
+    shared body will read it.
+    """
     n: i64 = apy_str_byte_len(s)
     lo: i64 = 0
     hi: i64 = n
@@ -116,6 +140,8 @@ def apy_strip_run(s: ptr, chars: ptr, cn: i64, left: i64, right: i64) -> ptr:
         lo = apy_strip_span_lo(p, n, chars, cn)
     if right:
         hi = apy_strip_span_hi(p, n, lo, chars, cn)
+    if lo == 0 and hi == n and apy_str_may_return_self_of(s):
+        return s
     return apy_str_slice_new(s, lo, hi)
 
 

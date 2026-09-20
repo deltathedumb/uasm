@@ -249,7 +249,26 @@ def apy_str_replace(s: ptr, old: ptr, new_: ptr) -> ptr:
     m: i64 = apy_str_byte_len(old)
     if m == 0:
         return apy_str_replace_slow(s, old, new_)
+    # `old` AND `new` BEING THE SAME OBJECT REPLACES NOTHING VISIBLE, and
+    # CPython shortcuts it for str and not for bytes: `unicode_replace`
+    # opens with `if (str1 == str2) goto nothing;` and the stringlib every
+    # bytes-like shares has no such test, so `"abc".replace("a", "a") is
+    # "abc"` is True while `b"abc".replace(b"a", b"a") is b"abc"` is False,
+    # with the same literal written on both sides. THAT ASYMMETRY IS
+    # CPYTHON'S; do not 'fix' it. No kind test is needed to keep the two
+    # apart here because the three gates above admit only str -- a bytes
+    # receiver goes to the C, which is already right about it.
+    #
+    # THE TEST IS IDENTITY AND NOT EQUALITY, there as here: two equal
+    # strings that are not the same object build the copy, which is why this
+    # compares the cells rather than their bytes.
+    if old == new_:
+        return s
     hits: i64 = apy_str_replace_hits(s, old, n, m)
+    # AND THE COMMONEST WAY OF ALL, which only the count can report: the
+    # needle was not there. CPython reaches a `goto nothing` or a
+    # `return_self` for that in both implementations, so it is True for str
+    # and bytes alike.
     if hits == 0:
         return s
     k: i64 = apy_str_byte_len(new_)

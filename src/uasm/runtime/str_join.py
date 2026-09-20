@@ -82,6 +82,27 @@ def apy_str_join(sep: ptr, parts: ptr) -> ptr:
     total: i64 = apy_join_total(sep, parts, n)
     if total < 0:
         return apy_str_join_slow(sep, parts)
+    # ONE ELEMENT IS NOTHING TO JOIN, and CPython hands that element
+    # straight back: both `PyUnicode_Join` and the `bytes_join` every
+    # bytes-like shares test `seqlen == 1` and the element's exact type
+    # before they write a byte, so the SEPARATOR is never even looked at and
+    # `"-".join([s]) is s` is True. Nothing is copied because nothing was
+    # going to be inserted.
+    #
+    # AFTER THE MEASURING WALK AND NOT BEFORE IT. `apy_join_total` is what
+    # refuses a list holding something that is not a plain string, so
+    # answering `n == 1` ahead of it would hand `"-".join([5])` back the 5
+    # instead of letting the C word its TypeError.
+    #
+    # THE EXACT-TYPE TEST IS ALREADY SPENT: that walk admits only an exactly
+    # str element and the gate above only an exactly str separator, so
+    # neither can be a bytearray or a subclass instance here. The bytes
+    # family reaches the C, which asks `apy_str_may_return_self` of both --
+    # `bytearray(b"-").join([b"abc"])` must answer a bytearray, and an
+    # element that is itself a bytearray is a buffer the caller can write
+    # into afterwards.
+    if n == 1:
+        return apy_str_item_at(parts, 0)
     buf: ptr = apy_alloc_bytes(total + 1)
     if not buf:
         return apy_str_join_slow(sep, parts)
