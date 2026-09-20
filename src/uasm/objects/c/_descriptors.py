@@ -1573,6 +1573,13 @@ static apy_value apy_bytes_like_bad(apy_value v) {
    are not where a plain read would look for them. */
 static apy_value apy_bytes_like(apy_value v) {
     if (O(v)->kind == APY_MVIEW_K) return apy_mview_bytes(v);
+    /* AND A bytes SUBCLASS IS BYTES-LIKE. Written out rather than through
+       `apy_text_like`, which also reaches past a `class S(str)`: the
+       callers' refusals name what the program WROTE, which is why each of
+       them keeps the original value for the message. */
+    if (O(v)->kind == APY_INST_K && O(v)->v.o.held
+            && O(O(v)->v.o.held)->kind == APY_BYTES_K)
+        return O(v)->v.o.held;
     return v;
 }
 

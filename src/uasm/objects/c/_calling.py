@@ -405,13 +405,23 @@ APY_API apy_value apy_class_build(apy_value meta, apy_value name,
 }
 
 /* An EMPTY value of a builtin kind: what `str.__new__(S)` puts inside. The
-   same five `apy_instance_new` fills a held slot with. */
+   same six `apy_instance_new` fills a held slot with -- and its IR twin in
+   `runtime/containers.py` is a third copy of the list, so a kind added to
+   one has to be added to all three or an instance is built holding nothing.
+
+   APY_BYTES_K HERE MEANS `bytes` AND ONLY `bytes`. The kind alone cannot say
+   which: a bytearray is the same kind under `O(v)->v.s.mut`, and the two are
+   distinguishable here only because the number was chosen from the NAME in
+   `_BUILTIN_BASE_KIND`, which has no bytearray row. `apy_bytes_copy` answers
+   the SHARED immutable empty, which is right for `bytes()` and would be
+   wrong for a bytearray. */
 static apy_value apy_empty_of_kind(int kind) {
     if (kind == APY_DICT_K) return apy_dict_new(4);
     if (kind == APY_LIST_K) return apy_list_new(4);
     if (kind == APY_SET_K) return apy_set_new(4);
     if (kind == APY_TUPLE_K) return apy_tuple_new(1);
     if (kind == APY_STR_K) return apy_lit("");
+    if (kind == APY_BYTES_K) return apy_bytes_copy("", 0);
     return apy_none();
 }
 
@@ -439,7 +449,14 @@ APY_API apy_value apy_builtin_new(apy_value type_name, int64_t kind,
     const char *given = 0;
     char buf[192];
     apy_value made;
-    int fills = kind == APY_STR_K || kind == APY_TUPLE_K;
+    /* WHICH KINDS TAKE THEIR CONTENT HERE: the IMMUTABLE ones, which have
+       nowhere else to take it. bytes is one of them -- `bytes.__new__(B,
+       b"ab")` is `b'ab'` in CPython, where `list.__new__(L, [1, 2])` is an
+       empty list. Keyed on the NAME and not on the number for bytearray,
+       because the two share APY_BYTES_K and there is no value in hand to
+       read `mut` from; `want` is the base's name, two lines up. */
+    int fills = kind == APY_STR_K || kind == APY_TUPLE_K
+             || (kind == APY_BYTES_K && strcmp(want, "bytearray") != 0);
     int has = content && O(content)->kind != APY_NONE_K;
     if (O(cls)->kind == APY_FUNC_K && O(cls)->v.fn.is_type) {
         given = APY_CSTR(O(cls)->v.fn.name);
@@ -2671,7 +2688,12 @@ static apy_value apy_call_kind(int kind, apy_value src) {
 
        ONLY FOR A LIST. `tuple(x)`, `set(x)` and `dict(x)` do not ask in
        CPython, and the difference is measurable from inside the program. */
-    if (kind == APY_LIST_K && !apy_length_hint(src)) return 0;
+    /* `bytes(xs)` ASKS TOO, and `bytearray(xs)` does not -- see the named
+       constructor below, which says why. Asked HERE, above the unwrap,
+       because `apy_length_hint` answers immediately for anything that is not
+       an instance, so below it the question could never be put. */
+    if ((kind == APY_LIST_K || kind == APY_BYTES_K) && !apy_length_hint(src))
+        return 0;
     /* AN INSTANCE ARGUMENT MEANS ITS CONTENT. `OrderedDict(other)` reaches
        here with an instance, and every branch below reads `src` as a real
        container -- see `_content_of` in the host for the same unwrap. */
@@ -2712,6 +2734,11 @@ static apy_value apy_call_kind(int kind, apy_value src) {
         return (out && apy_extend(out, src)) ? out : 0;
     }
     if (kind == APY_STR_K) return apy_str(src);
+    /* NOT A MIRROR OF THE STR ARM. `bytes(5)` is five zero octets and
+       `bytes("ab")` is a TypeError for want of an encoding, neither of which
+       `apy_str` would do; `apy_to_bytes` is the constructor that already
+       knows both, and the copy a mutable source needs. */
+    if (kind == APY_BYTES_K) return apy_to_bytes(src);
     return 0;
 }
 

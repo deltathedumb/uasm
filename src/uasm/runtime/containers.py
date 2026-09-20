@@ -821,6 +821,14 @@ def apy_instance_new(cls: ptr) -> ptr:
     elif kind == apy_str_kind():
         store(u64, u64(apy_from_cstr(rodata(b"\0"))),
               offset(o, apy_o_held_offset()))
+    elif kind == apy_bytes_kind():
+        # `class B(bytes)`. THE SHARED IMMUTABLE EMPTY, which is what
+        # `apy_bytes_literal` answers for a length of zero. The cell must
+        # have `mut` clear, and it does: only `bytes` can reach this kind as
+        # a base -- `bytearray` has no row in `_BUILTIN_BASE_KIND`, because
+        # the two share this kind and a number cannot carry the difference.
+        store(u64, u64(apy_bytes_literal(rodata(b"\0"), 0)),
+              offset(o, apy_o_held_offset()))
     return o
 
 
@@ -2475,6 +2483,8 @@ def apy_is_subclass(a: ptr, b: ptr) -> ptr:
             mine: ptr = rodata(b"\0")
             if extends == apy_str_kind():
                 mine = rodata(b"str\0")
+            if extends == apy_bytes_kind():
+                mine = rodata(b"bytes\0")
             if extends == apy_list_kind():
                 mine = rodata(b"list\0")
             if extends == apy_tuple_kind():

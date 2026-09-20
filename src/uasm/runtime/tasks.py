@@ -149,6 +149,14 @@ def apy_str_like(recv: ptr, out: ptr) -> ptr:
     if not out:
         return out
     out = apy_inst_text_result_of(recv, out)
+    # AND THE RECEIVER'S KIND IS THE HELD ONE. The fixup above needed `recv`
+    # wrapped; from here on the question is what tag the RESULT should wear,
+    # which for a `class B(bytes)` is the tag of the bytes it carries. See
+    # the C twin in objects/c/_format.py, which says it at length.
+    if i64(load(i32, offset(recv, 0))) == apy_inst_kind():
+        held: ptr = ptr(load(u64, offset(recv, apy_o_held_offset())))
+        if held:
+            recv = held
     if i64(load(i32, offset(recv, 0))) != apy_bytes_kind():
         return out
     want: i64 = i64(load(i32, offset(recv, apy_s_mut_offset())))

@@ -612,6 +612,13 @@ APY_API apy_value apy_instance_new(apy_value cls) {
         else if (kind == APY_SET_K) o->v.o.held = apy_set_new(4);
         else if (kind == APY_TUPLE_K) o->v.o.held = apy_tuple_new(1);
         else if (kind == APY_STR_K) o->v.o.held = apy_lit("");
+        /* `class B(bytes)`. THE SHARED IMMUTABLE EMPTY, which is what
+           `apy_bytes_copy` answers for a length of zero -- and the right
+           cell precisely because a class can only extend `bytes` here and
+           never `bytearray`: the two share this kind and are told apart by
+           `mut`, which a kind number cannot carry. See `_BUILTIN_BASE_KIND`
+           in frontends/python/dynamic.py, where that is decided. */
+        else if (kind == APY_BYTES_K) o->v.o.held = apy_bytes_copy("", 0);
     }
     return V(o);
 }

@@ -4596,7 +4596,14 @@ def _apy_format(h, a):
         # has no arm for an instance and `format(object(), ">30")` trapped on
         # a null. The C says the same thing in `apy_format`, where the guard
         # has always been over the hook alone.
-        if spec and v.held is None:
+        # `str` IS THE ONLY BUILTIN BASE WITH A `__format__` OF ITS OWN.
+        # bytes, bytearray, dict, list, tuple and set all leave `tp_format`
+        # at object's, so a non-empty spec on an instance of a class
+        # extending one of them is `object.__format__`'s refusal -- which
+        # names the CLASS, as `h.kind_name` already does. Testing "holds
+        # nothing" let `format(B(b"Ab"), "5")` fall into str's mini-language
+        # below and answer the bytes unchanged, where CPython raises.
+        if spec and not isinstance(v.held, str):
             return h._fail("TypeError", "unsupported format string passed "
                                         f"to {h.kind_name(v)}.__format__")
         # A SUBCLASS OF str, FORMATTED BY str's OWN CODE, and the two spec
@@ -4893,7 +4900,19 @@ def _apy_str_ctor(h, a):
         return 0
     if _codec_arg(h, "str", "errors", a[2]):
         return 0
-    v = h._get(a[0], "apy_str_ctor")
+    raw = h._get(a[0], "apy_str_ctor")
+    # A bytes SUBCLASS IS A BYTES-LIKE OBJECT. NOT `_held_text`, which also
+    # reaches past a `class S(str)` -- the refusals below name what the
+    # program WROTE, and CPython names the subclass.
+    v = raw.held if isinstance(raw, Instance) \
+        and isinstance(raw.held, (bytes, bytearray)) else raw
+    # DECODING A str IS ITS OWN SENTENCE, and not the bytes-like one with
+    # `str` in the hole: `str("ab", "utf-8")` is `decoding str is not
+    # supported` in CPython, for a subclass as much as for an exact str,
+    # while `str(5, "utf-8")` is the bytes-like message naming int. Both
+    # were the second message here.
+    if isinstance(_held_text(v), str):
+        return h._fail("TypeError", "decoding str is not supported")
     if not isinstance(v, (bytes, bytearray, memoryview)):
         return h._fail("TypeError", f"decoding to str: need a bytes-like "
                                     f"object, {h.kind_name(v)} found")
@@ -4906,7 +4925,10 @@ def _apy_str_ctor(h, a):
 
 
 def _apy_bytes_decode(h, a):
-    v = h._get(a[0], "apy_bytes_decode")
+    # A bytes SUBCLASS IS A RECEIVER HERE TOO. The written `b.decode()`
+    # arrives already unwrapped through `apy_method_self`; the unbound
+    # `bytes.decode(B(...))` and the `str(B(...), "utf-8")` route do not.
+    v = _held_text(h._get(a[0], "apy_bytes_decode"))
     # A VIEW IS NOT A RECEIVER FOR THIS. `memoryview(b"a").decode()` is an
     # AttributeError in CPython -- a view has no `decode` -- and converting
     # one here answered the text instead. The CONSTRUCTOR spelling does take
@@ -5816,12 +5838,19 @@ def _apy_bytes_maketrans(h, a):
     maps to itself, which is why the table must be exactly 256 long and why
     `translate` can refuse any other length.
     """
-    frm = h._get(a[0], "apy_bytes_maketrans")
-    to = h._get(a[1], "apy_bytes_maketrans")
+    frm_v = h._get(a[0], "apy_bytes_maketrans")
+    to_v = h._get(a[1], "apy_bytes_maketrans")
+    # A bytes SUBCLASS IS bytes HERE TOO -- see `_held_text`, which is
+    # identity for a plain bytes, bytearray or memoryview.
+    frm = _held_text(frm_v)
+    to = _held_text(to_v)
+    # THE REFUSAL NAMES WHAT THE PROGRAM WROTE, not what it held: a
+    # `class S(str)` argument is "not 'S'" in CPython, and `h.kind_name`
+    # answers an instance's CLASS name.
     if not isinstance(frm, _BYTES_LIKE):
-        return _bytes_like_bad(h, frm)
+        return _bytes_like_bad(h, frm_v)
     if not isinstance(to, _BYTES_LIKE):
-        return _bytes_like_bad(h, to)
+        return _bytes_like_bad(h, to_v)
     if len(frm) != len(to):
         return h._fail("ValueError",
                        "maketrans arguments must have same length")
@@ -7553,6 +7582,23 @@ def _apy_contains(h, a):
             if h.err is not None:
                 return 0
             return h._bool(bool(got))
+    # A CLASS EXTENDING str, bytes OR bytearray INHERITS `__contains__`, and
+    # what it inherits is a SUBSTRING SEARCH -- so the iteration fallback
+    # below is not its rule. `"Ab" in S("Abc")` was False here and is True in
+    # CPython: the fallback walked the held text and compared `"Ab"` against
+    # one character at a time. A one-character needle hid it, because a
+    # substring of length one and an element are the same thing, which is
+    # why this survived `class S(str)` and only showed up when `class
+    # B(bytes)` began to compile -- there the elements are INTS, so
+    # `b"A" in B(b"Ab")` was False for every needle rather than for some.
+    #
+    # BOTH FORMS COME FREE by handing the held value to the arm below, which
+    # is Python's own `in`: the substring search for a bytes-like needle and
+    # the octet search for `65 in B(b"Ab")`, which are one operator in
+    # CPython too.
+    if isinstance(hay, Instance) and hay.cls.find("__contains__") is None \
+            and isinstance(hay.held, (str, bytes, bytearray)):
+        return _apy_contains(h, [a[0], h._value(hay.held)])
     if isinstance(hay, Instance) and hay.cls.find("__contains__") is None:
         # No `__contains__`. `in` falls back to ITERATION, which is CPython's
         # rule and the reason a class with only `__getitem__` supports it.
@@ -9996,7 +10042,12 @@ def _apy_init_subclass(h, a):
 
 #: The C's kind enum, as the Python types the host uses. The two lists must
 #: agree -- a wrong number gives an instance the wrong kind of storage.
-_BUILTIN_KINDS = {4: str, 5: list, 6: tuple, 7: dict, 9: set}
+#:
+#: 17 IS `APY_BYTES_K`, AND IT IS CLAIMED FOR THE IMMUTABLE TWIN. A bytearray
+#: is the same kind with `mut` set, so a class extending one would need a
+#: second signal rather than this key; the frontend has no bytearray row for
+#: the same reason. See `_BUILTIN_BASE_KIND` in frontends/python/dynamic.py.
+_BUILTIN_KINDS = {4: str, 5: list, 6: tuple, 7: dict, 9: set, 17: bytes}
 
 
 def _apy_builtin_new(h, a):
@@ -10026,7 +10077,11 @@ def _apy_builtin_new(h, a):
         given = cls.name
         if cls.builtin_kind() is kind and kind is not None:
             made = Instance(cls, h)
-            if kind in (str, tuple) and has:
+            # THE IMMUTABLE KINDS TAKE THEIR CONTENT HERE, having nowhere
+            # else to take it -- `bytes.__new__(B, b"ab")` is `b'ab'`, where
+            # `list.__new__(L, [1, 2])` is an empty list. Mirrors `fills` in
+            # `apy_builtin_new` (objects/c/_calling.py).
+            if kind in (str, bytes, tuple) and has:
                 made.held = kind(_content_of(content))
             return h._new(made)
     elif isinstance(cls, (Func, Native)) and getattr(cls, "is_type", False):
@@ -17504,6 +17559,15 @@ def _apy_memoryview(h, a):
         if not _mview_live(h, src):
             return 0
         return h._new(memoryview(src))
+    # A CLASS EXTENDING bytes OR bytearray EXPORTS ITS BUFFER, and the view
+    # is over the HELD object rather than a copy of it -- for the mutable
+    # twin the view has to show writes made through the instance afterwards,
+    # and `held` is the very object every mutating method works on.
+    #
+    # NOT `_held_text`: that also reaches past a `class S(str)`, and the
+    # refusal below would then name 'str' where CPython names 'S'.
+    if isinstance(src, Instance) and isinstance(src.held, (bytes, bytearray)):
+        src = src.held
     if not isinstance(src, (bytes, bytearray)):
         return h._fail("TypeError",
                        "memoryview: a bytes-like object is required, not "

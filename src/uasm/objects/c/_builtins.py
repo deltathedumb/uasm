@@ -1709,6 +1709,7 @@ APY_API apy_value apy_is_subclass(apy_value a, apy_value b) {
             int64_t kind = apy_class_builtin_kind(a);
             const char *have =
                 kind == APY_STR_K ? "str"
+                : kind == APY_BYTES_K ? "bytes"
                 : kind == APY_LIST_K ? "list"
                 : kind == APY_TUPLE_K ? "tuple"
                 : kind == APY_DICT_K ? "dict"

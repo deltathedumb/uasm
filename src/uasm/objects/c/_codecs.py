@@ -668,7 +668,20 @@ APY_API apy_value apy_str_ctor(apy_value v, apy_value encoding,
                                apy_value errors) {
     if (apy_codec_arg("str", "encoding", encoding)) return 0;
     if (apy_codec_arg("str", "errors", errors)) return 0;
+    /* DECODING A str IS ITS OWN SENTENCE, and CPython gives it for a
+       SUBCLASS too: `str("ab", "utf-8")` and `str(S("ab"), "utf-8")` are
+       both `decoding str is not supported`, while `str(5, "utf-8")` is the
+       bytes-like message naming int. Both were the second message here. */
+    if (O(apy_text_like(v))->kind == APY_STR_K)
+        return apy_fail("TypeError", "decoding str is not supported");
     if (O(v)->kind == APY_MVIEW_K) v = apy_mview_bytes(v);
+    /* A bytes SUBCLASS IS A BYTES-LIKE OBJECT. Written out rather than
+       through `apy_text_like`, which also reaches past a `class S(str)`:
+       the refusal below names what the program WROTE, and CPython names the
+       subclass. */
+    if (O(v)->kind == APY_INST_K && O(v)->v.o.held
+            && O(O(v)->v.o.held)->kind == APY_BYTES_K)
+        v = O(v)->v.o.held;
     if (O(v)->kind != APY_BYTES_K)
         return apy_fail2("TypeError",
                          "decoding to str: need a bytes-like object, %s "

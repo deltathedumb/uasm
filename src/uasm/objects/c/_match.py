@@ -824,6 +824,14 @@ APY_API apy_value apy_memoryview(apy_value src) {
         w->v.mv = O(src)->v.mv;
         return V(w);
     }
+    /* A CLASS EXTENDING bytes EXPORTS ITS BUFFER, and the view is over the
+       HELD cell rather than a copy of it -- a view is a window, and one
+       onto a copy would stop showing what the instance shows. NOT through
+       `apy_text_like`, which also reaches past a `class S(str)`: the
+       refusal names what the program wrote, and CPython names the class. */
+    if (O(src)->kind == APY_INST_K && O(src)->v.o.held
+            && O(O(src)->v.o.held)->kind == APY_BYTES_K)
+        src = O(src)->v.o.held;
     if (O(src)->kind != APY_BYTES_K)
         return apy_fail2("TypeError",
                          "memoryview: a bytes-like object is required, not "

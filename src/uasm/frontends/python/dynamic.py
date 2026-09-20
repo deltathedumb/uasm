@@ -386,7 +386,16 @@ _CLASS_BUILTINS = {"object": "apy_object_class", "type": "apy_type_class"}
 #: The runtime kind number for each builtin a class may extend. These are
 #: the values of the C's kind enum, and the two lists must agree -- a wrong
 #: number gives an instance the wrong kind of storage.
-_BUILTIN_BASE_KIND = {"str": 4, "list": 5, "tuple": 6, "dict": 7, "set": 9}
+#:
+#: `bytearray` IS NOT A ROW HERE AND CANNOT BE ONE. The value is a bare int
+#: and bytes-versus-bytearray is not a kind difference: both are
+#: `APY_BYTES_K == 17`, told apart by `O(v)->v.s.mut` on a VALUE, which a
+#: class has none of. A row `"bytearray": 17` would be the same tag as
+#: bytes' and every instance would hold an immutable empty bytes. Carrying
+#: one needs a second field threaded through `apy_type_builtin`,
+#: `apy_type_builtin_pending` and `apy_builtin_new`, which is its own task.
+_BUILTIN_BASE_KIND = {"str": 4, "list": 5, "tuple": 6, "dict": 7, "set": 9,
+                      "bytes": 17}
 
 #: The builtins whose value form takes `*args` rather than exactly one.
 #:

@@ -158,6 +158,14 @@ def apy_bytes_like_of(v: ptr) -> ptr:
     """
     if i64(load(i32, offset(v, 0))) == apy_mview_kind():
         return apy_mview_bytes(v)
+    # AND A bytes SUBCLASS IS BYTES-LIKE. Written out rather than through a
+    # str-and-bytes unwrap: the callers' refusals name what the program
+    # WROTE, which is why each keeps the original value for the message.
+    if i64(load(i32, offset(v, 0))) == apy_inst_kind():
+        held: ptr = ptr(load(u64, offset(v, apy_o_held_offset())))
+        if held:
+            if i64(load(i32, offset(held, 0))) == apy_bytes_kind():
+                return held
     return v
 
 

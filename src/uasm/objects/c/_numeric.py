@@ -383,7 +383,15 @@ APY_API apy_value apy_add(apy_value a, apy_value b) {
        3112 -- they are different types and `+` will not bridge them. An
        equality body ended up here during the bytes work and returned a C int
        as an `apy_value`, so `b"a" + "a"` segfaulted rather than raising. */
-    if (O(a)->kind == APY_BYTES_K || O(b)->kind == APY_BYTES_K)
+    /* NOT WHEN EITHER SIDE IS AN INSTANCE, which this refused before the
+       branch below could unwrap it: `B(b"Ab") + b"c"` was `can't concat
+       bytes to B` about two values that are both bytes. A `class S(str)`
+       never hit it -- neither operand is APY_BYTES_K, so it fell through to
+       the dispatch -- which is why this survived until bytes could be
+       extended. The refusal is still the right one once nobody answers; it
+       is reached through `apy_binop_error` below. */
+    if ((O(a)->kind == APY_BYTES_K || O(b)->kind == APY_BYTES_K)
+            && !apy_either_inst(a, b))
         return apy_fail2("TypeError", "can't concat %s to %s",
                          apy_kind_name(b), apy_kind_name(a));
     if (O(a)->kind == APY_STR_K && O(b)->kind == APY_STR_K) {
@@ -1544,6 +1552,22 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
         }
     }
     int64_t i;
+    /* A CLASS EXTENDING str, bytes OR bytearray INHERITS `__contains__`, and
+       what it inherits is a SUBSTRING SEARCH -- so the iteration fallback in
+       the arm below is not its rule. `"Ab" in S("Abc")` was False here and
+       is True in CPython: the fallback walked the held text and compared
+       `"Ab"` against one character at a time. A ONE-CHARACTER NEEDLE HID IT,
+       since a substring of length one and an element are the same thing,
+       which is why this survived `class S(str)` and showed up only when
+       `class B(bytes)` began to compile -- there the elements are INTS, so
+       `b"A" in B(b"Ab")` was False for every needle rather than for some.
+       Both forms come free by handing the held value to the arms below,
+       which already serve the substring search and `65 in b"Ab"`. */
+    if (O(hay)->kind == APY_INST_K && O(hay)->v.o.held
+            && (O(O(hay)->v.o.held)->kind == APY_STR_K
+                || O(O(hay)->v.o.held)->kind == APY_BYTES_K)
+            && !apy_class_find(O(hay)->v.o.cls, apy_name("__contains__")))
+        return apy_contains(needle, O(hay)->v.o.held);
     if (O(hay)->kind == APY_INST_K) {
         /* `__contains__` first, then `__getitem__` walked from 0 until it
            raises -- CPython's own fallback, and the reason a class with only

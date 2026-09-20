@@ -450,6 +450,16 @@ def apy_memoryview(src: ptr) -> ptr:
     with a step of one, because a fresh view is the whole buffer and
     contiguous.
     """
+    # A CLASS EXTENDING bytes EXPORTS ITS BUFFER, and the view is over the
+    # HELD cell rather than a copy: a view is a window, and one onto a copy
+    # would stop showing what the instance shows. Written out rather than
+    # through a str-and-bytes unwrap, because the refusal below names what
+    # the program WROTE and CPython names the class.
+    if i64(load(i32, offset(src, 0))) == apy_inst_kind():
+        got: ptr = ptr(load(u64, offset(src, apy_o_held_offset())))
+        if got:
+            if i64(load(i32, offset(got, 0))) == apy_bytes_kind():
+                src = got
     k: i64 = i64(load(i32, offset(src, 0)))
     o: ptr = apy_obj_alloc(apy_mview_kind())
     if not o:

@@ -324,7 +324,18 @@ _NEEDS_A_COMPILER = frozenset({"compile", "eval", "exec"})
 #: The builtin kinds a class may extend. `class D(dict)` gives every instance
 #: a real dict of its own for everything the body does not write, which is
 #: what makes a subclass with only `__missing__` in it behave.
-_BUILTIN_BASES = frozenset({"dict", "list", "set", "tuple", "str"})
+#:
+#: A NAME HERE NEEDS A ROW IN `_BUILTIN_BASE_KIND` (dynamic.py) and nowhere
+#: else in this file: this set is the whole of the frontend gate, and every
+#: other thing the frontend does with a builtin base reads `info.builtin_base`
+#: or that table. The pairing is not optional -- the lowering indexes the
+#: table unguarded, so a name added here alone is a KeyError rather than a
+#: diagnostic.
+#:
+#: `bytearray` IS NOT HERE and cannot be until the kind carries a mut flag:
+#: it shares `APY_BYTES_K` with bytes, so a row for it would build instances
+#: holding an immutable empty bytes. See `_BUILTIN_BASE_KIND`.
+_BUILTIN_BASES = frozenset({"dict", "list", "set", "tuple", "str", "bytes"})
 
 _DYN_BUILTINS = {
     # `None` WHERE THE COUNT VARIES. `list()`, `tuple()`, `str()` and

@@ -4259,6 +4259,68 @@ PROGRAMS = {
         print("compare:", s == "b", p == "b", hash(p) == hash("b"))
         print("keys:", {p: 1}["b"], ["b"].index(p), p in ["b"])
     """,
+    # AND THE BYTES TWIN OF IT, which could not be written until `class
+    # B(bytes)` compiled at all: the base was refused with E0076, so the
+    # whole of the bytes half of the subclass contract was unmeasurable.
+    #
+    # WHAT DIFFERS FROM THE STR TWIN IS THE POINT. Indexing yields an INT
+    # where str yields a one-character str, so an element walk and a
+    # substring search stop being the same thing -- which is what exposed
+    # `in` falling back to iteration for both bases. `str()` of one is its
+    # REPR, because bytes leaves `tp_str` at object's. And `__format__` is
+    # object's too, so a non-empty spec is a TypeError where a str subclass
+    # takes the whole mini-language.
+    "a_bytes_extending_class_is_the_bytes_it_extends": """
+        class B(bytes):
+            def __repr__(self):
+                return "<nope>"
+
+        class Plain(bytes):
+            pass
+
+        b = B(b"Ab")
+        p = Plain(b"Ab")
+        # WHAT IT IS. The kind is the class, the builtin is behind it, and every
+        # question a bytes answers it answers.
+        print("kind:", type(b).__name__, isinstance(b, bytes), issubclass(B, bytes))
+        print("len:", len(p), "index:", p[0], "slice:", p[:1], type(p[:1]).__name__)
+        print("iter:", list(p), "in one:", b"A" in p, "in two:", b"Ab" in p)
+        print("in absent:", b"zz" in p, "octet:", 65 in p)
+        print("eq:", p == b"Ab", "hash:", hash(p) == hash(b"Ab"), "key:", {p: 1}[b"Ab"])
+        # A METHOD ANSWERS A PLAIN BYTES, not a str and not the subclass.
+        print("upper:", p.upper(), type(p.upper()).__name__)
+        print("strip:", Plain(b" a ").strip(), "split:", Plain(b"a-b").split(b"-"))
+        print("replace:", p.replace(b"A", b"z"), "hex:", p.hex())
+        print("decode:", p.decode(), "unbound:", bytes.upper(p), bytes.decode(p))
+        print("concat:", p + b"c", type(p + b"c").__name__)
+        print("repeat:", p * 2, type(p * 2).__name__)
+        # THE SEARCHES read the buffer and never ask what the class wrote, which is
+        # why `b` above defines `__repr__` and still finds as b"Ab".
+        print("find:", b"zAbz".find(b), b"zAbz".count(b), b"zAbz".index(b))
+        print("join:", b"-".join([b, p]), "startswith:", b"Abc".startswith(p))
+        print("pad:", b"x".center(5, Plain(b"-")), b"x".ljust(3, Plain(b".")))
+        print("trim:", b"xAbx".strip(Plain(b"x")))
+        # THE CONSTRUCTORS AND THE CONVERSIONS read the buffer too.
+        print("bytes:", bytes(p), type(bytes(p)).__name__, "bytearray:", bytearray(p))
+        print("str:", str(p, "utf-8"), "view:", memoryview(p).tobytes())
+        print("maketrans:", p.translate(bytes.maketrans(Plain(b"A"), Plain(b"z"))))
+        print("empty:", B(), "from int:", B(3), "from list:", B([65, 98]))
+        print("new:", bytes.__new__(B, b"zz"), type(bytes.__new__(B, b"zz")).__name__)
+        # `str()` OF ONE IS ITS REPR, as it is for a bytes: bytes leaves `tp_str` at
+        # object's, which reaches `tp_repr` -- so a written `__repr__` DOES print.
+        print("str of:", str(p), "repr:", repr(p), "written:", str(b), repr(b))
+        # AND `__format__` IS object's. bytes has none of its own, so a non-empty
+        # spec is a TypeError where a str subclass takes the whole mini-language.
+        print("format:", format(p), repr(f"{p}"))
+        try:
+            format(p, "5")
+        except TypeError as e:
+            print("spec:", e)
+        # A NO-OP HANDS BACK A DIFFERENT OBJECT, because the receiver is a subclass:
+        # CPython's `PyBytes_CheckExact` refuses the handback and copies.
+        q = Plain(b"Ab")
+        print("self:", (p * 1) is p, p[:] is p, (p * 1) is (q * 1))
+    """,
     # STR, BYTES AND BYTEARRAY WRITE A `__str__`, so it beats a subclass's
     # `__repr__`. `str(S("text"))` on a `class S(str)` answered `"'text'"` --
     # the REPR, quotes and all: six characters where the program wrote four,

@@ -268,7 +268,18 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
        `__format__` -- so the hook above has to skip it or ask this function
        again, and what it skipped into was a body with no arm for an
        instance. The interpreter's twin of this trapped on a null. */
-    if (O(v)->kind == APY_INST_K && slen && !O(v)->v.o.held)
+    /* `str` IS THE ONLY BUILTIN BASE WITH A `__format__` OF ITS OWN. bytes,
+       bytearray, dict, list, tuple and set all leave `tp_format` at
+       object's, so a non-empty spec on an instance of a class extending one
+       of them is `object.__format__`'s refusal -- which names the CLASS, as
+       `apy_kind_name` already does. Testing "holds nothing" let
+       `format(B(b"Ab"), "5")` fall into str's mini-language below, where it
+       reported `Unknown format code 's' for object of type 'B'`: a
+       ValueError about the spec, where CPython raises a TypeError about the
+       type not having a `__format__` at all. */
+    if (O(v)->kind == APY_INST_K && slen
+            && (!O(v)->v.o.held
+                || O(O(v)->v.o.held)->kind != APY_STR_K))
         return apy_fail2("TypeError",
                          "unsupported format string passed to "
                          "%s.__format__%s", apy_kind_name(v), "");
@@ -1197,7 +1208,17 @@ APY_API apy_value apy_str_like(apy_value recv, apy_value out) {
        S(str)`, because `apy_method_self` unwrapped it before the method ran.
        See `apy_inst_text_result`. */
     out = apy_inst_text_result(recv, out);
-    if (!out || O(recv)->kind != APY_BYTES_K) return out;
+    if (!out) return out;
+    /* AND THE RECEIVER'S KIND IS THE HELD ONE. The fixup above needed `recv`
+       wrapped, and everything from here on is asking what tag the result
+       should WEAR -- which for a `class B(bytes)` is the tag of the bytes it
+       carries. Without this the test below saw APY_INST_K, returned, and
+       `B(b"ab").upper()` answered a plain `'AB'`: a str where the program
+       has a bytes, so the next `+` or `.decode()` on it fails. The str-held
+       case needs nothing, since a str result already wears the right tag. */
+    if (O(recv)->kind == APY_INST_K && O(recv)->v.o.held)
+        recv = O(recv)->v.o.held;
+    if (O(recv)->kind != APY_BYTES_K) return out;
     /* A RESULT THAT IS ALREADY BYTES STILL MAY NOT BE THE RIGHT ONE.
        `bytearray(b"a-b").partition(b"-")` hands back the SEPARATOR the
        caller passed, which is immutable bytes, and Python answers a
