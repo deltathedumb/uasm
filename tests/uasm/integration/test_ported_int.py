@@ -127,7 +127,12 @@ _ASK = {
     "nat_type_new": "(size_t)APY_NAT_TYPE_NEW",
     "nat_type_init": "(size_t)APY_NAT_TYPE_INIT",
     "nat_type_call": "(size_t)APY_NAT_TYPE_CALL",
-    "nat_count": "(size_t)(APY_NAT_GEN_CLOSE + 1)",
+    # THE ENUM'S LAST MEMBER PLUS ONE, which is how the C sizes the cache
+    # itself -- `made[APY_NAT_OBJ_ONLY + 1]` in `apy_native`. It has to be
+    # spelled with whatever is last, so appending a selector means changing
+    # it here too; that is the point of the check, since the IR writes the
+    # same count out by hand in `makers.py`.
+    "nat_count": "(size_t)(APY_NAT_OBJ_ONLY + 1)",
     "nat_has_default": "(size_t)APY_NAT_HAS_DEFAULT",
     "nat_tg_enter": "(size_t)APY_NAT_TG_ENTER",
     "nat_tg_exit": "(size_t)APY_NAT_TG_EXIT",

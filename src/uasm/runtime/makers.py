@@ -549,14 +549,21 @@ def apy_nat_type_call() -> i64:
     return 13
 
 
+# HOW MANY NATIVE SELECTORS THERE ARE, which is how long the cache is.
+#
+# THE NUMBER IS THE C's, and the C sizes its own cache from the enum's last
+# member. `APY_NAT_OBJ_ONLY` was appended for the six dunders `object` hands
+# down that are NOT the receiver's, so this went from 37 to 38. A selector
+# past the end of this table is a write past the end of it.
+#
+# WRITTEN ABOVE THE `def` AND NOT INSIDE IT. `test_ported_int.py` reads these
+# constants straight out of the source with a regex -- `def name() -> i64:`
+# followed by one `return N` -- and compares each against the same number
+# taken from the COMPILED C struct, which is the only thing that keeps the
+# two copies honest. A docstring here parses as "not a one-line constant any
+# more" and the cross-check stops running, which is worse than losing the
+# comment.
 def apy_nat_count() -> i64:
-    """How many native selectors there are, which is how long the cache is.
-
-    THE NUMBER IS THE C's, and the C sizes its own cache from the enum's last
-    member. `APY_NAT_OBJ_ONLY` was appended for the six dunders `object`
-    hands down that are NOT the receiver's, so this went from 37 to 38. A
-    selector past the end of this table is a write past the end of it.
-    """
     return 38
 
 
