@@ -1210,6 +1210,33 @@ C_SOURCE["thread"] = r"""/* --- host services: thread --------------------------
 @STATIC@int64_t host_tss_set(int64_t k, @PTR@ v) { (void)k; (void)v; return -1; }
 @STATIC@int64_t host_tss_free(int64_t k) { (void)k; return -1; }
 #else
+#if defined(Py_PYTHON_H)
+/* THE CONSUMER ALREADY HAS THEM, which makes declaring them again the very
+   conflict the rule above exists to avoid -- from the other side, exactly as
+   `clock_gettime` below. `Python.h` includes `pythread.h`, which includes
+   `<pthread.h>`, so every name this group calls is already in scope with the
+   platform's own signatures. A second prototype saying `void *` where the
+   real one says `pthread_mutex_t *` is a hard error and not a warning, which
+   is why no extension module the cpyext backend produced would compile at
+   all: `conflicting types for 'pthread_create'`, then the same for
+   `pthread_cond_destroy`, and the build stopped there.
+
+   THE TEST IS ANSWERED BY THE TIME THE PREPROCESSOR REACHES IT. The cpyext
+   backend writes `#include <Python.h>` FIRST and says why -- it sets
+   feature-test macros that later headers read -- so `Py_PYTHON_H` is defined
+   before this line whenever this C is part of an extension module, and
+   defined nowhere else.
+
+   NOTHING BELOW CHANGES. The calls pass `void *` handles into these, and a
+   `void *` converts to any object pointer on its own, so the bodies compile
+   against the real prototypes unaltered. `apy_thread_t` becomes the
+   platform's `pthread_t` rather than a guess at it, which is the same
+   improvement the rule gives up elsewhere for the sake of not needing the
+   header at all. */
+#include <pthread.h>
+#include <sched.h>
+typedef pthread_t apy_thread_t;
+#else
 typedef unsigned long apy_thread_t;
 int pthread_create(apy_thread_t *, const void *, void *(*)(void *), void *);
 int pthread_join(apy_thread_t, void **);
@@ -1234,6 +1261,7 @@ int pthread_key_create(unsigned int *, void (*)(void *));
 int pthread_key_delete(unsigned int);
 void *pthread_getspecific(unsigned int);
 int pthread_setspecific(unsigned int, const void *);
+#endif
 /* `clock_gettime` IS NOT DECLARED HERE, and it is the one exception to this
    file's rule. Every consumer of this C already includes `<time.h>` -- the
    `time` group's `time()` and `CLOCKS_PER_SEC` need it -- so the name and
