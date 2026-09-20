@@ -503,8 +503,20 @@ APY_API apy_value apy_sub(apy_value a, apy_value b) {
 static apy_value apy_str_repeat(apy_value s, int64_t k) {
     int64_t n, i;
     char *buf;
-    /* `s * 1 IS s`, exactly as `t * 1 is t` -- see `apy_seq_repeat`. */
-    if (k == 1) return s;
+    /* `s * 1 IS s`, exactly as `t * 1 is t` -- see `apy_seq_repeat`. AND SO
+       IS THE EMPTY STRING REPEATED ANY NUMBER OF TIMES, which is the same
+       rule `apy_bytes_repeat` states at length: the result is the same
+       length as the receiver, so CPython hands the receiver back. Measured:
+       `("" * (2 ** 62)) is ""` and `("" * -3) is ""` are both True.
+
+       IT IS NOT AN OPTIMISATION. The copy loop below runs `k` times
+       whatever `n` is, so without this an empty receiver and a large count
+       is `2 ** 62` zero-byte `memcpy`s -- a HANG, not a slow answer, and one
+       the overflow guard cannot catch because there is no overflow: the
+       product really is zero. Measured on the C object runtime before this
+       line existed: `"" * BIG` through a variable spun for 82 minutes
+       without printing. A literal folds and hides it. */
+    if (k == 1 || O(s)->v.s.n == 0) return s;
     if (k < 0) k = 0;
     /* CHECKED BEFORE THE MULTIPLY, for the reason `apy_bytes_repeat` gives
        at length: the product is what sizes the allocation, and a product
@@ -526,7 +538,8 @@ static apy_value apy_seq_repeat(apy_value seq, int64_t k) {
     /* `t * 1 IS t`. An immutable sequence repeated once has nothing to copy,
        and CPython hands the receiver back -- while `xs * 1` on a LIST is a
        copy, because one of the two may be written to. */
-    if (k == 1 && O(seq)->kind == APY_TUPLE_K) return seq;
+    if ((k == 1 || O(seq)->v.q.n == 0) && O(seq)->kind == APY_TUPLE_K)
+        return seq;
     /* AND THE SAME FOR A SEQUENCE, whose product sizes a slot count rather
        than a byte count -- the wrap is the same and so is the check. CPython
        answers MemoryError here rather than OverflowError, which is not a
@@ -534,6 +547,13 @@ static apy_value apy_seq_repeat(apy_value seq, int64_t k) {
        both raise; only the two TEXT kinds get the "too long" wording. */
     if (k > 0 && O(seq)->v.q.n > (INT64_MAX - 1) / k)
         return apy_fail("MemoryError", "");
+    /* AN EMPTY RECEIVER COPIES NOTHING, SO IT REPEATS NOTHING. The tuple
+       arm above already handed `()` straight back; a LIST cannot take that
+       route -- `[] * 3` is a fresh list in CPython, because one of the two
+       may be written to -- so the count is what has to go. Without this the
+       outer loop below runs `k` times around an inner loop with nothing in
+       it, and `[] * (2 ** 62)` HANGS rather than answering `[]`. */
+    if (O(seq)->v.q.n == 0) k = 0;
     out = apy_seq_new(O(seq)->kind, O(seq)->v.q.n * (k > 0 ? k : 1) + 1);
     for (r = 0; r < k; r++)
         for (i = 0; i < O(seq)->v.q.n; i++) apy_seq_push(out, O(seq)->v.q.items[i]);

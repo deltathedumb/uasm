@@ -3981,6 +3981,79 @@ PROGRAMS = {
         print("values:", repr(s[:]), repr(t[0:0]), repr(s[0:1]), repr(ba),
               repr(e), repr(eb))
     """,
+    # A REPEAT SIZES AN ALLOCATION AND COPIES INTO IT, and both halves can
+    # go wrong at a count the guard beside them does not cover.
+    #
+    # THE PRODUCT was computed and then looked at, which is not a check:
+    # `b"abcd" * (2 ** 62 + 2)` is 2**64 + 8, wraps to EIGHT, and the
+    # `malloc(9)` SUCCEEDED before the copy loop walked off the heap.
+    # CPython divides first -- `if (n > 0 && Py_SIZE(a) > PY_SSIZE_T_MAX / n)`
+    # -- and so does each of the three now, with CPython's own wording for
+    # each kind: "repeated bytes are too long", "repeated string is too
+    # long", and a bare MemoryError for a tuple or a list.
+    #
+    # THE COPY LOOP ran `k` times whatever the receiver's length was, so an
+    # EMPTY receiver and a large count was `2 ** 62` zero-byte copies -- a
+    # HANG, and one no overflow check can catch, because the product really
+    # is zero. Measured: the C object runtime spun for 82 minutes on
+    # `"" * (2 ** 62)` without printing a line. An immutable empty receiver
+    # comes back as ITSELF, which is what CPython's `size == Py_SIZE(a)` test
+    # says; a list and a bytearray are fresh, because either may be written
+    # to afterwards.
+    #
+    # AND THE COUNT ITSELF has to fit an index. Every kind reports that as an
+    # OverflowError; bytes alone said IndexError, because it asked for the
+    # conversion with the form a SUBSCRIPT uses.
+    "a_repeat_checks_its_product_and_copies_nothing_for_nothing": """
+        BIG = 2 ** 62
+
+        def rep(v, k):
+            return v * k
+
+        def show(label, f):
+            try:
+                r = f()
+                print(f"{label:22} ok len={len(r)} {type(r).__name__}")
+            except Exception as e:
+                print(f"{label:22} {type(e).__name__}: {e}")
+
+        # The product does not fit, at three widths and for five kinds.
+        show("bytes big", lambda: rep(b"ab", BIG))
+        show("str big", lambda: rep("ab", BIG))
+        show("tuple big", lambda: rep((1, 2), BIG))
+        show("list big", lambda: rep([1, 2], BIG))
+        show("bytearray big", lambda: rep(bytearray(b"ab"), BIG))
+        show("bytes maxsize", lambda: rep(b"ab", 2 ** 63 - 1))
+        # The one that wrapped to a SMALL POSITIVE number and smashed the
+        # heap: 2**64 + 8 as a size_t is 8, so malloc(9) succeeded.
+        show("bytes wraps small", lambda: rep(b"abcd", BIG + 2))
+        show("str wraps small", lambda: rep("abcd", BIG + 2))
+        show("tuple wraps small", lambda: rep((1, 2, 3, 4), BIG + 2))
+
+        # Nothing to copy, however large the count.
+        show("str empty", lambda: rep("", BIG))
+        show("bytes empty", lambda: rep(b"", BIG))
+        show("bytearray empty", lambda: rep(bytearray(), BIG))
+        show("tuple empty", lambda: rep((), BIG))
+        show("list empty", lambda: rep([], BIG))
+        show("str empty neg", lambda: rep("", -3))
+        show("bytearray empty max", lambda: rep(bytearray(), 2 ** 63 - 1))
+
+        # The count does not fit an index: one report for every kind.
+        show("bytes count", lambda: rep(b"ab", 2 ** 63))
+        show("str count", lambda: rep("ab", 2 ** 63))
+        show("tuple count", lambda: rep((1,), 2 ** 63))
+        show("list count", lambda: rep([1], 2 ** 63))
+        show("bytearray count", lambda: rep(bytearray(b"ab"), 2 ** 63))
+
+        # And which of them is the receiver itself afterwards.
+        s, b, t, xs, ba = "", b"", (), [], bytearray()
+        print("empty self:", rep(s, BIG) is s, rep(b, BIG) is b,
+              rep(t, BIG) is t)
+        print("empty fresh:", rep(xs, BIG) is xs, rep(ba, BIG) is ba)
+        full = (1, 2)
+        print("one self:", rep(full, 1) is full, rep(xs, 1) is xs)
+    """,
     # A BUILTIN'S `__new__` BUILDS THE SUBCLASS IT IS HANDED. It is an
     # implicit staticmethod, so its first argument is the CLASS TO BUILD and
     # not a receiver of that type -- and the unbound-method check that every

@@ -584,7 +584,14 @@ static apy_value apy_bytes_getitem(apy_value seq, int64_t i) {
    repetition in Python does -- not an error. */
 static apy_value apy_bytes_repeat(apy_value v, apy_value count) {
     int64_t k, n, i;
-    if (!apy_index_arg(count, &k, APY_IDX_SUB)) return 0;
+    /* `APY_IDX_REPEAT` AND NOT `APY_IDX_SUB`, which is what the str and the
+       sequence arms of `apy_mul` already pass. The three forms differ only in
+       what they RAISE, and the pairing is CPython's -- a subscript too large
+       for an index is an IndexError, a repeat COUNT too large for one is an
+       OverflowError. This said IndexError, so `b"ab" * (2 ** 63)` reported
+       `IndexError: cannot fit 'int' into an index-sized integer` where
+       CPython, and every other kind here, says OverflowError. */
+    if (!apy_index_arg(count, &k, APY_IDX_REPEAT)) return 0;
     if (k < 0) k = 0;
     n = O(v)->v.s.n;
     /* THE RECEIVER COMES BACK WHENEVER THE RESULT IS THE SAME LENGTH, and
@@ -610,20 +617,17 @@ static apy_value apy_bytes_repeat(apy_value v, apy_value count) {
        a large count -- see the paragraph below, which measures where it is
        not.
 
-       AND THE PRODUCT BELOW IS STILL UNGUARDED, which is older than this
-       test and is not fixed here. CPython's `bytes_repeat` opens with
-       `if (n > 0 && Py_SIZE(a) > PY_SSIZE_T_MAX / n)` and raises
-       `OverflowError: repeated bytes are too long`; nothing here does, so
-       `n * k` wraps. MEASURED on both compiled paths, through a function so
-       nothing folds (`scratchpad/probes/d181ovf.py` and the smash case
-       beside it in the report): `b"ab" * (2 ** 62)` makes the product
-       INT64_MIN and dies with `uasm: out of memory` where CPython raises,
-       and `b"abcd" * (2 ** 62)` makes it exactly ZERO -- so the `malloc`
-       succeeds at one byte and the `memcpy` loop walks off the heap and
-       SEGFAULTS. `apy_str_repeat` and `apy_seq_repeat` in
-       `objects/c/_numeric.py` compute their sizes the same way and want the
-       same guard, with CPython's own wording for each: `repeated string is
-       too long` for str, and a MemoryError for a list. Left for the task
+       AND IT IS ONLY HALF OF WHAT AN EMPTY RECEIVER NEEDS. The shortcut
+       above is gated on `!mut`, so a BYTEARRAY falls past it -- `bytearray()
+       * (2 ** 62)` reached the copy loop below, which runs `k` times
+       whatever `n` is, and hung on `2 ** 62` zero-byte `memcpy`s. The
+       overflow guard cannot catch that: there is no overflow, the product
+       really is zero. `k` is therefore zeroed with `n` further down, which
+       is what makes the loop not run. `apy_str_repeat` and `apy_seq_repeat`
+       in `objects/c/_numeric.py` had the same hang and are fixed the same
+       way there -- str by handing the receiver back, a list by zeroing the
+       count, since `[] * 3` is a fresh list in CPython and `"" * 3` is not
+       a fresh string. Left for the task
        that takes the three together, because guarding only this one would
        make the bytes row raise while the str row beside it still crashes.
 
@@ -661,8 +665,22 @@ static apy_value apy_bytes_repeat(apy_value v, apy_value count) {
 
        THE `+ 1` IS IN THE BOUND because the terminator is in the malloc. */
     if ((n == 0 || k == 1) && !O(v)->v.s.mut) return v;
+    /* THE TWO KINDS REPORT DIFFERENTLY, and the difference is not derivable
+       from anything: `bytes_repeat` raises `OverflowError: repeated bytes
+       are too long` and `bytearray_repeat`, three files away, ends the same
+       division with a bare `PyErr_NoMemory()`. Measured, 3.14:
+       `b"ab" * (2 ** 62)` is the OverflowError and
+       `bytearray(b"ab") * (2 ** 62)` is `MemoryError:` with no text -- which
+       is also what a tuple and a list say, so the ODD ONE OUT is bytes. */
     if (k > 0 && n > (INT64_MAX - 1) / k)
-        return apy_fail("OverflowError", "repeated bytes are too long");
+        return O(v)->v.s.mut
+            ? apy_fail("MemoryError", "")
+            : apy_fail("OverflowError", "repeated bytes are too long");
+    /* A MUTABLE EMPTY RECEIVER STILL COPIES NOTHING. The handback above
+       refused it -- rightly, since a bytearray handed back would give the
+       program two names for one buffer -- so the count is what has to go, or
+       the loop below spins once per repetition with nothing to move. */
+    if (n == 0) k = 0;
     { char *out = (char *)malloc((size_t)(n * k) + 1);
       if (!out) { fputs("uasm: out of memory\n", stderr); exit(1); }
       for (i = 0; i < k; i++) memcpy(out + i * n, O(v)->v.s.p, (size_t)n);
