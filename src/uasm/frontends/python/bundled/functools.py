@@ -181,10 +181,18 @@ def total_ordering(cls):
     does this: Python derives `!=` from `__eq__` on its own, and writing one
     here shadowed that for no gain.
     """
-    has_lt = hasattr(cls, "__lt__")
-    has_le = hasattr(cls, "__le__")
-    has_gt = hasattr(cls, "__gt__")
-    has_ge = hasattr(cls, "__ge__")
+    # AGAINST `object`'s OWN, not `hasattr`. Every class inherits all four
+    # orderings from `object` -- `hasattr(C, "__gt__")` is True in CPython
+    # for a class that wrote none -- so the question is not whether the name
+    # RESOLVES but whether it resolves to something other than the default.
+    # CPython's own `total_ordering` is written exactly this way, and this
+    # said `hasattr`: it worked only while a class inherited nothing, and the
+    # moment it did, every class looked as though it had written all four and
+    # none was ever filled in.
+    has_lt = getattr(cls, "__lt__", None) is not getattr(object, "__lt__", None)
+    has_le = getattr(cls, "__le__", None) is not getattr(object, "__le__", None)
+    has_gt = getattr(cls, "__gt__", None) is not getattr(object, "__gt__", None)
+    has_ge = getattr(cls, "__ge__", None) is not getattr(object, "__ge__", None)
     if not has_lt and not has_le and not has_gt and not has_ge:
         raise ValueError(
             "must define at least one ordering operation: < > <= >=")

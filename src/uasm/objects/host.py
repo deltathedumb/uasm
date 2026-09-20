@@ -283,6 +283,9 @@ class ObjectHost:
         self._interp_cls = None
         #: `object`'s defaults as callable values -- see `_object_default`.
         self._defaults: dict = {}
+        #: The ids of the Natives `_object_default` cached, which are the only
+        #: ones `_value` interns a handle for. See there.
+        self._default_natives: set = set()
         #: `typing` forms, by name -- see `_apy_typing_form` for why one per
         #: name. Per host, like every other table here: a handle indexes THIS
         #: host's cells, and a shared one would hand a second run the first's.
@@ -989,6 +992,25 @@ class ObjectHost:
             # `captured died` between two calls to `inner`, with `inner`
             # still holding it. Interning is what makes the box's count one
             # count.
+            got = self._identity.get(id(obj))
+            if got is not None and self._cell(got) is obj:
+                return got
+            made = self._new(obj)
+            self._identity[id(obj)] = made
+            return made
+        # AND `object`'s OWN DEFAULTS, which are one cell each and so want one
+        # handle each. `_object_default` interns the Native per name already;
+        # what was missing was the handle, so `object.__lt__ is object.__lt__`
+        # was FALSE -- and `functools.total_ordering` asks exactly that
+        # question, `getattr(cls, op) is not getattr(object, op)`, to decide
+        # which orderings a class wrote for itself.
+        #
+        # ONLY THESE NATIVES. A builtin method reached off a VALUE is a fresh
+        # object per read in CPython too -- `"ab".upper is "ab".upper` is
+        # False there -- so interning every Native would answer True where
+        # CPython says False. The ones `_object_default` cached are the only
+        # Natives that are a single cell to begin with.
+        if isinstance(obj, Native) and id(obj) in self._default_natives:
             got = self._identity.get(id(obj))
             if got is not None and self._cell(got) is obj:
                 return got
@@ -9803,6 +9825,9 @@ def _object_default(h, name: str):
         return None
     made = Native(name, body)
     h._defaults[name] = made
+    # ONE CELL AND SO ONE HANDLE -- see `_value`, which reads this set.
+    if isinstance(made, Native):
+        h._default_natives.add(id(made))
     return made
 
 
