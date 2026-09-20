@@ -70,7 +70,13 @@ class Unsupported(Exception):
 
 class Lowerer:
     def __init__(self, unit: S.Unit, parser, source: SourceFile,
-                 sink: DiagnosticSink, inits: tuple[str, ...] = ()) -> None:
+                 sink: DiagnosticSink, inits: tuple[str, ...] = (), *,
+                 init_symbol: str = "") -> None:
+        #: THE NAME `--c:init-symbol` GAVE THE UNIT'S INITIALISER, or "".
+        #: Named means exported, emitted even when it turns out to be empty,
+        #: and nothing to warn about: the caller has said it will run it. See
+        #: `_emit_init`.
+        self.init_symbol = init_symbol
         #: EVERY UNIT'S INITIALISER, when the build has more than one, so
         #: that the entry point can call all of them. Empty for a single
         #: unit, which calls its own or has none. See `_emit_entry`.
@@ -112,7 +118,7 @@ class Lowerer:
         self._cx_used = 0
         #: This unit's initialiser, named with its own prefix so that two
         #: units' initialisers are two functions.
-        self._init_name = parser.sema.prefix + "init"
+        self._init_name = init_symbol or (parser.sema.prefix + "init")
         self._temp_n = 0
         #: The register holding this function's variadic argument area.
         self.va_area: int | None = None
@@ -521,11 +527,24 @@ class Lowerer:
         alternative (working out afterwards which units produced one and
         editing the entry block) does not come close to.
         """
-        if not self.init_stores and not self.inits and not self.thread_locals:
+        if (not self.init_stores and not self.inits
+                and not self.thread_locals and not self.init_symbol):
             return
+        # A NAMED INITIALISER IS EXPORTED AND IS EMITTED EMPTY. The unit that
+        # asked for the name calls it by that name, in C, through an `extern`
+        # declaration -- and a declaration with nothing behind it is an
+        # undefined symbol at link time. An empty one costs a `ret`.
         fn = Function(self._init_name, IR.VOID, span=self.unit.span,
-                      linkage=(IRLinkage.EXPORT if self.inits
+                      linkage=(IRLinkage.EXPORT
+                               if (self.inits or self.init_symbol)
                                else IRLinkage.INTERNAL))
+        # THE C SIDE MAY HAVE DECLARED IT FIRST, which is how it calls it.
+        # That declaration is an IMPORT function of the same name, and two
+        # functions of one name is what the verifier reports. `_function`
+        # drops the same declaration when a definition arrives.
+        prior = self.module.function(self._init_name)
+        if prior is not None and prior.external:
+            self.module.functions.remove(prior)
         self.module.functions.append(fn)
         self.fn = fn
         fn.blocks.append(Block("entry"))
@@ -560,7 +579,8 @@ class Lowerer:
             # IN A MULTI-UNIT BUILD THIS IS THE ORDINARY CASE -- only one
             # unit has `main` -- and the frontend says so once, after the
             # merge, if no unit had one at all.
-            if (self.init_stores or self.thread_locals) and not self.inits:
+            if ((self.init_stores or self.thread_locals)
+                    and not self.inits and not self.init_symbol):
                 self.sink.report(
                     warning("W1500",
                             "this unit has static initialisers that need "

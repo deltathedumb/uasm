@@ -353,6 +353,40 @@ int main(void) { return (int)@ENTRY@(); }
 #: "unsupported format character 'l'" on the very first link.
 _ENTRY_TOKEN = "@ENTRY@"
 
+#: The C `main` shim, spelled once so that the two places that take it out
+#: take out the same text.
+MAIN_SHIM = "int main(void) { return (int)@ENTRY@(); }"
+
+#: THE EXPORTED NAME OF THIS UNIT'S STATIC INITIALISER, and of the function
+#: the floor calls in place of the entry when it is there.
+#:
+#: WHY THERE IS A SECOND ENTRY AT ALL. `static const char *D =
+#: "0123456789abcdef";` -- `apy_bytes_hex_n` has one, `apy_bytes_repr` has
+#: one, `apy_class_known` has one -- cannot be written into the global's
+#: bytes: the literal's address belongs to the linker. The C frontend turns
+#: each into a STORE in the unit's initialiser, and the only thing that calls
+#: that initialiser is the entry point it builds around `main`. This
+#: translation unit has no `main` on purpose (see `MAIN_SHIM` below), so
+#: those globals stayed ZERO and the first read through one segfaulted --
+#: silently, because the frontend's warning about it went to a sink nobody
+#: rendered. `--c:init-symbol` gives the initialiser an exported name, this
+#: shim calls it, and the floor calls this shim.
+STATIC_INIT_SYMBOL = "uasm_static_init"
+BOOT_SYMBOL = "uasm_boot"
+
+#: What stands in the `main` shim's place for a freestanding link. Written
+#: with `@ENTRY@` still in it, because every caller substitutes that after.
+BOOT_SHIM = f"""/* The `main` shim is omitted: uasm's own C frontend renames C's `main` to
+   the backend's entry symbol, which is the very name the program's own
+   object defines, and two definitions of it is what the linker then reports
+   about a function neither file appears to have written.
+
+   THIS IS WHAT TAKES ITS PLACE, and it is not just a rename: `main` was also
+   the one thing that ran this unit's static initialisers. See
+   `STATIC_INIT_SYMBOL`. */
+extern void {STATIC_INIT_SYMBOL}(void);
+int64_t {BOOT_SYMBOL}(void) {{ {STATIC_INIT_SYMBOL}(); return @ENTRY@(); }}"""
+
 # The name the backend gives the IR's `main`. Imported, not repeated: the
 # backend writing the symbol and this runtime calling it must agree.
 from ..backend.base import ENTRY_SYMBOL  # noqa: E402
@@ -375,15 +409,10 @@ def runtime_c(*, entry: str = ENTRY_SYMBOL, module=None,
     from .ir import omitted_by, split_by
     text = RUNTIME_C
     if not main_shim:
-        # THE `main` SHIM IS NOT PART OF THE RUNTIME, and when this text is
-        # compiled by uasm's OWN C frontend it must not be there: that
-        # frontend renames C's `main` to the backend's entry symbol, which is
-        # the very name the program's own object defines. Two definitions of
-        # it is what the linker then reports, about a function neither file
-        # appears to have written.
-        text = text.replace(
-            "int main(void) { return (int)@ENTRY@(); }",
-            "/* The `main` shim is omitted: see `runtime_c(main_shim=False)`. */")
+        # THE `main` SHIM IS NOT PART OF THE RUNTIME when this text is
+        # compiled by uasm's OWN C frontend. `BOOT_SHIM` says why, and why
+        # what replaces it is a function and not a comment.
+        text = text.replace(MAIN_SHIM, BOOT_SHIM)
     return (text.replace("@HOST@", host_functions(floor=floor))
             .replace("@OBJECTS@", objects_c(omit=omitted_by(module),
                                             split=split_by(module)))

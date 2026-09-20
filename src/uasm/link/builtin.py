@@ -27,11 +27,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..backend.base import ENTRY_SYMBOL
 from ..backend.objfile import EM_AARCH64, EM_X86_64
 from ..backend.objfile.coffread import (
     IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
 )
 from ..backend.objfile.macho import CPU_TYPE_ARM64, CPU_TYPE_X86_64
+from ..objects.support import BOOT_SYMBOL
 from ..target import Target
 from .base import LinkError, LinkRequest, Toolchain
 from .freestanding import floor_object, provides
@@ -250,7 +252,8 @@ def _with_runtime(inputs: list[tuple[str, bytes]],
         blob = runtime_object(_c_names(defined, fmt), backend=backend,
                               target=_target_for(kind, request.target),
                               workdir=request.workdir,
-                              verbose=request.verbose)
+                              verbose=request.verbose,
+                              notes=request.notes)
     except RuntimeBuildFailed as exc:
         raise LinkError(exc.message, detail=exc.detail,
                         help="the object runtime is compiled by uasm itself; "
@@ -300,11 +303,35 @@ def _with_floor(inputs: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
         return inputs
     fmt, machine = kind
     try:
-        return [("<floor>", floor_object(machine, fmt=fmt)), *inputs]
+        return [("<floor>", floor_object(machine, fmt=fmt,
+                                         entry=_entry_of(defined, fmt))),
+                *inputs]
     except KeyError:
         # No floor for this container and machine. The link will fail on the
         # undefined symbols, which names them, which is the better message.
         return inputs
+
+
+def _entry_of(defined: set[str], fmt: str) -> str:
+    """What `_start` should call: the runtime's boot shim, or the entry.
+
+    THE OBJECT RUNTIME HAS STATIC INITIALISERS AND NO `main` TO RUN THEM.
+    A `static const char *D = "0123456789abcdef";` cannot be written into a
+    global's bytes -- the literal's address is decided here, by the linker --
+    so the C frontend turns it into a store in that unit's initialiser, and
+    the only caller of that initialiser is the entry point the frontend
+    builds around `main`. That `main` is deliberately not in the runtime: it
+    would be a second definition of the backend's entry symbol. So the
+    runtime carries `uasm_boot` instead -- run the initialisers, then call
+    the entry -- and `_start` calls that when it is there.
+
+    ASKED OF THE OBJECTS AND NOT ASSUMED, because not every link has an
+    object runtime in it: `uasm link a.o` over a hand-written object has no
+    `uasm_boot` to call, and calling one that is not there is an undefined
+    symbol rather than a program.
+    """
+    names = _c_names(defined, fmt)
+    return BOOT_SYMBOL if BOOT_SYMBOL in names else ENTRY_SYMBOL
 
 
 def load_builtin() -> None:

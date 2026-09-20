@@ -223,6 +223,114 @@ class TestAWholePythonProgram:
             "the runtime was recompiled when it should have been reused"
 
 
+class TestTheRuntimesOwnStaticInitialisersRun:
+    """A global in the object runtime whose value is an ADDRESS.
+
+    `static const char *D = "0123456789abcdef";` cannot be written into the
+    global's bytes: the literal's address belongs to the linker. uasm's C
+    frontend turns each one into a store in the unit's initialiser, and the
+    only caller of that initialiser is the entry point the frontend builds
+    around `main`. The object runtime has no `main` ON PURPOSE -- it would be
+    a second definition of the backend's entry symbol -- so for as long as
+    the freestanding link existed, every such global started at ZERO and the
+    first read through one segfaulted. `uasm_boot` is what runs them now.
+
+    FOUR PROGRAMS AND NOT ONE, because they are four different globals in
+    four different files and the fix is only one fix if all four move: the
+    hex table in `_codecs.py`, the escape table in `_inspect.py`, the dunder
+    list in `_calling.py`, and the module list in `_classes.py`.
+    """
+
+    def _agrees(self, tmp_path, program: str) -> None:
+        source = _write(tmp_path, program)
+        oracle = _cli("run", str(source))
+        assert oracle.returncode == 0, oracle.stderr[-2000:]
+        got = _run(_build(tmp_path, source))
+        assert got.returncode == 0, \
+            f"exit {got.returncode}: {got.stderr[-2000:]!r}"
+        assert got.stdout.decode() == oracle.stdout, \
+            (got.stdout, oracle.stdout)
+
+    def test_hex_reads_its_table(self, tmp_path):
+        self._agrees(tmp_path, 'print(b"AB".hex())\n'
+                               'print(bytearray(b"AB").hex())\n')
+
+    def test_repr_reads_its_escape_table(self, tmp_path):
+        self._agrees(tmp_path, 'print(repr(b"a\\x01b"))\n'
+                               'print(repr(b"\\x00\\xff"))\n')
+
+    def test_object_has_its_dunders(self, tmp_path):
+        self._agrees(tmp_path, 'print("__repr__" in dir(object))\n')
+
+    def test_a_str_subclass_is_usable(self, tmp_path):
+        self._agrees(tmp_path,
+                     'class S(str):\n'
+                     '    pass\n'
+                     'print(S("hi"), len(S("hi")), S("hi").upper())\n')
+
+    def test_start_calls_the_boot_shim_and_not_the_entry(self, tmp_path):
+        """The wiring itself, not only what it produces.
+
+        A program that happened to touch none of those globals would pass
+        every test above with the initialisers still never running, which is
+        exactly the state this was in.
+        """
+        from uasm.backend.base import ENTRY_SYMBOL
+        from uasm.link.builtin import _entry_of
+        from uasm.objects.support import BOOT_SYMBOL, STATIC_INIT_SYMBOL
+
+        assert _entry_of({BOOT_SYMBOL, ENTRY_SYMBOL}, "elf") == BOOT_SYMBOL
+        assert _entry_of({"_" + BOOT_SYMBOL}, "macho") == BOOT_SYMBOL
+        # NOTHING TO BOOT IS STILL A PROGRAM. `uasm link a.o` over an object
+        # that needs no runtime has no shim to call, and calling one that is
+        # not there is an undefined symbol rather than an image.
+        assert _entry_of({ENTRY_SYMBOL}, "elf") == ENTRY_SYMBOL
+
+        source = _write(tmp_path, 'print(b"AB".hex())\n')
+        _build(tmp_path, source)
+        runtime = sorted((tmp_path / ".uasm" / "runtime").glob("*.o"))
+        assert len(runtime) == 1, runtime
+        names = _elf_symbol_names(runtime[0].read_bytes())
+        assert BOOT_SYMBOL in names, sorted(names)[:40]
+        assert STATIC_INIT_SYMBOL in names, sorted(names)[:40]
+
+
+def _elf_symbol_names(blob: bytes) -> set[str]:
+    """Every name in a relocatable ELF's symbol table.
+
+    READ HERE RATHER THAN WITH THE READER THE LINKER USES, so that a bug in
+    that reader cannot make this test agree with it.
+    """
+    import struct
+    # e_shoff at 0x28, then e_flags(4) e_ehsize(2) e_phentsize(2) e_phnum(2)
+    # before e_shentsize and e_shnum -- ten bytes of them, not fourteen.
+    shoff, shentsize, shnum = struct.unpack_from("<Q10xHH", blob, 0x28)
+
+    def section(i: int) -> tuple[int, int, int, int, int]:
+        name, kind, _f, _a, off, size, _l, _i, _al, ent = struct.unpack_from(
+            "<IIQQQQIIQQ", blob, shoff + i * shentsize)
+        return name, kind, off, size, ent
+
+    strtab = None
+    symtab = None
+    for i in range(shnum):
+        _name, kind, off, size, ent = section(i)
+        if kind == 2:                       # SHT_SYMTAB
+            symtab = (off, size, ent)
+            _n2, _k2, off2, size2, _e2 = section(
+                struct.unpack_from("<I", blob,
+                                   shoff + i * shentsize + 0x28)[0])
+            strtab = (off2, size2)
+    assert symtab and strtab, "no symbol table"
+    off, size, ent = symtab
+    names = set()
+    for k in range(size // ent):
+        at = struct.unpack_from("<I", blob, off + k * ent)[0]
+        end = blob.index(b"\0", strtab[0] + at)
+        names.add(blob[strtab[0] + at:end].decode())
+    return names
+
+
 class TestBuildAndLinkAreSeparateVerbs:
     def test_build_writes_an_object_and_link_makes_the_program(self, tmp_path):
         source = _write(tmp_path, 'print("hello")\n')

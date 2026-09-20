@@ -177,17 +177,34 @@ class CFrontend(Frontend):
                metavar="1|0"),
         Option("unit", "another translation unit to compile into this program",
                metavar="FILE", repeat=True),
+        # A UNIT WITH NO `main` HAS NOTHING TO RUN ITS STATIC INITIALISERS.
+        # `static const char *D = "0123456789abcdef";` cannot be written into
+        # the global's bytes -- the literal's address is the linker's to
+        # decide -- so it becomes a STORE in the unit's initialiser, and the
+        # only thing that calls that initialiser is the entry point this
+        # frontend builds around `main`. A unit compiled WITHOUT a `main` --
+        # the object runtime is one, deliberately, since its `main` would be
+        # a second definition of the backend's entry symbol -- therefore
+        # starts with that global still zero, and reads through it at the
+        # first use. Naming the initialiser here makes it EXPORTED and
+        # callable, so the unit's own code, or whatever links it, can run it.
+        Option("init-symbol",
+               "name the unit's static initialiser and export it, for a "
+               "unit with no `main` to run it from",
+               metavar="NAME"),
     )
 
     def __init__(self, *, include_paths: tuple[Path, ...] = (),
                  defines: tuple[tuple[str, str], ...] = (),
                  trigraphs: bool = False, bundled: bool = True,
-                 units: tuple[Path, ...] = ()) -> None:
+                 units: tuple[Path, ...] = (),
+                 init_symbol: str = "") -> None:
         self.include_paths = include_paths
         self.defines = defines
         self.trigraphs = trigraphs
         self.bundled = bundled
         self.units = units
+        self.init_symbol = init_symbol
 
     def configure(self, values: dict, context, sink: DiagnosticSink
                   ) -> "CFrontend":
@@ -205,7 +222,8 @@ class CFrontend(Frontend):
             defines=tuple(_split_define(d) for d in values.get("define", ())),
             trigraphs=_truth(values, "trigraphs", self.trigraphs),
             bundled=_truth(values, "bundled-headers", self.bundled),
-            units=tuple(Path(u) for u in values.get("unit", ())))
+            units=tuple(Path(u) for u in values.get("unit", ())),
+            init_symbol=values.get("init-symbol", self.init_symbol) or "")
 
     def compile(self, source: SourceFile, sink: DiagnosticSink) -> Module | None:
         """One module, from this source and any `--c:unit` beside it."""
@@ -223,7 +241,15 @@ class CFrontend(Frontend):
             if len(sources) > 1 else ()
         modules = []
         for i, src in enumerate(sources):
-            module = self._one(src, sink, prefix=f"c{i}.", inits=inits)
+            # ONE NAME CANNOT SERVE SEVERAL UNITS. `--c:init-symbol` gives
+            # the initialiser an exported name, and exporting the same name
+            # from every unit of a multi-unit build is two definitions of it.
+            # A build with more than one unit already has `main` in one of
+            # them and `inits` wiring the rest, which is the mechanism this
+            # flag exists to stand in for.
+            module = self._one(src, sink, prefix=f"c{i}.", inits=inits,
+                               init_symbol=("" if len(sources) > 1
+                                            else self.init_symbol))
             if module is None:
                 return None
             modules.append(module)
@@ -262,7 +288,8 @@ class CFrontend(Frontend):
         return module
 
     def _one(self, source: SourceFile, sink: DiagnosticSink, *,
-             prefix: str, inits: tuple[str, ...]) -> Module | None:
+             prefix: str, inits: tuple[str, ...],
+             init_symbol: str = "") -> Module | None:
         search = Search(angle=list(self.include_paths), bundled=self.bundled)
         pp = Preprocessor(sink, search, trigraphs=self.trigraphs,
                           defines=dict(self.defines))
@@ -276,7 +303,8 @@ class CFrontend(Frontend):
             # internal-error report on top of their real diagnostics.
             return None
         try:
-            return Lowerer(unit, parser, source, sink, inits).run()
+            return Lowerer(unit, parser, source, sink, inits,
+                           init_symbol=init_symbol).run()
         except RecursionError:
             sink.report(
                 error("E1599", "this program is too deeply nested to compile")

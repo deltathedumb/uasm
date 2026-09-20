@@ -37,7 +37,8 @@ from pathlib import Path
 
 from ..objects import ir as objects_ir
 from ..objects.csource import objects_c
-from ..objects.support import RUNTIME_C, host_functions
+from ..objects.support import (BOOT_SHIM, MAIN_SHIM, RUNTIME_C,
+                              STATIC_INIT_SYMBOL, host_functions)
 
 #: Where a compiled runtime is kept between builds. Under the workdir rather
 #: than in a home directory: a build tree is the thing whose contents it
@@ -71,9 +72,7 @@ def runtime_source(provided: frozenset[str] | set[str]) -> str:
     omit = tuple(n for n in objects_ir.PORTED
                  if n in provided and n not in objects_ir.SPLIT)
     split = tuple(n for n in objects_ir.SPLIT if n in provided)
-    text = RUNTIME_C.replace(
-        "int main(void) { return (int)@ENTRY@(); }",
-        "/* The `main` shim is omitted: `_start` calls the entry directly. */")
+    text = RUNTIME_C.replace(MAIN_SHIM, BOOT_SHIM)
     return (text.replace("@HOST@", host_functions(floor=False))
             .replace("@OBJECTS@", objects_c(omit=omit, split=split))
             .replace("@ENTRY@", "uasm_main"))
@@ -88,8 +87,20 @@ def _cache_path(workdir: Path, text: str, backend: str,
 
 
 def runtime_object(provided: frozenset[str] | set[str], *, backend: str,
-                   target, workdir: Path, verbose: bool = False) -> bytes:
-    """The object runtime as an object, compiled by uasm, cached by content."""
+                   target, workdir: Path, verbose: bool = False,
+                   notes: list[str] | None = None) -> bytes:
+    """The object runtime as an object, compiled by uasm, cached by content.
+
+    `notes` IS WHERE ITS DIAGNOSTICS GO, and a caller that passes none gets
+    them nowhere. This compile has a sink of its own -- it is not the user's
+    build -- and for weeks nothing rendered it unless the compile FAILED, so
+    a `W1500` saying the runtime's static initialisers would never run was
+    emitted and dropped every single time. See `_compile`.
+
+    ONLY ON A CACHE MISS, which is the honest answer rather than a
+    convenient one: the object is reused by content, and re-deriving a
+    warning for bytes that were not compiled would mean compiling them.
+    """
     text = runtime_source(provided)
     target_name = getattr(target, "name", "") or ""
     cached = _cache_path(workdir, text, backend, target_name)
@@ -104,7 +115,7 @@ def runtime_object(provided: frozenset[str] | set[str], *, backend: str,
     source.write_text(text, encoding="utf-8")
 
     blob = _compile(source, backend=backend, target=target,
-                    workdir=cached.parent, verbose=verbose)
+                    workdir=cached.parent, verbose=verbose, notes=notes)
     # WRITTEN THROUGH A TEMPORARY AND RENAMED, so that two builds running at
     # once never leave a half-written object for the third to read. `rename`
     # is atomic within a directory on every platform this runs on.
@@ -115,7 +126,7 @@ def runtime_object(provided: frozenset[str] | set[str], *, backend: str,
 
 
 def _compile(source: Path, *, backend: str, target, workdir: Path,
-             verbose: bool) -> bytes:
+             verbose: bool, notes: list[str] | None = None) -> bytes:
     """Run the compiler over the runtime C, in this process.
 
     IN PROCESS AND NOT AS A SUBPROCESS, which is worth saying because a
@@ -140,7 +151,12 @@ def _compile(source: Path, *, backend: str, target, workdir: Path,
     sink = DiagnosticSink()
     opts = Options(source=source, output=None, frontend="c", backend=backend,
                    target=target, link=False, workdir=workdir,
-                   verbose=verbose, object_runtime="c")
+                   verbose=verbose, object_runtime="c",
+                   # THE UNIT HAS NO `main`, SO IT NEEDS THE NAME. Its static
+                   # initialisers are otherwise emitted, never called, and
+                   # dropped as dead code, leaving every global that holds an
+                   # address zero. `BOOT_SHIM` above is what calls this.
+                   frontend_options={"init-symbol": STATIC_INIT_SYMBOL})
     try:
         result = compile_source(opts, sink)
     except Exception as exc:                       # noqa: BLE001
@@ -151,6 +167,19 @@ def _compile(source: Path, *, backend: str, target, workdir: Path,
         raise RuntimeBuildFailed(
             "could not compile the object runtime",
             detail=_render(sink))
+    # A WARNING ABOUT THIS COMPILE IS NOT A WARNING ABOUT NOTHING, and this
+    # sink is private to it -- nobody renders it unless the compile FAILS.
+    # `W1500` fired here for weeks and nobody saw it: the runtime's static
+    # initialisers were emitted, never called and then dropped as dead code,
+    # so every global holding an address was zero and the first read through
+    # one segfaulted, with no diagnostic anywhere. A warning about a runtime
+    # nobody asked for is confusing on its own, so it is prefixed rather than
+    # suppressed.
+    if notes is not None:
+        said = _render(sink).strip()
+        if said:
+            notes.append("the object runtime compiled with diagnostics:\n"
+                         + said)
     # `.o` OR `.obj`: the suffix belongs to the target, not to the step.
     # A COFF backend writes `out.obj` and a run that only looked for `.o`
     # reported "0 objects, not one" for a compile that had just succeeded.
