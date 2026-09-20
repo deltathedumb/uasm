@@ -25,6 +25,14 @@ def apy_str_pad_gate(s: ptr) -> i64:
     character count, so the `w <= n` test and the `w - n` padding are both in
     the unit Python means them to be in. Nothing else in these functions has
     to know that characters exist.
+
+    IT ALSO KEEPS A BYTEARRAY OUT, which `apy_str_pad` below depends on and
+    no longer has to test for itself: `apy_is_str` is kind-exact, so bytes, a
+    bytearray and an instance of a class extending str all decline to the C.
+    A GATE WIDENED TO BYTES WOULD HAVE TO CARRY THAT TEST OVER -- the
+    justifies want no character count for a bytes receiver, so widening this
+    is the obvious next step, and taking it without reading `apy_str_pad`'s
+    tail would hand a bytearray its own buffer back.
     """
     if not apy_is_str(s):
         return -1
@@ -89,6 +97,22 @@ def apy_str_pad(s: ptr, w: i64, c: i64, how: i64) -> ptr:
     ALREADY WIDE ENOUGH RETURNS THE RECEIVER, not a copy of it -- which is
     what Python does and what the C does, and it is why `w <= n` is tested
     before anything is allocated.
+
+    AND A BYTEARRAY MAY NEVER BE THAT RECEIVER, because handing one back
+    gives the program two live names for one writable buffer: its `copy`
+    would change under it at the next `ba[0] = ...`, with nothing raised at
+    the call that caused it. CPython copies for a mutable receiver at every
+    one of these -- stringlib's `return_self` increfs the receiver for str
+    and bytes and expands to `STRINGLIB_NEW`, a fresh object, in the mutable
+    instantiation bytearray's methods are compiled from -- so
+    `bytearray(b"abc").center(3) is` it is False there.
+
+    NO KIND TEST IS SPELLED HERE, unlike `apy_strip_run`, because
+    `apy_str_pad_gate` has already settled it for all six callers: only an
+    exactly-ASCII str reaches this body, and a bytearray declines to the C,
+    which copies for every receiver its own `apy_str_may_return_self`
+    refuses. The gate says the same thing from its end, which is where
+    anyone widening it will be reading.
 
     THE CENTRE SPLIT IS NOT `pad / 2`. CPython biases the extra character to
     the RIGHT for an even width and to the LEFT for an odd one, so
@@ -173,6 +197,13 @@ def apy_str_zfill(s: ptr, w: ptr) -> ptr:
     `'-005'` and not `'00-5'`: a leading `-` or `+` stays at the front and the
     zeros go behind it, because the result is meant to still read as the same
     number.
+
+    ALREADY WIDE ENOUGH RETURNS THE RECEIVER, and that is safe for the same
+    reason it is in `apy_str_pad` above: the gate admits only an
+    exactly-ASCII str, so the cell being shared cannot be written into. A
+    BYTEARRAY COULD BE, which is why CPython copies for one --
+    `bytearray(b"abc").zfill(3) is` it is False there -- and a bytearray
+    declines to the C, which does that copy.
     """
     n: i64 = apy_str_pad_gate(s)
     width: i64 = apy_str_width_arg(w)

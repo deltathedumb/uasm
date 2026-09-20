@@ -146,6 +146,18 @@ def apy_str_partition(s: ptr, sep: ptr) -> ptr:
     receiver FIRST and two empties after it, so `'abc'.partition('x')[0]` is
     `'abc'`. `rpartition` puts the receiver LAST for the same reason: each
     keeps the text on the side it did not search past.
+
+    AND IT IS THE RECEIVER ITSELF THAT GOES INTO THE SLOT, which is the one
+    place this file puts a cell somewhere the program keeps. That is only
+    safe because `apy_str_split_ok` admits an exactly-str receiver: a
+    BYTEARRAY in a tuple slot is still two live names for one writable
+    buffer, and the piece would change under the program at the next
+    `ba[0] = ...`. CPython reaches a different function for a mutable
+    receiver for exactly this reason -- `stringlib_partition` hands slot 0
+    back with a plain `Py_INCREF` that is right only for the immutable kinds,
+    and the mutable instantiation copies -- so
+    `bytearray(b"abc").partition(b"z")[0] is` it is False there. A bytearray
+    declines to the C, which copies before it fills the slot.
     """
     m: i64 = apy_str_split_ok(s, sep)
     if m < 0:

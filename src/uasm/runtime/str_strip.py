@@ -228,8 +228,21 @@ def apy_str_removeprefix(s: ptr, p: ptr) -> ptr:
     it an empty prefix would still take the copying path -- the same string,
     reallocated, for no reason.
 
-    THE UNCHANGED CASE RETURNS `s` ITSELF, not a copy of it. Strings are
-    immutable here, so sharing the cell is what the C does and costs nothing.
+    THE UNCHANGED CASE RETURNS `s` ITSELF, not a copy of it, and all three
+    ways of reaching it do -- an empty prefix, one longer than the receiver,
+    and one that simply is not there. Sharing the cell is what the C does and
+    costs nothing, because the two gates below admit only an exactly-str
+    receiver and a str cannot be written into.
+
+    A BYTEARRAY WOULD BE A DIFFERENT MATTER, and it is the reason those gates
+    are worth naming here: handing one back leaves the program holding two
+    names for one writable buffer, so the answer it kept would change under
+    it at the next `ba[0] = ...`. CPython copies for a mutable receiver --
+    stringlib's `return_self` is a fresh object in the instantiation
+    bytearray's methods come from -- so
+    `bytearray(b"abc").removeprefix(b"z") is` it is False there. A bytearray
+    declines to the C below, which copies for every receiver its own
+    `apy_str_may_return_self` refuses.
     """
     if not apy_is_str(s):
         return apy_str_removeprefix_slow(s, p)
@@ -247,7 +260,12 @@ def apy_str_removeprefix(s: ptr, p: ptr) -> ptr:
 
 
 def apy_str_removesuffix(s: ptr, p: ptr) -> ptr:
-    """`s.removesuffix(p)` -- the mirror, cutting at `n - m` instead."""
+    """`s.removesuffix(p)` -- the mirror, cutting at `n - m` instead.
+
+    ITS THREE `return s` PATHS ARE THE OTHER'S, and so is the reason they are
+    allowed to share the cell rather than copy it: see `apy_str_removeprefix`
+    above for why the gates, and not the method, are what make that safe.
+    """
     if not apy_is_str(s):
         return apy_str_removesuffix_slow(s, p)
     if not apy_is_str(p):
