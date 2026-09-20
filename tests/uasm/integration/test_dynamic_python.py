@@ -4259,6 +4259,92 @@ PROGRAMS = {
         print("compare:", s == "b", p == "b", hash(p) == hash("b"))
         print("keys:", {p: 1}["b"], ["b"].index(p), p in ["b"])
     """,
+    # A CLASS REACHED AS A TYPE INHERITS, and did not. `P.__eq__`,
+    # `P.__init__`, `P.__repr__` and eight more were every one an
+    # AttributeError about an attribute Python guarantees; `S.upper` for a
+    # `class S(str)` was one too; and `dir(P)` was the two names the class
+    # body leaves behind where CPython answers twenty-nine.
+    #
+    # TWO LOOKUPS THE CHAIN DOES NOT LINK TO, and they are separate. The
+    # builtin a class extends is a KIND and not a class, so `S.builtin` is
+    # what makes S a str and the base walk reads dicts. And `object` is not
+    # installed as a real base on anything -- deliberately, since making it
+    # one would put `__eq__` into every lookup -- so the root of every chain
+    # is reachable from nothing.
+    #
+    # THE ORDER IS WHAT MAKES IT RIGHT: the class's own body, then its base
+    # chain, then its metaclass, then the builtin it extends, then object's.
+    # `S.__repr__` is str's and not object's for exactly that reason, and a
+    # class that writes its own `__eq__` still wins over both.
+    "a_class_reached_as_a_type_inherits": """
+        class P:
+            pass
+
+        class S(str):
+            pass
+
+        class Own:
+            def __eq__(self, other):
+                return True
+
+            def upper(self):
+                return "mine"
+
+        class SOwn(str):
+            def upper(self):
+                return "mine"
+
+        def w(label, f):
+            try:
+                got = f()
+            except Exception as e:
+                print(f"{label:24} !{type(e).__name__}: {e}")
+                return
+            print(f"{label:24} {got!r}")
+
+        # OBJECT'S NAMES, EVERY ONE REACHABLE. What `type()` CALLS each of
+        # them is a separate question this does not ask -- they read as
+        # `method-wrapper` here where CPython has three finer names, which
+        # is the value side's own divergence and older than this.
+        for nm in ("__init__", "__eq__", "__ne__", "__repr__", "__str__",
+                   "__hash__", "__format__", "__reduce__", "__sizeof__",
+                   "__init_subclass__", "__subclasshook__", "__getattribute__",
+                   "__setattr__", "__delattr__", "__dir__", "__lt__"):
+            w(f"has {nm}", lambda n=nm: hasattr(P, n))
+        # AND THEY ANSWER THE SAME THING `object` ANSWERS, which is what
+        # makes the fallback a reach rather than a second implementation.
+        w("P.__sizeof__", lambda: P.__sizeof__(P()) == object.__sizeof__(P()))
+        w("P.__format__", lambda: P.__format__(1, "") == object.__format__(1, ""))
+        w("P.__dir__ len", lambda: len(P.__dir__(P())) == len(dir(P())))
+        # THE BUILTIN A CLASS EXTENDS, unbound as it is off a type.
+        w("S.upper", lambda: type(S.upper).__name__)
+        w("S.upper call", lambda: S.upper("abc"))
+        w("S.join", lambda: S.join("-", ["a", "b"]))
+        w("S.__len__", lambda: S.__len__("abc"))
+        # `__new__` IS THE BUILTIN'S, not object's: it is an implicit
+        # staticmethod whose first argument is the class to build.
+        w("S.__new__", lambda: S.__new__(S, "zz"))
+        w("S.__new__ kind", lambda: type(S.__new__(S, "zz")).__name__)
+        w("S.__new__ empty", lambda: S.__new__(S))
+        w("P.__new__ kind", lambda: type(P.__new__(P)).__name__)
+        # A WRITTEN NAME STILL WINS over both inherited routes.
+        w("Own.__eq__ is obj", lambda: Own.__eq__ is object.__eq__)
+        w("Own eq", lambda: Own() == 1)
+        w("SOwn.upper", lambda: SOwn("ab").upper())
+        w("SOwn unbound", lambda: SOwn.upper(SOwn("ab")))
+        # AND `dir` LISTS WHAT THE LOOKUP NOW ANSWERS, for the class and for
+        # an instance alike -- they are one list in CPython.
+        w("__eq__ in dir(P)", lambda: "__eq__" in dir(P))
+        w("__new__ in dir(P)", lambda: "__new__" in dir(P))
+        w("upper in dir(S)", lambda: "upper" in dir(S))
+        w("upper in dir(S())", lambda: "upper" in dir(S("a")))
+        w("__eq__ in dir(S)", lambda: "__eq__" in dir(S))
+        w("dir(P) is dir(P())", lambda: dir(P) == dir(P()))
+        w("dir(S) is dir(S())", lambda: dir(S) == dir(S("a")))
+        # `dir(str)` and `dir(object)` must not have moved.
+        w("dir(str) len", lambda: len(dir(str)))
+        w("dir(object) len", lambda: len(dir(object)))
+    """,
     # A BUILTIN BASE'S CONSTRUCTOR IS THE WHOLE OF ITS SIGNATURE. `bytes`
     # and `str` take three arguments, so `class B(bytes)` then
     # `B("Ab", "utf-8")` is `b'Ab'` and `class S(str)` then

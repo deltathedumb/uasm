@@ -1634,6 +1634,23 @@ APY_API apy_value apy_round_to(apy_value v, apy_value nd) {
     return apy_from_float(r * p);
 }
 
+/* THE NAME OF THE BUILTIN A CLASS EXTENDS, from the kind number
+   `apy_type_builtin` recorded. 0 for a class that extends none.
+
+   ONE COPY, because three callers want it and they were drifting: this
+   answers `issubclass(S, str)`, it is how `S.upper` finds `str.upper`, and
+   it is what puts str's names into `dir(S)`. The list must agree with
+   `_BUILTIN_BASE_KIND` in frontends/python/dynamic.py, which is where a base
+   NAME becomes one of these numbers in the first place. */
+static const char *apy_builtin_base_name(int64_t kind) {
+    return kind == APY_STR_K ? "str"
+        : kind == APY_BYTES_K ? "bytes"
+        : kind == APY_LIST_K ? "list"
+        : kind == APY_TUPLE_K ? "tuple"
+        : kind == APY_DICT_K ? "dict"
+        : kind == APY_SET_K ? "set" : 0;
+}
+
 /* `issubclass(a, b)`. Only for user classes and only by the base chain, which
    is all single inheritance can be asked. A non-class first argument is a
    TypeError and not False -- `issubclass(1, int)` raises, where
@@ -1714,14 +1731,8 @@ APY_API apy_value apy_is_subclass(apy_value a, apy_value b) {
         else if (O(b)->kind == APY_STR_K)
             want = APY_CSTR(b);
         if (want) {
-            int64_t kind = apy_class_builtin_kind(a);
-            const char *have =
-                kind == APY_STR_K ? "str"
-                : kind == APY_BYTES_K ? "bytes"
-                : kind == APY_LIST_K ? "list"
-                : kind == APY_TUPLE_K ? "tuple"
-                : kind == APY_DICT_K ? "dict"
-                : kind == APY_SET_K ? "set" : 0;
+            const char *have = apy_builtin_base_name(
+                apy_class_builtin_kind(a));
             return apy_from_bool(have && strcmp(have, want) == 0);
         }
     }

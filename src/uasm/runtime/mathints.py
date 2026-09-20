@@ -1592,6 +1592,62 @@ def apy_dir_chain(out: ptr, cls: ptr) -> None:
                 if apy_set_find_of(out, name) < 0:
                     apy_q_append_of(out, name)
             here = ptr(load(u64, offset(here, apy_t_base_offset())))
+    # AND WHAT THE CHAIN DOES NOT LINK TO. `t.base` runs out at 0: the
+    # builtin a class extends is a KIND and not a class, and `object` is not
+    # installed as a real base on anything. So the walk above saw a user
+    # class's own dict and stopped, and `dir(P)` was the two names its body
+    # left behind -- `__doc__` and `__module__` -- where CPython answers
+    # twenty-nine.
+    #
+    # THE SAME TAIL SERVES THE INSTANCE ARM, which walks this same chain:
+    # `dir(S("a"))` and `dir(S)` are one list in CPython, and both were two
+    # names here.
+    if cls:
+        if i64(load(i32, offset(cls, 0))) == apy_type_kind():
+            base: ptr = apy_builtin_base_name_of(apy_class_builtin_kind(cls))
+            if base:
+                names: ptr = apy_kind_dir_of(base)
+                if names:
+                    at: i64 = 0
+                    more: i64 = 1
+                    while more:
+                        one: ptr = offset(names, at)
+                        if load(u8, offset(one, 0)) == u8(0):
+                            more = 0
+                        else:
+                            got: ptr = apy_name_of(one)
+                            if apy_set_find_of(out, got) < 0:
+                                apy_q_append_of(out, got)
+                            at = at + apy_cstr_len(one) + 1
+            root: ptr = apy_object_class()
+            if cls != root:
+                apy_dir_names(out, ptr(load(u64, offset(
+                    root, apy_t_dict_offset()))))
+                shown: ptr = apy_name_of(rodata(b"__class__\0"))
+                if apy_set_find_of(out, shown) < 0:
+                    apy_q_append_of(out, shown)
+
+
+def apy_builtin_base_name_of(kind: i64) -> ptr:
+    """The name of the builtin a class extends, from its kind number.
+
+    THE IR TWIN of the C's `apy_builtin_base_name`, and the list must agree
+    with `_BUILTIN_BASE_KIND` in frontends/python/dynamic.py -- which is
+    where a base NAME becomes one of these numbers in the first place.
+    """
+    if kind == apy_str_kind():
+        return rodata(b"str\0")
+    if kind == apy_bytes_kind():
+        return rodata(b"bytes\0")
+    if kind == apy_list_kind():
+        return rodata(b"list\0")
+    if kind == apy_tuple_kind():
+        return rodata(b"tuple\0")
+    if kind == apy_dict_kind():
+        return rodata(b"dict\0")
+    if kind == apy_set_kind():
+        return rodata(b"set\0")
+    return ptr(0)
 
 
 def apy_type_is_minted(v: ptr) -> i64:

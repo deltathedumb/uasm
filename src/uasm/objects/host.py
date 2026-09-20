@@ -8529,6 +8529,70 @@ _KIND_PROTOTYPES = {"list": [], "tuple": (), "dict": {}, "set": set(),
                     "int": 0, "bool": False, "float": 0.0}
 
 
+def _kind_method_of(h, cls, kind_name: str, name: str):
+    """A builtin kind's method, reached through a CLASS rather than a value.
+
+    TWO CALLERS AND ONE BODY. A class `_type_of` minted under a kind's name
+    asks with its own name; a class the program wrote asks with the name of
+    the builtin it extends. What they want back is identical, and having it
+    written twice is how the two came to disagree.
+
+    None when the kind has no such method, so the caller goes on looking.
+    """
+    # `__new__` IS AN IMPLICIT STATICMETHOD, and its first argument is the
+    # CLASS TO BUILD rather than a receiver of the kind -- so the unbound
+    # wrapper below, which hands its first argument to `_kind_attr` as a
+    # receiver, is the wrong shape for it entirely: `S.__new__(S, "zz")`
+    # reached `"zz"` as a method table and reported `'str' object is not
+    # callable`. It is the same constructor `str.__new__(S, "zz")` reaches,
+    # which the frontend folds straight to `apy_builtin_new` -- so this hands
+    # it the same four arguments rather than repeating any of it.
+    if name == "__new__":
+        want = next((n for n, k in _BUILTIN_KINDS.items()
+                     if k.__name__ == kind_name), None)
+        if want is None:
+            return None
+
+        def make(target=None, content=None, *rest):
+            if rest:
+                h._fail("TypeError",
+                        f"{kind_name}() takes at most 2 arguments "
+                        f"({2 + len(rest)} given)")
+                raise _UserFailed
+            if target is None:
+                h._fail("TypeError", f"{kind_name}.__new__(): not enough "
+                                     f"arguments")
+                raise _UserFailed
+            # THE KIND IS A PLAIN NUMBER and the rest are handles, which is
+            # the shape the lowering hands `apy_builtin_new` -- see
+            # `_apy_type_builtin`, which says the same of its own second
+            # argument.
+            got = _apy_builtin_new(h, [
+                h._value(kind_name), want, h._value(target),
+                h._none if content is None else h._value(content)])
+            # A HANDLE COMES BACK and a `Native` body answers a VALUE, so
+            # this is where the two shapes meet. A zero is a failure already
+            # reported, which the caller turns into the exception.
+            if not got:
+                raise _UserFailed
+            return h._get(got, name)
+
+        return h._new(Native(name, make, descr=kind_name))
+    proto = _kind_prototype(kind_name)
+    found = None if proto is None else _kind_attr(h, proto, name)
+    if found is None:
+        return None
+    # `__class_getitem__` IS A CLASSMETHOD and binds the TYPE -- see
+    # `_no_attr`, which draws the same line.
+    if name == "__class_getitem__":
+        # THE TYPE IS ITS OWNER -- see `_no_attr`.
+        return h._new(Native(name, h._get(found, name).body, owner=cls))
+    # UNBOUND, as it is off a builtin type: `type(it).__next__` takes the
+    # cursor as its argument, which is what `type(it).__next__(it)` means --
+    # and `S.upper("abc")` is the same sentence.
+    return h._new(Native(name, _unbound_kind(h, name), descr=kind_name))
+
+
 def _kind_prototype(name: str):
     """An empty value of the kind `name` names, or None.
 
@@ -10756,20 +10820,43 @@ def _apy_default_getattr(h, a):
         # leaves `__module__` behind -- so a class named `list` cannot fall
         # in here and collect a list's methods by accident.
         if not obj.dict and obj.base is None and obj.meta is None:
-            proto = _kind_prototype(obj.name)
-            found = None if proto is None else _kind_attr(h, proto, name)
-            if found is not None:
-                # `__class_getitem__` IS A CLASSMETHOD and binds the TYPE --
-                # see `_no_attr`, which draws the same line.
-                if name == "__class_getitem__":
-                    # THE TYPE IS ITS OWNER -- see `_no_attr`.
-                    return h._new(Native(
-                        name, h._get(found, name).body, owner=obj))
-                # UNBOUND, as it is off a builtin type: `type(it).__next__`
-                # takes the cursor as its argument, which is what
-                # `type(it).__next__(it)` means.
-                return h._new(Native(name, _unbound_kind(h, name),
-                                     descr=obj.name))
+            got = _kind_method_of(h, obj, obj.name, name)
+            if got is not None:
+                return got
+        # AND A CLASS EXTENDING A BUILTIN REACHES THAT BUILTIN'S METHODS, by
+        # the same route and for the same reason: `S.upper` for a `class
+        # S(str)` is `str.upper`, which the VALUE side has always answered --
+        # `"abc".upper` is fine, and so is `str.upper` through the base's own
+        # name. Only the class chain did not ask, because what makes `S` a
+        # str is `S.builtin` and the walk above reads dicts.
+        #
+        # THE KIND'S NAME AND NOT THE CLASS'S, which is the whole difference
+        # from the arm above: that one serves a class `_type_of` minted UNDER
+        # a kind's name, and this one a class the program named itself.
+        kind = obj.builtin_kind()
+        if kind is not None:
+            got = _kind_method_of(h, obj, kind.__name__, name)
+            if got is not None:
+                return got
+        # AND EVERY CLASS REACHES `object`'s, which is the root of every
+        # chain even though nothing links to it -- see `_apy_object_class`,
+        # which says why it is not installed as a real base. Twenty-two names
+        # live in that dict and `__doc__` is a twenty-third, and every one of
+        # them was an AttributeError about an attribute Python guarantees:
+        # `P.__eq__`, `P.__init__`, `P.__repr__` and eight more.
+        #
+        # ASKED LAST, so that a class's own body wins, then its base chain,
+        # then its metaclass, then the builtin it extends -- which is the
+        # order CPython resolves them in. `S.__repr__` is bytes' or str's and
+        # not object's for exactly that reason.
+        root = h._get(_apy_object_class(h, []), "apy_default_getattr")
+        if root is not obj:
+            m = root.lookup(name)
+            if m is not _ABSENT:
+                # UNBOUND, as it is off a type: `P.__eq__(a, b)` is how it is
+                # written, and it is the SAME object `object.__eq__` answers,
+                # so `P.__eq__ is object.__eq__` as in CPython.
+                return h._value(m)
         return h._fail("AttributeError",
                        f"type object '{obj.name}' has no attribute '{name}'")
     if isinstance(obj, Super):
@@ -12532,11 +12619,28 @@ def _apy_dir(h, a):
     # answers.
     root = h._get(_apy_object_class(h, []), "apy_dir")
     def walk(cls):
+        start = cls
         while isinstance(cls, Class):
             add(cls.dict)
             if cls is root:
                 add(["__class__"])
             cls = cls.base
+        # AND WHAT THE CHAIN DOES NOT LINK TO. A class's `base` runs out at
+        # None: the builtin it extends is a KIND and not a class, and
+        # `object` is not installed as a real base on anything (see
+        # `_apy_object_class`). So the walk above saw a user class's own dict
+        # and stopped, and `dir(P)` was the two names its body left behind --
+        # `__doc__` and `__module__` -- where CPython answers twenty-nine.
+        #
+        # THE SAME FIX SERVES THE INSTANCE ARM, which walks this same chain:
+        # `dir(S("a"))` and `dir(S)` are one list in CPython, and both were
+        # two names here.
+        if isinstance(start, Class) and start is not root:
+            kind = start.builtin_kind()
+            if kind is not None and kind.__name__ in KIND_DIR:
+                add(KIND_DIR[kind.__name__])
+            add(root.dict)
+            add(["__class__"])
     if isinstance(v, Instance):
         add(v.dict)
         walk(v.cls)

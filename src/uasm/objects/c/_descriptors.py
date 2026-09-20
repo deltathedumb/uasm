@@ -577,9 +577,48 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
                 obj, (apy_value)(uintptr_t)APY_CSTR(O(obj)->v.t.name), name);
             if (found) return found;
         }
-        /* THE HIERARCHY, as a program reads it back. `object` is the root of
-           every chain even though no class links to it -- see
-           `apy_object_class`. */
+        /* AND A CLASS EXTENDING A BUILTIN REACHES THAT BUILTIN'S METHODS,
+           by the same route and for the same reason as the arm above: what
+           differs is only WHICH name the kind is looked up under -- that one
+           serves a cell `apy_type_for` minted under a kind's own name, this
+           one a class the program named itself. `S.upper` for a `class
+           S(str)` is `str.upper`, which the VALUE side has always answered.
+           Only the class chain did not ask, because what makes `S` a str is
+           the number in `v.t.builtin` and the walk above reads dicts. */
+        {
+            const char *base = apy_builtin_base_name(
+                apy_class_builtin_kind(obj));
+            if (base) {
+                /* `__new__` IS NOT A KIND METHOD. It is an implicit
+                   staticmethod whose first argument is the CLASS TO BUILD,
+                   which is exactly `APY_NAT_BUILTIN_NEW`'s shape -- and
+                   `apy_type_kind_attr` would look for it in a prototype's
+                   method table, where it is not and should not be. */
+                if (strcmp(want, "__new__") == 0)
+                    return apy_native(APY_NAT_BUILTIN_NEW, 2, "__new__");
+                found = apy_type_kind_attr(
+                    obj, (apy_value)(uintptr_t)base, name);
+                if (found) return found;
+            }
+        }
+        /* AND EVERY CLASS REACHES `object`'s, which is the root of every
+           chain even though no class links to it -- see `apy_object_class`,
+           which says why it is not installed as a real base. The comment
+           that stood here said exactly that and then did not ask, so every
+           one of the twenty-two names in that dict was an AttributeError
+           about an attribute Python guarantees: `P.__eq__`, `P.__init__`,
+           `P.__repr__` and eight more.
+
+           ASKED LAST, so a class's own body wins, then its base chain, then
+           its metaclass, then the builtin it extends. `S.__repr__` is str's
+           and not object's for exactly that reason. */
+        if (obj != apy_object_class()) {
+            found = apy_class_find(apy_object_class(), name);
+            /* UNBOUND, as it is off a type: `P.__eq__(a, b)` is how it is
+               written, and it is the same cell `object.__eq__` answers, so
+               `P.__eq__ is object.__eq__` as in CPython. */
+            if (found) return found;
+        }
         return apy_fail2("AttributeError", "type object '%s' has no "
                          "attribute '%s'", APY_CSTR(O(obj)->v.t.name), want);
     }

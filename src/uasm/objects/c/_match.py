@@ -175,6 +175,34 @@ APY_API apy_value apy_dir(apy_value v) {
                 apy_seq_push(out, apy_name("__class__"));
             cls = O(cls)->v.t.base;
         }
+        /* AND WHAT THE CHAIN DOES NOT LINK TO. `v.t.base` runs out at 0: the
+           builtin a class extends is a KIND and not a class, and `object` is
+           not installed as a real base on anything. So the walk above saw a
+           user class's own dict and stopped, and `dir(P)` was the two names
+           its body left behind where CPython answers twenty-nine. */
+        {
+            const char *base = apy_builtin_base_name(
+                apy_class_builtin_kind(v));
+            const char *row = base ? apy_kind_dir(base) : 0;
+            apy_value root = apy_object_class();
+            /* THE ROW IS A RUN OF NUL-TERMINATED NAMES, walked the way the
+               builtin-kind arm below walks it -- and pushed through the
+               same duplicate test the chain above uses, because a class
+               that writes `upper` must not list it twice. */
+            while (row && *row) {
+                if (apy_set_find(out, apy_lit(row)) < 0)
+                    apy_seq_push(out, apy_lit(row));
+                row += strlen(row) + 1;
+            }
+            if (v != root) {
+                apy_value rd = O(root)->v.t.dict;
+                for (i = 0; i < O(rd)->v.d.n; i++)
+                    if (apy_set_find(out, O(rd)->v.d.keys[i]) < 0)
+                        apy_seq_push(out, O(rd)->v.d.keys[i]);
+                if (apy_set_find(out, apy_name("__class__")) < 0)
+                    apy_seq_push(out, apy_name("__class__"));
+            }
+        }
     } else {
         /* A BUILT-IN KIND READS A GENERATED TABLE. There is no class chain
            here to walk -- the method table lives in the frontend and the
