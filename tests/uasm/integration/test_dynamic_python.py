@@ -4259,6 +4259,63 @@ PROGRAMS = {
         print("compare:", s == "b", p == "b", hash(p) == hash("b"))
         print("keys:", {p: 1}["b"], ["b"].index(p), p in ["b"])
     """,
+    # A BUILTIN BASE'S CONSTRUCTOR IS THE WHOLE OF ITS SIGNATURE. `bytes`
+    # and `str` take three arguments, so `class B(bytes)` then
+    # `B("Ab", "utf-8")` is `b'Ab'` and `class S(str)` then
+    # `S(b"Ab", "utf-8")` is `'Ab'`. Both compiled paths reported `B() takes
+    # no arguments` -- about a class that HAS a constructor, inherited, and
+    # was handed exactly what it wants -- while the interpreter answered,
+    # so the paths disagreed with each other as well as with CPython.
+    #
+    # THE KEYWORD MIX IS WHY THIS ROUTES THROUGH `apy_builtin_ctor` rather
+    # than calling the two constructors directly, and why it sits AHEAD of
+    # the one-argument branch: `B("Ab", encoding="utf-8")` has argc == 1, so
+    # that branch would take it, pass the source alone, and report `string
+    # argument without an encoding` about a call that gave one.
+    "a_builtin_bases_whole_constructor_is_inherited": """
+        class B(bytes):
+            pass
+
+        class S(str):
+            pass
+
+        def w(label, f):
+            try:
+                got = f()
+            except Exception as e:
+                print(f"{label:22} !{type(e).__name__}: {e}")
+                return
+            print(f"{label:22} {got!r} {type(got).__name__}")
+
+        # The one-argument forms, which must keep working.
+        w("B one arg", lambda: B(b"Ab"))
+        w("B empty", lambda: B())
+        w("B from int", lambda: B(3))
+        w("B from list", lambda: B([65, 98]))
+        w("S one arg", lambda: S("Ab"))
+        w("S from int", lambda: S(65))
+        # The two- and three-argument forms, positional and by name.
+        w("B two args", lambda: B("Ab", "utf-8"))
+        w("B three args", lambda: B("Ab", "utf-8", "strict"))
+        w("B kwargs", lambda: B("Ab", encoding="utf-8"))
+        w("B all kwargs", lambda: B(source="Ab", encoding="utf-8"))
+        w("B kw errors", lambda: B("Ab", "utf-8", errors="strict"))
+        w("S two args", lambda: S(b"Ab", "utf-8"))
+        w("S three args", lambda: S(b"Ab", "utf-8", "strict"))
+        w("S kwargs", lambda: S(b"Ab", encoding="utf-8"))
+        # THE REFUSALS ARE THE CONSTRUCTOR'S OWN, not an arity message that
+        # would hide what was actually wrong.
+        w("B bad encoding", lambda: B("Ab", 5))
+        w("S bad encoding", lambda: S(b"Ab", 5))
+        w("B bad codec", lambda: B("Ab", "nosuch"))
+        w("B four args", lambda: B("Ab", "utf-8", "strict", "x"))
+        w("B unknown kw", lambda: B("Ab", nosuch="x"))
+        w("B twice", lambda: B("Ab", "utf-8", encoding="utf-8"))
+        # And the non-subclass spelling answers the same, as it always did.
+        w("bytes two args", lambda: bytes("Ab", "utf-8"))
+        w("bytes kwargs", lambda: bytes("Ab", encoding="utf-8"))
+        w("str two args", lambda: str(b"Ab", "utf-8"))
+    """,
     # `int()` AND `float()` TAKE A BYTES, and the refusal said so while
     # refusing one: `int() argument must be a string, a bytes-like object or
     # a real number, not 'bytes'` is worse than a plain refusal, because a

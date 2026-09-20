@@ -3353,6 +3353,49 @@ static apy_value apy_instantiate(apy_value f, apy_value *argv, int64_t argc,
            instance holds (a `namedtuple` packs its arguments into one tuple),
            and CPython draws the same line: `object.__init__` complains about
            surplus arguments only when `__new__` is not overridden. */
+        /* THE TEXT KINDS TAKE THREE, which the one-argument branch below cannot
+           carry: `bytes(x, encoding, errors)` and `str(x, encoding, errors)`
+           are the real signatures, so `class B(bytes)` then
+           `B("Ab", "utf-8")` is `b'Ab'` in CPython and `class S(str)` then
+           `S(b"Ab", "utf-8")` is `'Ab'`. Both reported `takes no arguments`
+           -- about a class that HAS a constructor, inherited, and was handed
+           exactly what it wants.
+
+           THROUGH `apy_builtin_ctor` AND NOT THE TWO CONSTRUCTORS DIRECTLY,
+           which is what makes `B("Ab", encoding="utf-8")` work as well: that
+           is where the keywords are folded into slots, the arity is checked
+           and every refusal is worded. Reaching past it would have meant a
+           second copy of all three, disagreeing with the first.
+
+           AHEAD OF THE ONE-ARGUMENT BRANCH AND NOT AFTER IT, because
+           `B("Ab", encoding="utf-8")` has argc == 1: that branch would take
+           it, call the one-argument constructor with the source alone, and
+           report `string argument without an encoding` about a call that
+           gave one. So every str- or bytes-held instance comes through here,
+           at any arity, and the other four kinds keep the branch below.
+
+           THE NAME COMES FROM THE HELD CELL, because by here the base's name
+           is gone -- and `mut` is the only thing that separates the two
+           bytes kinds. A class extending `bytearray` cannot be written
+           today, so that arm is unreachable; reading the flag anyway is what
+           keeps this right on the day one can. */
+        if (O(self)->kind == APY_INST_K && O(self)->v.o.held) {
+            apy_value held = O(self)->v.o.held;
+            const char *tn = 0;
+            if (O(held)->kind == APY_STR_K) tn = "str";
+            else if (O(held)->kind == APY_BYTES_K)
+                tn = O(held)->v.s.mut ? "bytearray" : "bytes";
+            if (tn) {
+                int taken = 0;
+                apy_value made = apy_builtin_ctor(tn, argv, argc, kwrest,
+                                                  &taken);
+                if (taken) {
+                    if (!made) return 0;
+                    O(self)->v.o.held = made;
+                    return self;
+                }
+            }
+        }
         if (O(self)->kind == APY_INST_K && O(self)->v.o.held && argc == 1) {
             apy_value made = apy_call_kind(
                 O(O(self)->v.o.held)->kind, argv[0]);
