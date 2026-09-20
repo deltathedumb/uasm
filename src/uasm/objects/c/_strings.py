@@ -295,6 +295,40 @@ static int apy_str_may_return_self(apy_value s) {
     return O(s)->kind == APY_BYTES_K && !O(s)->v.s.mut;
 }
 
+/* THIS RECEIVER, OR A FRESH COPY OF IT WHEN IT MAY NOT BE HANDED BACK -- the
+   whole of what a method with nothing to do should answer, in one name.
+
+   THE GUARD ALONE IS ONLY HALF AN ANSWER, and writing just that half is what
+   went wrong: `apy_str_may_return_self` was spelled at `strip` and `replace`
+   and the eight methods below kept a bare `return s`, so a BYTEARRAY receiver
+   came back as its own result. That is two live names for one writable
+   buffer, and the program's `copy` changes under it at the next `ba[0] = ...`
+   -- silent corruption, read wrong much later, with nothing raised at the
+   call that caused it. Five copies of one conditional is how the eight came
+   to disagree with the two, so there is one conditional now.
+
+   CPython COPIES AT EVERY ONE OF THESE, which is the behaviour being matched
+   and not merely a defensive choice: `stringlib`'s `return_self` is a macro
+   that increfs the receiver for str and bytes and expands to `STRINGLIB_NEW`
+   -- a fresh object -- in the mutable instantiation the bytearray methods
+   are compiled from, and `stringlib_partition` has the same `#if
+   STRINGLIB_MUTABLE` split around the slot it would otherwise `Py_INCREF`
+   the receiver into. So `bytearray(b"abc").center(3) is` it is False there,
+   and so is every other one of the eight.
+
+   THE COPY IS OF THE RECEIVER'S OWN KIND AND MUST BE MADE HERE, because
+   `apy_str_like` at the call site re-tags only what does not already match:
+   a bytearray answer that is already a bytearray passes through it untouched,
+   aliasing and all. Anything that is not str or bytes at all -- a str
+   subclass reaching these through `apy_str_self` -- takes the slicer, which
+   is what every other tail in this file does with one. */
+static apy_value apy_str_self_or_copy(apy_value s) {
+    if (apy_str_may_return_self(s)) return s;
+    if (O(s)->kind == APY_BYTES_K && O(s)->v.s.mut)
+        return apy_bytearray_copy(O(s)->v.s.p, O(s)->v.s.n);
+    return apy_str_slice_of(s, 0, O(s)->v.s.n);
+}
+
 /* find / rfind / index / rindex, all four from one place. `want_index` picks
    the -1-on-failure form from the raise-on-failure one; that is the only
    difference between `find` and `index`, and CPython's message for the second
@@ -1001,7 +1035,9 @@ APY_API apy_value apy_str_removeprefix(apy_value s, apy_value p) {
     if (O(p)->v.s.n && O(p)->v.s.n <= O(s)->v.s.n
         && memcmp(O(s)->v.s.p, O(p)->v.s.p, (size_t)O(p)->v.s.n) == 0)
         return apy_str_slice_of(s, O(p)->v.s.n, O(s)->v.s.n);
-    return s;
+    /* THE PREFIX WAS NOT THERE, so the answer is the receiver -- or a copy of
+       it, for a bytearray. See `apy_str_self_or_copy`. */
+    return apy_str_self_or_copy(s);
 }
 
 APY_API apy_value apy_str_removesuffix(apy_value s, apy_value p) {
@@ -1012,7 +1048,8 @@ APY_API apy_value apy_str_removesuffix(apy_value s, apy_value p) {
         && memcmp(O(s)->v.s.p + O(s)->v.s.n - O(p)->v.s.n,
                   O(p)->v.s.p, (size_t)O(p)->v.s.n) == 0)
         return apy_str_slice_of(s, 0, O(s)->v.s.n - O(p)->v.s.n);
-    return s;
+    /* The mirror of `removeprefix` above, for the same reason. */
+    return apy_str_self_or_copy(s);
 }
 
 /* --- split and join ------------------------------------------------------
@@ -1268,9 +1305,15 @@ static apy_value apy_partition_impl(apy_value s, apy_value sep, int from_right) 
     if (m == 0) return apy_fail("ValueError", "empty separator");
     at = from_right ? apy_rfind_at(s, sep, 0, n) : apy_find_at(s, sep, 0, n);
     if (at < 0) {
-        apy_q_append(out, from_right ? apy_lit("") : s);
+        /* THE RECEIVER GOES INTO THE TUPLE, which is the same hazard one
+           level down: a bytearray in a slot the program then holds is still
+           two names for one writable buffer, and `apy_str_like` walks the
+           tuple without noticing because the piece is already the right kind.
+           One copy, whichever end it belongs at. See `apy_str_self_or_copy`. */
+        apy_value whole = apy_str_self_or_copy(s);
+        apy_q_append(out, from_right ? apy_lit("") : whole);
         apy_q_append(out, apy_lit(""));
-        apy_q_append(out, from_right ? s : apy_lit(""));
+        apy_q_append(out, from_right ? whole : apy_lit(""));
         return out;
     }
     apy_q_append(out, apy_str_slice_of(s, 0, at));
@@ -1672,7 +1715,10 @@ static apy_value apy_pad(apy_value s, apy_value width, apy_value fill, int how) 
     char *buf;
     if (!apy_int_arg(width, &w)) return 0;
     if (fill && !apy_fill_char(fill, &fp, &fb)) return 0;
-    if (w <= n) return s;          /* already wide enough: Python returns it */
+    /* ALREADY WIDE ENOUGH: Python returns the receiver, and a bytearray
+       receiver a copy of it. This one body is center, ljust and rjust, so all
+       three were aliasing. See `apy_str_self_or_copy`. */
+    if (w <= n) return apy_str_self_or_copy(s);
     pad = w - n;
     /* CPython's own split for `center`, which is NOT `pad / 2`: it biases the
        extra character to the RIGHT for an even width and to the LEFT for an
@@ -1730,7 +1776,9 @@ APY_API apy_value apy_str_zfill(apy_value s, apy_value width) {
        one byte, so only the receiver's two lengths can differ here. */
     n = apy_str_chars(s);
     nb = O(s)->v.s.n;
-    if (w <= n) return s;
+    /* Already wide enough, exactly as in `apy_pad` above -- and a bytearray
+       receiver gets the copy for the same reason. */
+    if (w <= n) return apy_str_self_or_copy(s);
     signed_ = nb > 0 && (O(s)->v.s.p[0] == '-' || O(s)->v.s.p[0] == '+');
     pad = w - n;
     buf = (char *)malloc((size_t)(nb + pad) + 1);

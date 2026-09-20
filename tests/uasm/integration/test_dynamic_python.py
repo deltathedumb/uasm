@@ -10876,6 +10876,63 @@ PROGRAMS = {
         one.append(66)
         print("appended:", one, b"A", type(b"A").__name__)
     """,
+    # A METHOD WITH NOTHING TO DO MAY HAND THE RECEIVER BACK ONLY WHEN THE
+    # RECEIVER CANNOT BE WRITTEN INTO. `strip` and `replace` were guarded and
+    # these eight were not, so `bytearray(b"abc").center(3)` WAS the receiver:
+    # two live names for one buffer, and the answer changed under the program
+    # at the next `ba[0] = ...`. Nothing was raised at the call that caused
+    # it, which is why the write below is part of the test and not just the
+    # `is`.
+    #
+    # BOTH DIRECTIONS ARE HERE, because over-copying is the other way to get
+    # this wrong and it is just as visible: an immutable receiver must STILL
+    # come straight back, or `'abc'.center(3) is 'abc'` stops being True and
+    # CPython says it is.
+    "a_bytearray_receiver_is_never_handed_back": """
+        def watch(label, make):
+            ba = bytearray(b"abc")
+            got = make(ba)
+            same = got is ba
+            ba[0] = 122
+            print(label, same, bytes(got))
+
+        watch("center      ", lambda ba: ba.center(3))
+        watch("ljust       ", lambda ba: ba.ljust(3))
+        watch("rjust       ", lambda ba: ba.rjust(3))
+        watch("center fill ", lambda ba: ba.center(3, b"."))
+        watch("ljust fill  ", lambda ba: ba.ljust(3, b"."))
+        watch("rjust fill  ", lambda ba: ba.rjust(3, b"."))
+        watch("zfill       ", lambda ba: ba.zfill(3))
+        watch("zfill under ", lambda ba: ba.zfill(0))
+        watch("removeprefix", lambda ba: ba.removeprefix(b"z"))
+        watch("removeempty ", lambda ba: ba.removeprefix(b""))
+        watch("removesuffix", lambda ba: ba.removesuffix(b"z"))
+        watch("partition   ", lambda ba: ba.partition(b"z")[0])
+        watch("rpartition  ", lambda ba: ba.rpartition(b"z")[2])
+        watch("strip       ", lambda ba: ba.strip())
+        watch("replace     ", lambda ba: ba.replace(b"z", b"y"))
+        watch("full slice  ", lambda ba: ba[:])
+
+        # THE COPY IS OF THE RECEIVER'S OWN KIND: a bytearray in, a bytearray
+        # out. Handing back a plain `bytes` would be a second bug wearing the
+        # first one's fix, and the program could no longer write into it.
+        kept = bytearray(b"abc").center(3)
+        print("kind:", type(kept).__name__)
+        kept[1] = 122
+        print("writable:", bytes(kept))
+
+        # AND AN IMMUTABLE RECEIVER STILL COMES STRAIGHT BACK.
+        s = "abc"
+        b = b"abc"
+        print("str  ", s.center(3) is s, s.ljust(3) is s, s.rjust(3) is s,
+              s.zfill(3) is s, s.removeprefix("z") is s,
+              s.removesuffix("z") is s, s.partition("z")[0] is s,
+              s.rpartition("z")[2] is s)
+        print("bytes", b.center(3) is b, b.ljust(3) is b, b.rjust(3) is b,
+              b.zfill(3) is b, b.removeprefix(b"z") is b,
+              b.removesuffix(b"z") is b, b.partition(b"z")[0] is b,
+              b.rpartition(b"z")[2] is b)
+    """,
 }
 
 
