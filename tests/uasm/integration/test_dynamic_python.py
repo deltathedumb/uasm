@@ -1625,14 +1625,28 @@ PROGRAMS = {
                 print(label, type(e).__name__ + ":", e)
 
         # WHAT `copy` AND `pickle` REBUILD A VALUE FROM. Every immutable builtin
-        # answers `(self,)` -- a complex answers its two halves -- and a mutable one
-        # does not carry the attribute at all.
+        # answers a COPY of itself -- a complex answers its two halves as floats,
+        # and a tuple is the one kind that shares -- and a mutable one does not
+        # carry the attribute at all.
         show("str", lambda: "ab".__getnewargs__())
         show("bytes", lambda: b"ab".__getnewargs__())
         show("tuple", lambda: (1, 2).__getnewargs__())
         show("int", lambda: (5).__getnewargs__())
         show("float", lambda: (1.5).__getnewargs__())
         show("complex", lambda: (1 + 2j).__getnewargs__())
+        # A COPY AND NOT THE RECEIVER, which is the whole of what these bodies do
+        # and what every path here used to skip. The four that answer True are the
+        # ones whose copy lands back in a shared cell -- the empty str, the 256
+        # one-octet bytes and the small ints go through the same constructor every
+        # other one does -- plus the tuple, which is shared outright.
+        print([v.__getnewargs__()[0] is v
+               for v in ("ab", b"ab", (1, 2), 5, 10 ** 30, 1.5, True,
+                         "", b"", b"a", "a")])
+        # AND A bool ANSWERS THE int 1: `_PyLong_Copy` builds an integer out of the
+        # bool's value, so the kind changes and the `True` object is not the answer.
+        one = 5 - 4
+        print(True.__getnewargs__(), type(True.__getnewargs__()[0]).__name__,
+              True.__getnewargs__()[0] is one)
         print([hasattr(v, "__getnewargs__")
                for v in (bytearray(), [], {}, set(), range(3))])
         # THE REFLECTED `%`, which text carries and always refuses -- the TypeError a
@@ -8230,6 +8244,56 @@ PROGRAMS = {
         print('abcabc'.count('a', 1), 'abc'.count(''), 'aaaa'.count('aa'))
         print(chr(223).upper(), chr(223).casefold())
         print('a\\tb'.expandtabs(4))
+
+        # THE SINGLE-ARGUMENT MAPPING FORM, which is a different operation
+        # wearing the same name: nothing is paired off, a table that is
+        # already a table is copied with its string keys turned into the code
+        # points `translate` looks up.
+        #
+        # AND THE FORM IS CHOSEN BY THE ARGUMENTS THAT ARE NOT THERE.
+        # CPython's `unicode_maketrans_impl` branches on `y == NULL` and only
+        # then asks whether `x` is a dict, so `str.maketrans('ab')` -- one
+        # argument, and a str -- is this form refusing a non-dict. Branching
+        # on the first argument's kind instead is what made the compiled
+        # runtimes answer the pairing form's complaint for it.
+        def refused(label, fn):
+            try:
+                print(label, '->', fn())
+            except Exception as e:
+                print(label, '->', type(e).__name__ + ':', e)
+
+        print(str.maketrans({'a': 'z'}), str.maketrans({97: 'z'}),
+              str.maketrans({}))
+        # A VALUE IS NOT CHECKED HERE, only a key: it may be None for a
+        # deletion, an integer code point, a string LONGER than one character,
+        # or something `translate` will refuse when it is reached.
+        print(str.maketrans({'a': None, 'b': 98, 'c': 'zz', 'd': 1.0}))
+        print('abcde'.translate(str.maketrans({'a': 'zz', 'b': None,
+                                               99: 'Q', 'd': 101})))
+        refused('long key', lambda: str.maketrans({'ab': 'z'}))
+        refused('float key', lambda: str.maketrans({1.0: 'z'}))
+        refused('bytes key', lambda: str.maketrans({b'a': 'z'}))
+        refused('one str', lambda: str.maketrans('ab'))
+        refused('one list', lambda: str.maketrans([]))
+        refused('a dict and a second', lambda: str.maketrans({'a': 'z'}, 'b'))
+
+        # THE TWO CHECKS ARE NOT THE SAME CHECK, and CPython's own source is
+        # the only thing that says so: `unicode_maketrans_impl` admits the
+        # argument with `PyDict_CheckExact` -- so a dict SUBCLASS is refused
+        # exactly as a list is -- while the loop inside it admits a key with
+        # `PyUnicode_Check`, which is NOT the exact check, so a str SUBCLASS
+        # key is read for its one character like any other string.
+        class MyDict(dict):
+            pass
+
+        class MyStr(str):
+            pass
+
+        refused('a dict subclass', lambda: str.maketrans(MyDict({'a': 'z'})))
+        print(str.maketrans({MyStr('a'): 'z'}),
+              str.maketrans({MyStr(chr(233)): 'z'}))
+        refused('a long subclass key',
+                lambda: str.maketrans({MyStr('ab'): 'z'}))
     """,
     "function_attributes": """
         def f():

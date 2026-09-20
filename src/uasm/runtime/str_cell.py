@@ -337,6 +337,91 @@ def apy_bytes_made_of(p: ptr, n: i64, mut: i64) -> ptr:
     return apy_bytes_cell(buf, n, mut)
 
 
+def apy_str_fresh_of(p: ptr, n: i64) -> ptr:
+    """`n` bytes COPIED into a str cell that is nobody else's.
+
+    THE `_of` TWIN OF THE C's `apy_str_fresh`, which is `static` there while
+    the C and the IR are ONE TRANSLATION UNIT -- so this is the same rule
+    under a name that cannot collide, exactly as `apy_str_may_return_self_of`
+    is above.
+
+    THE EMPTY ONE IS STILL SHARED AND A ONE-CHARACTER ONE IS NOT, which is
+    CPython's arrangement and not this runtime's: `_PyUnicode_Copy` builds
+    with `PyUnicode_New(length, maxchar)` and `PyUnicode_New` special-cases
+    `size == 0` ALONE (Objects/unicodeobject.c). Measured against CPython
+    3.14: `S("").strip()` IS the empty literal and `S("a").strip()` is NOT
+    the one-character literal. `apy_str_copy_bytes` below cannot serve,
+    because its funnel answers a shared cell for ANY latin-1 character.
+
+    THROUGH `apy_str_cell` AND NOT `apy_from_bytes`, for the same reason
+    `apy_shared_str` is: `apy_from_bytes` IS the sharing test, and this is the
+    one constructor that must not take it.
+    """
+    if n == 0:
+        return apy_shared_str(256)
+    buf: ptr = apy_alloc_bytes(n + 1)
+    if not buf:
+        return buf
+    i: i64 = 0
+    while i < n:
+        store(u8, load(u8, offset(p, i)), offset(buf, i))
+        i = i + 1
+    store(u8, u8(0), offset(buf, n))
+    return apy_str_cell(buf, n)
+
+
+def apy_inst_text_result_of(self: ptr, out: ptr) -> ptr:
+    """A builtin operation's result, made a DIFFERENT object when `self` was
+    an instance of a class extending str or bytes and the operation handed
+    that instance's held text straight back.
+
+    THE `_of` TWIN OF THE C's `apy_inst_text_result`, and the reason there are
+    two is the reason there are two of `apy_str_may_return_self`: the C keeps
+    its copy `static` and the two sides are one translation unit.
+
+    THE UNWRAP IS WHY THIS IS NEEDED. `apy_method_self` reaches past a `class
+    S(str)` to the str it carries BEFORE the method runs, so the method's own
+    tail sees an exact str and `apy_str_may_return_self_of` rightly says yes.
+    The subclass is visible only at the CALL SITE, which still holds what the
+    program wrote -- so the copy belongs there and not in a wider
+    `may_return_self`.
+
+    CPython COPIES FOR A SUBCLASS: `unicode_result_unchanged`
+    (Objects/unicodeobject.c) hands the argument back only `if
+    (PyUnicode_CheckExact(unicode))` and calls `_PyUnicode_Copy` otherwise,
+    and stringlib's `return_self` is written the same way.
+
+    TWO INSTANCES SHARING ONE HELD CELL IS WHAT MAKES IT VISIBLE. `x.strip()
+    is x` is False whatever happens -- an instance is not its own text -- so
+    only `x.strip() is y.strip()` tells the truth, and `S("ab")` twice over
+    one literal gives two instances holding the SAME cell.
+
+    A BYTEARRAY IS LEFT ALONE: it is written into, so a method handing one
+    back is a different bug and `apy_str_self_or_copy` in the C is where that
+    one is answered.
+    """
+    if not out:
+        return out
+    if i64(load(i32, offset(self, 0))) != apy_inst_kind():
+        return out
+    held: ptr = ptr(load(u64, offset(self, apy_o_held_offset())))
+    if not held:
+        return out
+    if out != held:
+        return out
+    k: i64 = i64(load(i32, offset(held, 0)))
+    if k == apy_str_kind():
+        return apy_str_fresh_of(ptr(load(u64, offset(held,
+                                                     apy_str_ptr_offset()))),
+                                load(i64, offset(held, apy_str_len_offset())))
+    if k == apy_bytes_kind():
+        if not load(i32, offset(held, apy_str_mut_offset())):
+            return apy_bytes_made_of(
+                ptr(load(u64, offset(held, apy_str_ptr_offset()))),
+                load(i64, offset(held, apy_str_len_offset())), 0)
+    return out
+
+
 def apy_shared_cp_of(p: ptr, n: i64) -> i64:
     """The code point `n` bytes spell when the runtime shares that string.
 

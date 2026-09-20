@@ -180,6 +180,11 @@ APY_API apy_value apy_slice(apy_value seq, int64_t start, int64_t stop,
                             int64_t step, int64_t has_start, int64_t has_stop);
 /* Slice ASSIGNMENT resolves the bounds through this, far above it. */
 APY_API apy_value apy_slice_indices(apy_value sl, apy_value len_v);
+/* A BOUND OUT OF A SLICE OBJECT, which is not an index and does not convert
+   like one -- it clamps where an index overflows and it words its refusal as
+   a slice rather than as an integer argument. Defined with the other
+   inspection primitives, far below the subscript that needs it. */
+APY_API int64_t apy_slice_bound(apy_value v);
 static apy_value apy_dict_text(apy_value v);
 /* The runtime's own callables, defined beside `apy_invoke` and reached from
    the `super()` lookup far above it. */
@@ -580,12 +585,66 @@ static apy_value apy_bytes_getitem(apy_value seq, int64_t i) {
 static apy_value apy_bytes_repeat(apy_value v, apy_value count) {
     int64_t k, n, i;
     if (!apy_index_arg(count, &k, APY_IDX_SUB)) return 0;
-    /* `b * 1 IS b` for immutable bytes, exactly as `s * 1 is s` and
-       `t * 1 is t` -- see `apy_str_repeat`. A BYTEARRAY repeated once is a
-       fresh bytearray, because it can be written to. */
-    if (k == 1 && !O(v)->v.s.mut) return v;
     if (k < 0) k = 0;
     n = O(v)->v.s.n;
+    /* THE RECEIVER COMES BACK WHENEVER THE RESULT IS THE SAME LENGTH, and
+       that is the whole of the test. `bytes_repeat` (Objects/bytesobject.c)
+       clamps a negative count to zero, computes `size = Py_SIZE(a) * n` and
+       then answers `if (size == Py_SIZE(a) && PyBytes_CheckExact(a))
+       return Py_NewRef(a);` -- so `b * 1` is `b`, and so is the EMPTY bytes
+       repeated any number of times at all, since zero times anything is
+       still zero.
+
+       THAT SECOND HALF IS WHAT WAS MISSING. `k == 1` alone left `b"" * 3`
+       and `b"" * 0` building a fresh empty cell, so they compared unequal to
+       every `b""` in the program -- measured against CPython 3.14
+       (`scratchpad/probes/d181full.py`), where `(b"" * 3) is b""` and
+       `(b"" * 0) is b""` are both True. The interpreter already agreed; the
+       two compiled paths share this body through the `apy_mul` split, so
+       both were wrong and both are fixed here.
+
+       WRITTEN AS THE TWO CASES RATHER THAN `n * k == n`, which is the same
+       test for non-negative `n` and `k`: `n * (k - 1) == 0` holds exactly
+       when `n` is zero or `k` is one. The two cases need no product, which
+       is worth having but is NOT a claim that this function is safe against
+       a large count -- see the paragraph below, which measures where it is
+       not.
+
+       AND THE PRODUCT BELOW IS STILL UNGUARDED, which is older than this
+       test and is not fixed here. CPython's `bytes_repeat` opens with
+       `if (n > 0 && Py_SIZE(a) > PY_SSIZE_T_MAX / n)` and raises
+       `OverflowError: repeated bytes are too long`; nothing here does, so
+       `n * k` wraps. MEASURED on both compiled paths, through a function so
+       nothing folds (`scratchpad/probes/d181ovf.py` and the smash case
+       beside it in the report): `b"ab" * (2 ** 62)` makes the product
+       INT64_MIN and dies with `uasm: out of memory` where CPython raises,
+       and `b"abcd" * (2 ** 62)` makes it exactly ZERO -- so the `malloc`
+       succeeds at one byte and the `memcpy` loop walks off the heap and
+       SEGFAULTS. `apy_str_repeat` and `apy_seq_repeat` in
+       `objects/c/_numeric.py` compute their sizes the same way and want the
+       same guard, with CPython's own wording for each: `repeated string is
+       too long` for str, and a MemoryError for a list. Left for the task
+       that takes the three together, because guarding only this one would
+       make the bytes row raise while the str row beside it still crashes.
+
+       A BYTEARRAY IS NOT IN IT: it can be written to, so handing the
+       receiver back would give the program two names for one buffer.
+       Measured: `bytearray(b"") * 1` is a fresh bytearray each time.
+
+       AND A SUBCLASS IS NOT IN IT EITHER, which this cannot say for itself.
+       CPython's test is `PyBytes_CheckExact(a)`, and measured against 3.14 a
+       `class B(bytes)` receiver gets a fresh PLAIN bytes for every count --
+       `B(b"") * 3 is b""` is False there, and so is `B(b"ab") * 1 is
+       B(b"ab")`. By the time a value reaches here `apy_binop_dispatch` has
+       already unwrapped the instance to the exact bytes it holds, so the
+       subclass is invisible on this line; the call site is where it is still
+       visible and `apy_inst_text_result` is what answers it. That fixup
+       copies through `apy_bytes_copy`, whose funnel answers the SHARED empty
+       for a length of zero -- so once `class B(bytes)` compiles at all it
+       will need the `apy_str_fresh` treatment on the bytes side too. It does
+       not compile today (E0076 refuses the base class on all three paths),
+       so nothing reaches that row yet. */
+    if ((n == 0 || k == 1) && !O(v)->v.s.mut) return v;
     { char *out = (char *)malloc((size_t)(n * k) + 1);
       if (!out) { fputs("uasm: out of memory\n", stderr); exit(1); }
       for (i = 0; i < k; i++) memcpy(out + i * n, O(v)->v.s.p, (size_t)n);
@@ -594,8 +653,15 @@ static apy_value apy_bytes_repeat(apy_value v, apy_value count) {
          `mut` is the whole of what separates the two kinds and it has to
          travel with the tag.
          AND NOT THROUGH THE SHARED CELLS. CPython allocates a repetition
-         directly rather than through the constructor that consults its
-         cache, so `b"ab" * 0 is b""` is False there. */
+         with a bare `PyObject_Malloc` rather than through the constructor
+         that consults its 256-object cache, so a repeat that empties a
+         NON-empty bytes is a cell of its own.
+         MEASURE IT THROUGH A FUNCTION. Written out, `b"ab" * 0 is b""` is
+         True in a CPython source file -- the peephole optimiser folds the
+         product to a constant and the empty bytes constant is the interned
+         one -- and False the moment the operands reach `bytes_repeat` at run
+         time. `scratchpad/probes/d181full.py` calls through `rep(x, k)` for
+         exactly that reason, and it reports False. */
       return apy_bytes_own(out, n * k, O(v)->v.s.mut); }
 }
 
@@ -647,7 +713,21 @@ APY_API apy_value apy_getitem(apy_value seq, apy_value index) {
         return apy_fail2("TypeError",
                          "memoryview indices must be integers%s%s", "", "");
     }
-    if (O(seq)->kind == APY_BYTES_K) {
+    /* A SLICE IS HANDED PAST THIS ARM to the general slice arm below, which
+       already measures a bytes in bytes and hands a bytearray a bytearray.
+       `b[1:3]` never comes this way -- the frontend slices it directly -- but
+       a slice built as a VALUE does, and this arm refused every index that was
+       not an int. Measured against CPython 3.14 (`scratchpad/probes/d178.py`):
+       `b"abcdef"[slice(1, 3)]` is `b'bc'`, `b[slice(None)] is b` is True and
+       `b[slice(0, 6, 2)]` is `b'ace'`, where all three were a TypeError whose
+       words -- "byte indices must be integers or slices, not slice" -- named a
+       slice while saying slices were allowed. The interpreter had the same
+       hole and lost it in d60f3f3d; this is the same fix for the two compiled
+       paths, which share this body because the IR half of the `apy_getitem`
+       split serves only a list or tuple indexed by an int and declines
+       everything else to here. */
+    if (O(seq)->kind == APY_BYTES_K
+            && !(index && O(index)->kind == APY_SLICE_K)) {
         /* NOT GATED ON THE INDEX BEING AN INT. It was, so `b"ab"[1.0]` fell
            past every arm to the guard below and answered `'bytes' object is
            not subscriptable` -- a sentence about the receiver, for a
@@ -692,7 +772,12 @@ APY_API apy_value apy_getitem(apy_value seq, apy_value index) {
                     }
                     return apy_dict_get(held, index);
                 }
-                return apy_getitem(held, index);
+                /* AND `s[:]` OVER A SUBCLASS ANSWERS A FRESH PLAIN str.
+                   A whole slice of an exact str IS that str, and the str
+                   reached here is the one INSIDE the instance -- shared by
+                   every instance built from the same literal. See
+                   `apy_inst_text_result`. */
+                return apy_inst_text_result(seq, apy_getitem(held, index));
             }
         }
     }
@@ -810,10 +895,49 @@ APY_API apy_value apy_getitem(apy_value seq, apy_value index) {
         int64_t start = 0, stop = 0, step = 1;
         int64_t has_start = a && O(a)->kind != APY_NONE_K;
         int64_t has_stop = b && O(b)->kind != APY_NONE_K;
-        if (has_start && !apy_index_arg(a, &start, APY_IDX_SIZE)) return 0;
-        if (has_stop && !apy_index_arg(b, &stop, APY_IDX_SIZE)) return 0;
-        if (c && O(c)->kind != APY_NONE_K
-                && !apy_index_arg(c, &step, APY_IDX_SIZE)) return 0;
+        /* `apy_slice_bound` AND NOT `apy_index_arg`, WHICH IS THE CONVERTER
+           THE FRONTEND ALREADY PICKS for a written `b[1:3]`. A BOUND IS NOT
+           AN INDEX in two ways that a program can see, and this arm -- the
+           only route a slice built as a VALUE has -- used to get both wrong:
+
+             * A BOUND PAST ANY LENGTH CLAMPS, where an index raises.
+               `_PyEval_SliceIndex` (Python/ceval.c) clamps to
+               PY_SSIZE_T_MAX/MIN rather than propagating the overflow, so
+               `b"abcdef"[10 ** 30:]` is `b''` and `b"abcdef"[-(10 ** 30):]`
+               is the whole thing. Through `apy_index_arg` both were
+               `OverflowError: Python int too large to convert to C ssize_t`.
+
+             * A BAD BOUND IS WORDED AS A SLICE. CPython says `slice indices
+               must be integers or None or have an __index__ method`, not the
+               `'float' object cannot be interpreted as an integer` that
+               every other integer argument gets.
+
+           MEASURED, and it is the WRITTEN form that settles it: `b[big:]`
+           answered `b''` on all four paths while `b[slice(big, None)]` --
+           the same receiver and the same bound -- raised OverflowError on
+           both compiled paths, because the frontend resolves a written slice
+           through `apy_slice_bound` and only this arm did not. The
+           interpreter already agreed with CPython on both.
+           `scratchpad/probes/d178bounds.py` is the measurement.
+
+           THE CLAMP IS `1 << 62` AND NOT INT64_MAX so that `start += n` and
+           the negation below it cannot overflow on the way to being clamped
+           again -- see `apy_slice_bound`, which says so at the definition.
+
+           IT RETURNS 0 BOTH FOR A REFUSAL AND FOR A LEGITIMATE ZERO, so the
+           error flag is what is tested rather than the result. */
+        if (has_start) {
+            start = apy_slice_bound(a);
+            if (apy_error_occurred()) return 0;
+        }
+        if (has_stop) {
+            stop = apy_slice_bound(b);
+            if (apy_error_occurred()) return 0;
+        }
+        if (c && O(c)->kind != APY_NONE_K) {
+            step = apy_slice_bound(c);
+            if (apy_error_occurred()) return 0;
+        }
         return apy_slice(seq, start, stop, step, has_start, has_stop);
     }
     if (O(seq)->kind == APY_DICT_K) return apy_dict_get(seq, index);

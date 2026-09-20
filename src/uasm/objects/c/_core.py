@@ -63,7 +63,22 @@ enum {
        each says exactly that. Each answers an AWAITABLE rather than doing
        the work, which is what makes `await a.aclose()` the spelling. */
     APY_NAT_AGEN_SEND, APY_NAT_AGEN_THROW, APY_NAT_AGEN_CLOSE,
-    APY_NAT_GEN_CLOSE
+    APY_NAT_GEN_CLOSE,
+    /* THE SIX `object` HANDS DOWN THAT ARE NOT THE RECEIVER'S. The four
+       orderings and `__subclasshook__` answer NotImplemented whatever they
+       are given -- `object` defines no order and vouches for no subclass --
+       and `__format__` takes an EMPTY spec only. They cannot share
+       `APY_NAT_KIND` with the rest, because that selector dispatches to the
+       RECEIVER's kind: routed there, `object.__lt__(1, 2)` became int's `<`
+       and answered True where CPython answers NotImplemented. See
+       `apy_object_default`.
+
+       LAST ON PURPOSE. `runtime/makers.py` writes these numbers out by hand
+       -- `apy_nat_kind` is 17 there because it is 17 here -- so a member
+       inserted in the middle silently renumbers every one after it, and
+       `apy_nat_count` (38) sizes the IR's copy of the cache this enum sizes
+       below. Appending costs one slot and moves nothing. */
+    APY_NAT_OBJ_ONLY
 };
 
 enum {
@@ -1178,6 +1193,86 @@ APY_API apy_value apy_bytes_copy(const char *p, int64_t n) {
    least of all with the empty bytes every program holds. */
 APY_API apy_value apy_bytearray_copy(const char *p, int64_t n) {
     return apy_bytes_dup(p, n, 1);
+}
+
+/* THE SAME TEXT IN A CELL OF ITS OWN, for the callers that must answer a
+   DIFFERENT object holding it.
+
+   THE EMPTY ONE IS STILL SHARED AND A ONE-CHARACTER ONE IS NOT, which is not
+   this runtime's arrangement but CPython's: `_PyUnicode_Copy` builds its
+   result with `PyUnicode_New(length, maxchar)`, and `PyUnicode_New`
+   special-cases `size == 0` ALONE (Objects/unicodeobject.c) -- so `""
+   .__getnewargs__()[0] is ""` is True there and `"a".__getnewargs__()[0] is
+   "a"` is False. Measured both ways before this was written. `apy_str_copy`
+   cannot serve: its funnel answers the shared cell for ANY latin-1 character,
+   which is right for every other caller and wrong for this one.
+
+   THE BYTES ARE COPIED rather than borrowed from the source cell. Borrowing
+   would be safe -- no str is ever written into and no string's bytes are
+   ever freed -- but two cells over one buffer is a thing a later reader has
+   to hold in mind, and a copy costs one `malloc` on a path a program takes
+   only when it pickles. */
+static apy_value apy_str_fresh(const char *p, int64_t n) {
+    apy_obj *o;
+    char *buf;
+    if (n == 0) return apy_shared_str(256);
+    buf = (char *)malloc((size_t)n + 1);
+    if (!buf) { fputs("uasm: out of memory\n", stderr); exit(1); }
+    memcpy(buf, p, (size_t)n);
+    buf[n] = '\0';
+    /* NOT THROUGH `apy_from_bytes`: that IS the sharing test, and this is the
+       one caller that must not take it. `apy_shared_str` says the same of
+       itself, for the same reason. */
+    o = apy_alloc(APY_STR_K);
+    o->v.s.p = buf;
+    o->v.s.n = n;
+    return V(o);
+}
+
+/* A BUILTIN OPERATION'S RESULT, MADE A DIFFERENT OBJECT when the receiver was
+   an INSTANCE of a class extending str or bytes and the operation handed that
+   instance's held text straight back.
+
+   THE UNWRAP IS WHY THIS IS NEEDED AT ALL. `apy_method_self`, `apy_text_like`
+   and the builtin step of `apy_binop_dispatch` all reach past a `class
+   S(str)` to the str it carries BEFORE the operation runs, so by the time a
+   method reaches its own tail the receiver it sees is an exact str and
+   `apy_str_may_return_self` rightly says yes. The subclass is invisible
+   there; it is visible only at the CALL SITE, which still holds the value the
+   program wrote -- so the copy belongs there and not in a wider
+   `may_return_self`.
+
+   CPython COPIES FOR A SUBCLASS AT EVERY ONE OF THESE, and it is the same one
+   test each time: `unicode_result_unchanged` (Objects/unicodeobject.c) hands
+   the argument back only `if (PyUnicode_CheckExact(unicode))` and calls
+   `_PyUnicode_Copy` otherwise, and stringlib's `return_self` is written the
+   same way. So `S("ab").strip() is S("ab").strip()` is False in CPython.
+
+   TWO INSTANCES SHARING ONE HELD CELL IS WHAT MAKES IT VISIBLE, and it is why
+   this hid: `x.strip() is x` was already False -- the instance is not its own
+   text -- and only `x.strip() is y.strip()` tells the truth. `S("ab")` twice
+   over one literal gives two instances holding the SAME cell, since a literal
+   is built once, so every no-op method answered that one cell for both.
+
+   THE COPY IS OF THE HELD KIND, through the constructors that already know
+   which cells CPython shares: `apy_str_fresh` above shares the empty string
+   alone, and `apy_bytes_copy` shares the empty bytes and the 256 one-octet
+   cells exactly as `PyBytes_FromStringAndSize` does. A BYTEARRAY IS LEFT
+   ALONE -- it is written into, so a method that handed one back is a bug of a
+   different shape and `apy_str_self_or_copy` is where that one is answered.
+
+   AN ORDINARY INSTANCE AND A NON-TEXT ONE PASS THROUGH UNTOUCHED, which is
+   what lets this drop in front of an existing tail rather than beside it. */
+static apy_value apy_inst_text_result(apy_value self, apy_value out) {
+    apy_value held;
+    if (!out || O(self)->kind != APY_INST_K) return out;
+    held = O(self)->v.o.held;
+    if (!held || out != held) return out;
+    if (O(held)->kind == APY_STR_K)
+        return apy_str_fresh(O(held)->v.s.p, O(held)->v.s.n);
+    if (O(held)->kind == APY_BYTES_K && !O(held)->v.s.mut)
+        return apy_bytes_copy(O(held)->v.s.p, O(held)->v.s.n);
+    return out;
 }
 
 

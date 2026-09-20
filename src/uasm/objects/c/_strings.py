@@ -1089,6 +1089,36 @@ static int64_t apy_char_start(int wide, const unsigned char *p, int64_t i) {
     return at;
 }
 
+/* ONE PIECE OF A SPLIT, and the RECEIVER ITSELF when that piece spans the
+   whole of it.
+
+   CPython CARRIES THIS IN stringlib AND NOT AS AN OPTIMISATION: both
+   `STRINGLIB(split_whitespace)` and `STRINGLIB(rsplit_whitespace)` in
+   `Objects/stringlib/split.h` end a piece with `Py_INCREF(str_obj);
+   PyList_SET_ITEM(list, 0, str_obj)` under `#ifndef STRINGLIB_MUTABLE` and a
+   `STRINGLIB_CHECK_EXACT` test, and the separator forms do the same for the
+   piece after the last separator. Measured against CPython 3.14 in
+   `scratchpad/probes/d175.py`: `"abc".split("z")[0] is "abc"` and
+   `b"abc".split(b"z")[0] is b"abc"` are True, and so are `rsplit`, both
+   whitespace forms, `splitlines` and the `maxsplit` of 0 spellings.
+
+   A BYTEARRAY TAKES THE COPY, and a LIST SLOT is exactly why: a piece is a
+   thing the program keeps, so handing a writable receiver into one gives it
+   two live names for one buffer and the piece changes under it at the next
+   `ba[0] = ...`. That is the same hazard `apy_str_self_or_copy` answers for
+   the eight methods that end in it, one level down -- the `#ifndef` above is
+   CPython drawing the same line, and `bytearray(b"abc").split(b"z")[0] is`
+   it is False there with the piece a fresh bytearray.
+
+   A PIECE SPANNING THE WHOLE RECEIVER IS THE ONLY PIECE, whichever split
+   asks: a separator consumed, a run of whitespace dropped or a line break
+   cut would each leave some byte out. So this can never hand the receiver
+   into two slots, and no caller has to count. */
+static apy_value apy_split_piece(apy_value s, int64_t lo, int64_t hi) {
+    if (lo == 0 && hi == O(s)->v.s.n) return apy_str_self_or_copy(s);
+    return apy_str_slice_of(s, lo, hi);
+}
+
 APY_API apy_value apy_split_ws_of(apy_value s, int64_t maxsplit,
                                  int64_t from_right) {
     apy_value out = apy_seq_new(APY_LIST_K, 8);
@@ -1108,7 +1138,17 @@ APY_API apy_value apy_split_ws_of(apy_value s, int64_t maxsplit,
                    already happened above. Right-stripping the remainder as
                    well looks tidier and answers ['a', 'b'], which is wrong --
                    and invisible unless a case splits a string that has
-                   trailing space. */
+                   trailing space.
+
+                   AND THE REMAINDER IS A FRESH PIECE EVEN WHEN IT SPANS THE
+                   WHOLE RECEIVER, which is the one place `apy_split_piece`
+                   must not be reached for. CPython's shortcut sits INSIDE
+                   the `while (maxcount-- > 0)` loop of
+                   `STRINGLIB(split_whitespace)`; the remainder is added
+                   after it by a plain `SPLIT_ADD`, so
+                   `"abc".split(None, 0)[0] is "abc"` is False there while
+                   `"abc".split(None, 1)[0] is "abc"` is True. Measured both
+                   ways before this was written. */
                 apy_q_append(out, apy_str_slice_of(s, i, n));
                 return out;
             }
@@ -1118,7 +1158,7 @@ APY_API apy_value apy_split_ws_of(apy_value s, int64_t maxsplit,
                 int64_t used = apy_text_step(wide, q, n, j, &cp);
                 j += used > 0 ? used : 1;
             }
-            apy_q_append(out, apy_str_slice_of(s, i, j));
+            apy_q_append(out, apy_split_piece(s, i, j));
             i = j;
         }
         return out;
@@ -1132,14 +1172,16 @@ APY_API apy_value apy_split_ws_of(apy_value s, int64_t maxsplit,
         if (maxsplit >= 0 && O(out)->v.q.n == maxsplit) {
             /* Mirror image of the forward case: the remainder keeps its
                LEADING whitespace. `'  a  b  '.rsplit(None, 1)` is
-               ['  a', 'b']. */
+               ['  a', 'b'] -- and it is a FRESH piece for the same reason
+               the forward remainder is, so `"abc".rsplit(None, 0)[0] is
+               "abc"` is False. */
             apy_q_append(out, apy_str_slice_of(s, 0, i));
             break;
         }
         j = i;
         while (j > 0 && !apy_space_at(wide, q, n,
                                       at = apy_char_start(wide, q, j))) j = at;
-        apy_q_append(out, apy_str_slice_of(s, j, i));
+        apy_q_append(out, apy_split_piece(s, j, i));
         i = j;
     }
     /* Built back to front, so reverse it. */
@@ -1165,7 +1207,11 @@ APY_API apy_value apy_split_sep_of(apy_value s, apy_value sep,
             apy_q_append(out, apy_str_slice_of(s, i, at));
             i = at + m;
         }
-        apy_q_append(out, apy_str_slice_of(s, i, n));
+        /* THE PIECE AFTER THE LAST SEPARATOR, which is the whole receiver
+           when there was no separator to consume -- or when `maxsplit` was
+           0, which is the same thing measured from here. Every piece ABOVE
+           ends at a separator, so only this one can span the receiver. */
+        apy_q_append(out, apy_split_piece(s, i, n));
         return out;
     }
     i = n;
@@ -1175,7 +1221,9 @@ APY_API apy_value apy_split_sep_of(apy_value s, apy_value sep,
         apy_q_append(out, apy_str_slice_of(s, at + m, i));
         i = at;
     }
-    apy_q_append(out, apy_str_slice_of(s, 0, i));
+    /* The mirror of the forward tail: the piece BEFORE the last separator
+       found, spanning the receiver when none was. */
+    apy_q_append(out, apy_split_piece(s, 0, i));
     for (i = 0, j = O(out)->v.q.n - 1; i < j; i++, j--) {
         apy_value t = O(out)->v.q.items[i];
         O(out)->v.q.items[i] = O(out)->v.q.items[j];
@@ -1239,23 +1287,79 @@ APY_API apy_value apy_str_rsplit_n(apy_value s, apy_value sep, apy_value limit) 
     return apy_str_split_impl(s, sep, limit, 1);
 }
 
-/* `splitlines` breaks on \n, \r and \r\n. CPython also breaks on \v, \f,
-   \x1c-\x1e and three Unicode separators; those are not here, and a text
-   containing one comes back as a single line. Stated, not silent. */
+/* The bytes of the LINE BREAK starting at `i`, or 0.
+
+   A str BREAKS ON TEN CHARACTERS AND A bytes ON TWO, which is the same split
+   between the two kinds that `apy_space_at` above makes, and for the same
+   reason: `STRINGLIB(splitlines)` in `Objects/stringlib/split.h` tests
+   `STRINGLIB_ISLINEBREAK`, which is `Py_UNICODE_ISLINEBREAK`
+   (`_PyUnicode_IsLinebreak`, ten code points) in the unicode instantiation
+   and `(x == '\n' || x == '\r')` in the bytes one -- see
+   `Objects/stringlib/stringdefs.h`. Measured against CPython 3.14 in
+   `scratchpad/probes/d175f.py`: `"a\x0bb".splitlines()` is `['a', 'b']`
+   while `b"a\x0bb".splitlines()` is `[b'a\x0bb']`.
+
+   THE SIX THIS WALKER USED TO MISS -- \v \f \x1c \x1d \x1e \x85
+     -- were a wrong list of pieces, and once `apy_split_piece` below
+   arrived they became a wrong ANSWER TO `is` as well: that shortcut hands
+   the receiver back when the one piece spans the whole of it, and "spans
+   the whole of it" is decided here, so a text holding one of them answered
+   `t.splitlines()[0] is t` True where CPython answers a different object
+   AND a different list. The interpreter binds `splitlines` to Python's own
+   and was right all along, so this was a two-against-two split.
+
+   ANSWERING A WIDTH RATHER THAN A FLAG is what lets the caller advance past
+   a break that is two or three bytes of UTF-8, exactly as `apy_space_at`
+   does; stepping one byte at a time would ask about its continuation
+   bytes. */
+static int64_t apy_linebreak_at(int wide, const unsigned char *p, int64_t n,
+                                int64_t i) {
+    uint32_t cp;
+    int64_t used = apy_text_step(wide, p, n, i, &cp);
+    if (used <= 0) return 0;
+    if (cp == '\n' || cp == '\r') return used;
+    if (!wide) return 0;
+    /* `'\v'` AND `'\f'` AND NOT `0x0b` AND `0x0c`, because this frontend
+       cannot lex a hex constant whose last digit is `b`: `0xb`, `0x1b` and
+       `0xab` all report `invalid suffix 'b' on integer constant` while
+       `0x1c` and `0x2028` compile. Measured with a one-line file while
+       writing this; the escapes say the same thing and lex. */
+    if (cp == '\v' || cp == '\f' || (cp >= 0x1c && cp <= 0x1e)
+        || cp == 0x85 || cp == 0x2028 || cp == 0x2029) return used;
+    return 0;
+}
+
+/* `splitlines` breaks on the ten characters `apy_linebreak_at` knows, and
+   reads `\r\n` as ONE break and not two -- which is the whole reason this is
+   not `split("\n")`. A TRAILING BREAK ADDS NO EMPTY PIECE: the loop ends
+   with the break consumed and nothing left to start a new piece, so
+   `"a\n".splitlines()` is `["a"]` where `"a\n".split("\n")` is `["a", ""]`.
+   `keepends` puts the break back on, which is what makes the pieces
+   reassemble into the original. */
 APY_API apy_value apy_splitlines_impl_of(apy_value s, int64_t keepends) {
     apy_value out = apy_seq_new(APY_LIST_K, 8);
-    int64_t n = O(s)->v.s.n, i = 0, start;
+    const unsigned char *p = (const unsigned char *)O(s)->v.s.p;
+    int wide = O(s)->kind == APY_STR_K;
+    int64_t n = O(s)->v.s.n, i = 0, start, brk = 0;
     while (i < n) {
         start = i;
-        while (i < n && O(s)->v.s.p[i] != '\n' && O(s)->v.s.p[i] != '\r') i++;
+        while (i < n && (brk = apy_linebreak_at(wide, p, n, i)) == 0) {
+            uint32_t cp;
+            int64_t used = apy_text_step(wide, p, n, i, &cp);
+            i += used > 0 ? used : 1;
+        }
         {
             int64_t stop = i;
             if (i < n) {
-                if (O(s)->v.s.p[i] == '\r' && i + 1 < n
-                    && O(s)->v.s.p[i + 1] == '\n') i += 2;
-                else i++;
+                /* ONLY `\r\n` IS A PAIR. A `\r` before anything else, and
+                   every one of the other nine, is a break on its own. */
+                if (p[i] == '\r' && i + 1 < n && p[i + 1] == '\n') i += 2;
+                else i += brk;
             }
-            apy_q_append(out, apy_str_slice_of(s, start, keepends ? i : stop));
+            /* A TEXT WITH NO LINE BREAK IN IT IS ONE LINE AND THAT LINE
+               IS THE RECEIVER, with or without `keepends`: the cut spans
+               the whole of it either way. */
+            apy_q_append(out, apy_split_piece(s, start, keepends ? i : stop));
         }
     }
     return out;

@@ -617,6 +617,16 @@ def apy_nat_init_subclass() -> i64:
     return 19
 
 
+def apy_nat_obj_only() -> i64:
+    """The selector for the six dunders `object` hands down that are NOT the
+    receiver's -- the four orderings, `__subclasshook__` and `__format__`.
+
+    LAST IN THE C's ENUM, which is why it is 37 and why appending it there
+    renumbered nothing. `apy_nat_count` is 38 to match.
+    """
+    return 37
+
+
 # -- the pieces attribute lookup stands on ---------------------------------
 
 
@@ -731,6 +741,44 @@ def apy_object_default(want: ptr) -> ptr:
     if apy_cstr_eq(want, rodata(b"__init_subclass__\0")):
         return apy_native_of(apy_nat_init_subclass(), 1,
                              rodata(b"__init_subclass__\0"))
+    # AND THE ELEVEN WITH NO SELECTOR OF THEIR OWN -- the four orderings,
+    # `__format__`, `__dir__`, `__sizeof__`, `__subclasshook__`,
+    # `__getstate__` and the two pickle hooks. Every one of them already has
+    # a body, in `apy_nat_kind()`'s dispatch, which is where a builtin VALUE
+    # reaches it; what was missing was a value naming it from `object`. A
+    # selector per name would be eleven more numbers that differ only in
+    # which name they carry, so the name IS the selector -- and
+    # `apy_object_arity` is already the table of which names `object` hands
+    # down and how many slots each takes.
+    #
+    # UNBOUND, because `object.__sizeof__(x)` writes its receiver out: the
+    # reader binds one of these when it finds it on a class, exactly as it
+    # binds the ten above.
+    # SIX OF THEM ARE NOT THE RECEIVER'S, and must not reach that dispatch.
+    # `apy_kind_method_of` answers with the KIND's own body, which is right
+    # for `__dir__`, `__sizeof__`, `__getstate__` and the two pickle hooks --
+    # `object.__sizeof__(x)` IS `x`'s size -- and wrong for these, because
+    # `object` does not define them at all. Routed there,
+    # `object.__lt__(1, 2)` became int's `<` and answered True; CPython
+    # answers NotImplemented for every pair, because `object_richcompare`
+    # has no ordering case. `__subclasshook__` is the same answer for the
+    # same reason, and `object.__format__` takes an EMPTY spec only. The C's
+    # `APY_NAT_OBJ_ONLY` is the twin of this, and holds the bodies.
+    if apy_cstr_eq(want, rodata(b"__lt__\0")):
+        return apy_native_of(apy_nat_obj_only(), 2, want)
+    if apy_cstr_eq(want, rodata(b"__le__\0")):
+        return apy_native_of(apy_nat_obj_only(), 2, want)
+    if apy_cstr_eq(want, rodata(b"__gt__\0")):
+        return apy_native_of(apy_nat_obj_only(), 2, want)
+    if apy_cstr_eq(want, rodata(b"__ge__\0")):
+        return apy_native_of(apy_nat_obj_only(), 2, want)
+    if apy_cstr_eq(want, rodata(b"__subclasshook__\0")):
+        return apy_native_of(apy_nat_obj_only(), 1, want)
+    if apy_cstr_eq(want, rodata(b"__format__\0")):
+        return apy_native_of(apy_nat_obj_only(), 2, want)
+    common: i64 = apy_object_arity(want)
+    if common:
+        return apy_kind_method_of(ptr(0), common, want, 0)
     return ptr(0)
 
 
@@ -740,7 +788,21 @@ def apy_object_slot() -> ptr:
 
 
 def apy_object_class() -> ptr:
-    """The class `object` itself is, made once and filled with its dunders."""
+    """The class `object` itself is, made once and filled with its dunders.
+
+    THE DICT IS THE ANSWER TO `dir(object)`. CPython's `dir` over a class is
+    the merge of its MRO's dicts and `object`'s MRO is itself, so the two
+    questions are one question -- and this filled ten of the twenty-four
+    names 3.14 answers. Nothing on it was wrong; fourteen were absent, so
+    `dir(object)` was a list that under-reported by more than half and
+    `object.__sizeof__` was an AttributeError about an attribute every value
+    in the language carries.
+
+    TWENTY-TWO ARE FILLED HERE, each through `apy_object_default`.
+    `__doc__` is the twenty-third and is set below, because it is TEXT and
+    not a method that function could answer. `__class__` is the
+    twenty-fourth and is in no dict at all -- see `apy_dir_chain`.
+    """
     held: ptr = ptr(load(u64, apy_object_slot()))
     if held:
         return held
@@ -759,6 +821,31 @@ def apy_object_class() -> ptr:
     apy_object_fill(d, rodata(b"__getattribute__\0"))
     apy_object_fill(d, rodata(b"__setattr__\0"))
     apy_object_fill(d, rodata(b"__delattr__\0"))
+    apy_object_fill(d, rodata(b"__init_subclass__\0"))
+    apy_object_fill(d, rodata(b"__lt__\0"))
+    apy_object_fill(d, rodata(b"__le__\0"))
+    apy_object_fill(d, rodata(b"__gt__\0"))
+    apy_object_fill(d, rodata(b"__ge__\0"))
+    apy_object_fill(d, rodata(b"__format__\0"))
+    apy_object_fill(d, rodata(b"__dir__\0"))
+    apy_object_fill(d, rodata(b"__sizeof__\0"))
+    apy_object_fill(d, rodata(b"__subclasshook__\0"))
+    apy_object_fill(d, rodata(b"__getstate__\0"))
+    apy_object_fill(d, rodata(b"__reduce__\0"))
+    apy_object_fill(d, rodata(b"__reduce_ex__\0"))
+    # PEP 257, AND THE TEXT IS CPYTHON'S OWN. The generated doc table is
+    # keyed by the KINDS this runtime models and `object` is not one of them,
+    # so the string is written out here rather than looked up -- it is
+    # `object.__doc__` in 3.14, copied verbatim. Both readers find it: the
+    # class through its dict, and `object()` through its class.
+    apy_dict_set(d, apy_name_of(rodata(b"__doc__\0")),
+                 apy_from_cstr(rodata(
+                     b"The base class of the class hierarchy.\n"
+                     b"\n"
+                     b"When called, it accepts no arguments and returns a new"
+                     b" featureless\n"
+                     b"instance that has no instance attributes and cannot be"
+                     b" given any.\n\0")))
     return cls
 
 
@@ -992,7 +1079,11 @@ def apy_object_arity(want: ptr) -> i64:
     if apy_cstr_eq(want, rodata(b"__init_subclass__\0")):
         return 1
     if apy_cstr_eq(want, rodata(b"__subclasshook__\0")):
-        return 2
+        # ONE, NOT TWO. It is a CLASSMETHOD in CPython, so the class is
+        # already bound and `object.__subclasshook__(int)` is the whole
+        # spelling -- measured, nought arguments and two are both "takes
+        # exactly one argument". The C says 1 for the same reason.
+        return 1
     if apy_cstr_eq(want, rodata(b"__dir__\0")):
         return 1
     if apy_cstr_eq(want, rodata(b"__sizeof__\0")):

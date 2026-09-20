@@ -950,7 +950,12 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
         if (!quoted && O(v)->v.o.held
             && (O(O(v)->v.o.held)->kind == APY_STR_K
                 || O(O(v)->v.o.held)->kind == APY_BYTES_K))
-            return apy_text_of(O(v)->v.o.held, 0);
+            /* A FRESH PLAIN str, AND NOT THE ONE INSIDE THE INSTANCE.
+               `str()` of an exact str IS that str, so this answered the held
+               cell -- which two instances built from one literal share, and
+               `str(S("ab")) is str(S("ab"))` was True where CPython says
+               False. See `apy_inst_text_result`. */
+            return apy_inst_text_result(v, apy_text_of(O(v)->v.o.held, 0));
         r = apy_unary_dunder(v, "__repr__");
         if (r || apy_error_occurred())
             return r ? apy_text_result(r, "__repr__") : r;

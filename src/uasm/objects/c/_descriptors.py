@@ -1345,31 +1345,83 @@ APY_API apy_value apy_str_maketrans(apy_value a, apy_value b, apy_value drop) {
     apy_value out;
     int64_t i = 0, j = 0, alen, blen;
     const unsigned char *ap, *bp;
-    /* THE ONE-ARGUMENT FORM IS A MAPPING, and it is a different operation:
-       nothing is paired off, the table is COPIED with its string keys turned
-       into the code points `translate` looks up. A one-character string key
-       is the only kind that can be, which is what the ValueError says. */
-    if (O(a)->kind == APY_DICT_K) {
+    /* THE ONE-ARGUMENT FORM IS PICKED BY THE ARGUMENTS THAT ARE NOT THERE,
+       and not by the kind of the one that is. CPython's
+       `unicode_maketrans_impl` (Objects/unicodeobject.c) branches on
+       `y == NULL` and only then asks whether `x` is a dict, so
+       `str.maketrans("ab")` is the MAPPING form refusing a non-dict and not
+       the pairing form complaining about a second argument it was never
+       given. Branching on `x` instead answered "maketrans() arguments must
+       be strings" for each of `"ab"`, `[]`, `None` and `7`, where CPython
+       names the dict it wanted. The frontend always passes three slots --
+       see `dynamic.py` -- so an omitted argument arrives here as None. */
+    if ((!b || O(b)->kind == APY_NONE_K)
+            && (!drop || O(drop)->kind == APY_NONE_K)) {
         int64_t at;
-        if ((b && O(b)->kind != APY_NONE_K) || (drop && O(drop)->kind != APY_NONE_K))
+        /* A DIFFERENT OPERATION WEARING THE SAME NAME: nothing is paired
+           off, a table that is already a table is COPIED with its string
+           keys turned into the code points `translate` looks up. CPython
+           gives the wrong shape its own sentence rather than the pairing
+           error, which is why that message is not reused here. */
+        if (O(a)->kind != APY_DICT_K)
             return apy_fail("TypeError",
-                            "first maketrans argument must be a string if "
-                            "there is a second argument");
+                            "if you give only one argument to maketrans it "
+                            "must be a dict");
         out = apy_dict_new(O(a)->v.d.n + 1);
         if (!out) return 0;
         for (at = 0; at < O(a)->v.d.n; at++) {
             apy_value key = O(a)->v.d.keys[at];
             apy_value point = key;
-            if (O(key)->kind == APY_STR_K) {
+            /* A str SUBCLASS IS A STRING KEY. CPython's loop runs
+               `PyUnicode_Check` -- the SUBCLASS-ADMITTING check, not
+               `PyUnicode_CheckExact` -- and then `PyUnicode_READ_CHAR`,
+               which reads the same C-level layout a subclass has, so
+               `str.maketrans({S("a"): "z"})` is `{97: 'z'}` for
+               `class S(str)`. Reading the kind of the instance instead sent
+               it to the TypeError below. Measured against CPython 3.14;
+               `scratchpad/probes/d179adv.py`.
+
+               THE UNWRAP FEEDS THE BUFFER READ AND NOTHING ELSE: `point`
+               becomes the ordinal, so nothing downstream sees the held
+               string, and an instance of a class extending BYTES unwraps to
+               bytes -- not a string key, not an integer one -- and still
+               lands on the TypeError. */
+            apy_value ktext = apy_text_like(key);
+            if (O(ktext)->kind == APY_STR_K) {
                 int64_t used, cp;
-                if (apy_str_chars(key) != 1)
+                /* A ONE-CHARACTER STRING KEY IS THE ONLY KIND THAT HAS AN
+                   ORDINAL, which is what the ValueError says. */
+                if (apy_str_chars(ktext) != 1)
                     return apy_fail("ValueError",
                                     "string keys in translate table must be "
                                     "of length 1");
-                cp = apy_utf8_at((const unsigned char *)O(key)->v.s.p,
-                                 O(key)->v.s.n, 0, &used);
+                cp = apy_utf8_at((const unsigned char *)O(ktext)->v.s.p,
+                                 O(ktext)->v.s.n, 0, &used);
                 point = apy_from_int(cp);
+            } else if (!apy_is_int_like(key)) {
+                /* AND NOTHING ELSE IS A KEY AT ALL. CPython's loop runs
+                   `PyUnicode_Check` then `PyLong_Check` and raises on
+                   anything else, so `{1.0: "z"}` is a TypeError there; this
+                   copied such a key straight through and built a table whose
+                   entries `translate` could never match.
+
+                   A BOOL COUNTS AS AN INTEGER, because `PyLong_Check` says
+                   so: `str.maketrans({True: "z"})` builds in CPython. */
+                return apy_fail("TypeError",
+                                "keys in translate table must be strings or "
+                                "integers");
             }
+            /* AN INTEGER KEY IS KEPT AS THE OBJECT IT IS, not narrowed to a
+               plain int, because `unicode_maketrans_impl` stores it straight
+               into the new dict: `str.maketrans({True: "z"})` is `{True: 'z'}`
+               there and not `{1: 'z'}`. It translates the same either way,
+               since True hashes as 1, and the difference is visible only to a
+               program that prints the table.
+
+               AND THE RANGE IS NOT CHECKED. `{0x110000: "z"}` and `{-1: "z"}`
+               both build here, exactly as they do in CPython: a key outside
+               the code points simply never matches, and refusing it would
+               refuse a table CPython makes. */
             if (!apy_dict_set(out, point, O(a)->v.d.vals[at]))
                 return 0;
         }
@@ -1379,6 +1431,15 @@ APY_API apy_value apy_str_maketrans(apy_value a, apy_value b, apy_value drop) {
        builds the same table CPython's does. */
     a = apy_text_like(a);
     b = apy_text_like(b);
+    /* A NON-str FIRST ARGUMENT WITH A SECOND ONE is neither form, and
+       CPython names the FIRST argument because that is the one that decides
+       which form this was going to be. The check lived inside the branch
+       above while that branch was the one a dict took; the form is chosen by
+       the absent arguments now, so it belongs on this side. */
+    if (O(a)->kind != APY_STR_K && b && O(b)->kind != APY_NONE_K)
+        return apy_fail("TypeError",
+                        "first maketrans argument must be a string if "
+                        "there is a second argument");
     if (O(a)->kind != APY_STR_K || O(b)->kind != APY_STR_K)
         return apy_fail("TypeError",
                         "maketrans() arguments must be strings");
@@ -1603,7 +1664,42 @@ APY_API apy_value apy_bytes_translate(apy_value s, apy_value table,
        through a writer and hands it back whatever it copied. That function
        is above; leave it building. */
     if (!changed && apy_str_may_return_self(s)) { free(buf); return s; }
-    return apy_str_take(buf, out_n);
+    /* THE RESULT IS BUILT AS bytes HERE AND NOT LEFT TO `apy_str_like`, and
+       the reason is IDENTITY rather than tidiness. This used to end in
+       `apy_str_take`, which is the STR funnel: the call site's
+       `apy_str_like` then saw a str under a bytes receiver and re-tagged it
+       through `apy_bytes_copy`, and that funnel answers the 256-object
+       cache for a one-byte result. So `b"abc".translate(None, b"bc") is
+       b"a"` was True on both compiled paths.
+
+       CPYTHON SAYS False, and the asymmetry is `_PyBytes_Resize`'s:
+       `bytes_translate` sizes its output buffer to the input and then
+       resizes, and that function special-cases a new size of ZERO -- handing
+       back the interned empty -- while every other size is a plain
+       `realloc` that never reaches the cache. Measured both ways round
+       against CPython 3.14 (`scratchpad/probes/d172.py`):
+       `b"abc".translate(None, b"abc") is b""` is True and
+       `b"abc".translate(None, b"bc") is b"a"` is False. The interpreter was
+       given exactly this rule in d60f3f3d; this is the same rule for the
+       two compiled paths.
+
+       AND THE STR SIDE IS NOT THE SAME, so do not tidy the two into one:
+       `"abc".translate(str.maketrans("", "", "bc")) is "a"` IS True, because
+       the unicode writer consults the latin-1 cache. `apy_str_translate`
+       above keeps its `apy_str_take` for that reason.
+
+       ONE-BYTE SHARING CANNOT BE SETTLED IN `apy_str_like` EITHER, which is
+       why the fix is here. That funnel serves every bytes method at once,
+       and CPython shares by method: `b" a ".strip()`, `b"a-b".partition
+       (b"-")[0]`, `b"a b".split()[0]` and `b"abc"[0:1]` all ARE `b"a"`,
+       while `translate`, `replace` and `upper` are not. Measured.
+
+       NOT `apy_bytes_take`: that is the funnel that consults the cache.
+       `apy_bytes_own` is the cell constructor underneath it, and the empty
+       one is asked for by name -- a cell decided BEFORE it is made, never a
+       shared one re-tagged afterwards. */
+    if (out_n == 0) { free(buf); return apy_shared_bytes(256); }
+    return apy_bytes_own(buf, out_n, 0);
 }
 
 /* `x.translate(table, delete=...)` -- the form written with the keyword.

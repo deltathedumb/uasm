@@ -550,7 +550,14 @@ def apy_nat_type_call() -> i64:
 
 
 def apy_nat_count() -> i64:
-    return 37
+    """How many native selectors there are, which is how long the cache is.
+
+    THE NUMBER IS THE C's, and the C sizes its own cache from the enum's last
+    member. `APY_NAT_OBJ_ONLY` was appended for the six dunders `object`
+    hands down that are NOT the receiver's, so this went from 37 to 38. A
+    selector past the end of this table is a write past the end of it.
+    """
+    return 38
 
 
 def apy_fn_native_offset() -> i64:
@@ -583,11 +590,18 @@ def apy_native_of(sel: i64, arity: i64, name: ptr) -> ptr:
     whatever this kind is meant to dispatch to, so two callers asking
     for it mean different functions and must not share one.
 
+    AND SO IS `APY_NAT_OBJ_ONLY`, for exactly the same reason: one selector
+    serves the four orderings, `__subclasshook__` and `__format__`, and the
+    body reads the NAME to tell them apart. Cached by selector, whichever
+    was asked for first would have been handed back for all six -- so
+    `object.__format__` would have answered NotImplemented because
+    `object.__lt__` was built before it.
+
     A BUILTIN `__init__` TAKES ONE OPTIONAL ARGUMENT, which is what the
     default list is for: `int()` and `int(5)` are both calls to the same
     function, and the arity check would refuse one of them without it.
     """
-    if sel != apy_nat_kind():
+    if sel != apy_nat_kind() and sel != apy_nat_obj_only():
         held: ptr = ptr(load(u64, offset(apy_native_rows(),
                                          sel * apy_value_size())))
         if held:
@@ -598,8 +612,15 @@ def apy_native_of(sel: i64, arity: i64, name: ptr) -> ptr:
     store(i32, i32(sel), offset(o, apy_fn_native_offset()))
     store(i64, arity, offset(o, apy_fn_arity_offset()))
     store(u64, u64(apy_from_cstr(name)), offset(o, apy_fn_name_offset()))
+    # AND `object.__init_subclass__()` IS WRITTEN WITH NO ARGUMENT AT ALL.
+    # CPython's is a classmethod, so the class is already bound and the empty
+    # call is the whole spelling; the class-creation path here hands the class
+    # over explicitly instead, so the slot is OPTIONAL rather than absent. The
+    # body answers None whichever way it is reached, and without this the two
+    # spellings disagreed: `object.__init_subclass__()` was an arity error on
+    # the compiled halves and None in the interpreter.
     if (sel == apy_nat_builtin_init() or sel == apy_nat_builtin_new()
-            or sel == apy_nat_new()):
+            or sel == apy_nat_new() or sel == apy_nat_init_subclass()):
         store(u64, u64(apy_none()), apy_native_absent())
         store(i64, 1, offset(o, apy_fn_ndefaults_offset()))
         store(u64, u64(apy_native_absent()),

@@ -192,6 +192,16 @@ static apy_value apy_binop_dispatch(const char *op, apy_value a, apy_value b) {
                             && !(O(ua)->kind == APY_STR_K
                                  && strcmp(op, "%") == 0)) continue;
                     r = apy_op_apply(op, ua, ub);
+                    /* AND A NO-OP OVER A SUBCLASS ANSWERS A FRESH PLAIN ONE.
+                       `s * 1` and `s + ""` hand the receiver straight back,
+                       and the receiver the builtin step handed in is the
+                       str INSIDE the instance -- which two instances built
+                       from one literal SHARE. Either operand may be the
+                       instance, so both are asked; the outer test sees the
+                       inner's copy and stops. See `apy_inst_text_result`. */
+                    if (r)
+                        r = apy_inst_text_result(
+                                a, apy_inst_text_result(b, r));
                     if (r || apy_error_occurred()) return r;
                     continue;
                 }

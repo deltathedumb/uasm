@@ -139,9 +139,16 @@ def apy_str_like(recv: ptr, out: ptr) -> ptr:
     passed, which is immutable; copying is what makes fixing it safe, since
     setting `mut` in place would turn the caller's own `b"-"` into a
     bytearray.
+
+    AND A SUBCLASS'S NO-OP ANSWERS A FRESH PLAIN ONE. `recv` is the value the
+    PROGRAM wrote and is still wrapped, which makes this the only point on
+    the method route that can still see a `class S(str)`: `apy_method_self`
+    unwrapped it before the method ran, so the method's own tail saw an exact
+    str and handed it back. See `apy_inst_text_result_of`.
     """
     if not out:
         return out
+    out = apy_inst_text_result_of(recv, out)
     if i64(load(i32, offset(recv, 0))) != apy_bytes_kind():
         return out
     want: i64 = i64(load(i32, offset(recv, apy_s_mut_offset())))

@@ -303,7 +303,43 @@ def apy_bytes_translate(s: ptr, table: ptr, delete: ptr) -> ptr:
     # rather than freed because the arena never takes one back.
     if changed == 0 and apy_str_may_return_self_of(s):
         return s
-    return apy_from_bytes(buf, out)
+    # THE RESULT IS BUILT AS bytes HERE AND NOT LEFT TO `apy_str_like`, and
+    # the reason is IDENTITY rather than tidiness. This used to end in
+    # `apy_from_bytes`, which is the STR funnel: the call site's
+    # `apy_str_like` then saw a str under a bytes receiver and re-tagged it
+    # through `apy_bytes_made_of`, and that funnel answers the 256-object
+    # cache for a one-byte result. So `b"abc".translate(None, b"bc") is b"a"`
+    # was True on both compiled paths.
+    #
+    # CPYTHON SAYS False, and the asymmetry is `_PyBytes_Resize`'s:
+    # `bytes_translate` sizes its output buffer to the input and then resizes,
+    # and that function special-cases a new size of ZERO -- handing back the
+    # interned empty -- while every other size is a plain `realloc` that never
+    # reaches the cache. Measured both ways round against CPython 3.14
+    # (`scratchpad/probes/d172.py`): `b"abc".translate(None, b"abc") is b""`
+    # is True and `b"abc".translate(None, b"bc") is b"a"` is False. The
+    # interpreter was given exactly this rule in d60f3f3d; this is the same
+    # rule for the two compiled paths, and the C's `apy_bytes_translate` says
+    # the same beside the same lines.
+    #
+    # AND THE STR SIDE IS NOT THE SAME, so do not tidy the two into one:
+    # `"abc".translate(str.maketrans("", "", "bc")) is "a"` IS True, because
+    # the unicode writer consults the latin-1 cache. `apy_str_translate` above
+    # keeps its `apy_from_bytes` for that reason.
+    #
+    # ONE-BYTE SHARING CANNOT BE SETTLED IN `apy_str_like` EITHER, which is
+    # why the fix is here. That funnel serves every bytes method at once, and
+    # CPython shares by method: `b" a ".strip()`, `b"a-b".partition(b"-")[0]`,
+    # `b"a b".split()[0]` and `b"abc"[0:1]` all ARE `b"a"`, while `translate`,
+    # `replace` and `upper` are not. Measured.
+    #
+    # NOT `apy_bytes_made_of`: that is the funnel that consults the cache.
+    # `apy_bytes_cell` is the constructor underneath it, and the empty one is
+    # asked for by name -- a cell decided BEFORE it is made, never a shared
+    # one re-tagged afterwards.
+    if out == 0:
+        return apy_shared_bytes(256)
+    return apy_bytes_cell(buf, out, 0)
 
 
 def apy_translate_kw(s: ptr, table: ptr, delete: ptr) -> ptr:

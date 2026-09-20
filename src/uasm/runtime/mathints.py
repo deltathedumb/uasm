@@ -1565,7 +1565,18 @@ def apy_dir_names(out: ptr, d: ptr) -> None:
 
 
 def apy_dir_chain(out: ptr, cls: ptr) -> None:
-    """Add the names every class in `cls`\'s base chain defines."""
+    """Add the names every class in `cls`\'s base chain defines.
+
+    AND `object`'s TWENTY-FOURTH NAME WHERE THE CHAIN REACHES IT.
+    `__class__` is the one of the twenty-four that is not an entry in
+    `object`'s dict: it is answered from a RULE here -- `type(x)`, for every
+    kind there is -- rather than from storage, so the dict has nothing to
+    list and `dir(object)` came back one short of CPython's. Storing the
+    `type` cell under that key instead would answer `type` for
+    `object().__class__`, which CPython says is `object`: CPython's entry is
+    a getset called with whoever asked, and one plain slot cannot be both
+    answers.
+    """
     here: ptr = cls
     going: i64 = 1
     while going:
@@ -1576,6 +1587,10 @@ def apy_dir_chain(out: ptr, cls: ptr) -> None:
         else:
             apy_dir_names(out, ptr(load(u64, offset(
                 here, apy_t_dict_offset()))))
+            if here == apy_object_class():
+                name: ptr = apy_name_of(rodata(b"__class__\0"))
+                if apy_set_find_of(out, name) < 0:
+                    apy_q_append_of(out, name)
             here = ptr(load(u64, offset(here, apy_t_base_offset())))
 
 
@@ -1655,10 +1670,19 @@ def apy_dir(v: ptr) -> ptr:
     here to walk, so this answered an EMPTY LIST where CPython lists eighty
     names.
     """
+    # EXCEPT FOR AN INSTANCE OF `object` ITSELF. `object`'s own `__dir__` IS
+    # this computation and not an override of it; it sits in `object`'s dict
+    # because `dir(object)` is that dict's keys, and `object()` finds it
+    # there through its class -- so asking it is asking this function again,
+    # with no base case. `object` is not installed as a real base on anything
+    # (see `apy_object_class`), so a plain `object()` is the whole of what
+    # this excludes. CPython draws the same line: `object.__dir__` is a
+    # separate body that builds the list rather than calling `dir`.
     if i64(load(i32, offset(v, 0))) == apy_inst_kind():
-        hook: ptr = apy_class_find_of(
-            ptr(load(u64, offset(v, apy_o_cls_offset()))),
-            apy_name_of(rodata(b"__dir__\0")))
+        own: ptr = ptr(load(u64, offset(v, apy_o_cls_offset())))
+        hook: ptr = ptr(0)
+        if own != apy_object_class():
+            hook = apy_class_find_of(own, apy_name_of(rodata(b"__dir__\0")))
         if hook:
             got: ptr = apy_call(apy_bind_of(hook, v), ptr(0), 0)
             if not got:

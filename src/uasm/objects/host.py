@@ -881,7 +881,40 @@ class ObjectHost:
             # and `b"abcd"[0:1] is b"a"` answers False where CPython says
             # True. Normalised here rather than at the four constructors that
             # read memory, because this is where identity is decided.
-            obj = _ONE_BYTE[obj[0]]
+            #
+            # BUT NEVER OVER A HANDLE THIS OBJECT ALREADY HAS. `_new` records
+            # `_identity[id(obj)]` for every immutable value, so an object
+            # that has one is one some entry point has ALREADY decided is
+            # distinct -- and CPython agrees with it, because the object is
+            # CPython's own and got its own `id` from CPython. Collapsing it
+            # now would make `is` answer differently depending on which route
+            # the value came back through, which is the one thing identity
+            # must not depend on.
+            #
+            # MEASURED, and `translate` is where it showed: CPython's
+            # `bytes_translate` sizes a buffer and resizes it, and
+            # `_PyBytes_Resize` reaches the 256-object cache only for a new
+            # size of ZERO -- so `b"abc".translate(None, b"bc") is b"a"` is
+            # False. `_apy_bytes_translate` says exactly that, with `_new`
+            # for the one-byte result and `_value` for the empty one. Reached
+            # by `getattr(b"abc", "translate")` or as the unbound
+            # `bytes.translate`, though, the answer goes back through
+            # `_made_table_method`, which unwraps the handle to the value and
+            # lets the caller re-wrap it -- and this line then threw that
+            # decision away and answered the literal's handle, so both routes
+            # said True where the written spelling and BOTH compiled paths
+            # said False. `scratchpad/probes/d181adv.py` is the measurement.
+            #
+            # A ONE-BYTE bytes READ OUT OF INTERPRETER MEMORY still has no
+            # handle of its own the first time it is seen -- `bytes(buf[i:i +
+            # 1])` allocates -- so it still normalises, which is the case the
+            # paragraph above this one is about. The lookup is guarded the
+            # same way the interning below is, against an `id` that was
+            # reused; `_cells` holds every object a handle was made for, so
+            # in practice it cannot be.
+            seen = self._identity.get(id(obj))
+            if seen is None or self._cell(seen) is not obj:
+                obj = _ONE_BYTE[obj[0]]
         if obj is None:
             return self._none
         if obj is NotImplemented:
@@ -3575,6 +3608,69 @@ def _held_text(v):
     return v
 
 
+def _inst_text_result(self, out):
+    """A builtin operation's result, made a DIFFERENT object when `self` was
+    an instance of a class extending str or bytes and the operation handed
+    that instance's held text straight back.
+
+    THE UNWRAP ABOVE IS WHY THIS IS NEEDED. `_held_text` reaches past a
+    `class S(str)` to the str it carries BEFORE the operation runs, and what
+    then runs is Python's own method -- which for a no-op hands that very
+    object back, because by then it IS an exact str. `Host._value` interns by
+    `id`, so the two instances get the ONE handle.
+
+    TWO INSTANCES SHARING ONE HELD OBJECT IS WHAT MAKES IT VISIBLE, and it is
+    why this hid: `x.strip() is x` was already False -- an instance is not its
+    own text -- and only `x.strip() is y.strip()` tells the truth. `S("ab")`
+    twice over one literal gives two instances holding the same str.
+
+    CPython COPIES FOR A SUBCLASS at every one of these, and it is one test:
+    `unicode_result_unchanged` (Objects/unicodeobject.c) hands the argument
+    back only `if (PyUnicode_CheckExact(unicode))` and calls `_PyUnicode_Copy`
+    otherwise, and stringlib's `return_self` is written the same way. So
+    `S("ab").strip() is S("ab").strip()` is False there.
+
+    CPYTHON'S OWN COPY IS THE COPY, and `__getnewargs__` is where it is
+    reachable from Python: `unicode_getnewargs` calls `_PyUnicode_Copy` and
+    `bytes_getnewargs` calls `PyBytes_FromStringAndSize`, which are the very
+    two functions being modelled. That also settles which results land back
+    in a shared cell -- the empty str, the empty bytes, the 256 one-octet
+    bytes -- without restating one of those rules here, and it is the same
+    oracle the compiled runtimes' `apy_str_fresh` and `apy_bytes_copy` are
+    written against. Measured: `"".__getnewargs__()[0] is ""` is True and
+    `"a".__getnewargs__()[0] is "a"` is False.
+
+    A BYTEARRAY IS LEFT ALONE: it is written into, so a method handing one
+    back is a different bug, and it has no `__getnewargs__` to copy with.
+    """
+    if isinstance(self, Instance) and out is self.held \
+            and isinstance(out, (str, bytes)) \
+            and not isinstance(out, bytearray):
+        return out.__getnewargs__()[0]
+    return out
+
+
+def _inst_text_handle(h, self, out):
+    """`_inst_text_result` for a tail that answers a HANDLE rather than a
+    value.
+
+    THE HANDLE IS KEPT WHEN NOTHING WAS COPIED, which is not the same as
+    handing the object back through `_value`: these tails sit under every
+    call of their shape, and a result that was not copied must reach the
+    caller as the very handle the operation answered.
+
+    AND THROUGH `_value` AND NOT `_new` WHEN ONE WAS, because a copy may
+    itself be a shared cell: `_PyUnicode_Copy("")` is the empty string every
+    other holder of it already has a handle for, and a fresh handle for it
+    would make `S("")[:] is ""` False here and True everywhere else.
+    """
+    if not out:
+        return out
+    got = h._get(out, "apy_inst_text_result")
+    made = _inst_text_result(self, got)
+    return out if made is got else h._value(made)
+
+
 def _apy_str_self_of(h, a):
     """Is this a str or bytes receiver? Raises naming the method if not.
 
@@ -3754,7 +3850,17 @@ def _apy_str(h, a):
     # the receiver back and so do both compiled runtimes -- and `_text`
     # already returns the same object, so a fresh handle for it was the
     # whole of the difference. See `_value` for why one handle per object.
-    return _user(h, lambda: h._value(h._text(h._get(a[0], "apy_str"), False)))
+    #
+    # AND A FRESH PLAIN str FOR A SUBCLASS, which is the same rule read the
+    # other way: `Instance.__str__` answers `str(self.held)` and `str()` of an
+    # exact str IS that str, so this handed back the cell INSIDE the instance
+    # -- shared by every instance built from one literal, so
+    # `str(S("ab")) is str(S("ab"))` was True where CPython says False. See
+    # `_inst_text_result`.
+    def run():
+        v = h._get(a[0], "apy_str")
+        return h._value(_inst_text_result(v, h._text(v, False)))
+    return _user(h, run)
 
 
 def _apy_print_with(h, a):
@@ -3921,7 +4027,12 @@ def _apy_getitem(h, a):
                     return _user(h, lambda: h._value(
                         seq._send("__missing__", index)))
                 return h._fail("KeyError", h._text(index, True))
-            return _apy_getitem(h, [h._new(seq.held), a[1]])
+            # AND `s[:]` OVER A SUBCLASS ANSWERS A FRESH PLAIN str. A whole
+            # slice of an exact str IS that str, and the str reached here is
+            # the one INSIDE the instance -- shared by every instance built
+            # from the same literal. See `_inst_text_result`.
+            return _inst_text_handle(
+                h, seq, _apy_getitem(h, [h._new(seq.held), a[1]]))
         return _user(h, lambda: h._value(seq[index]))
     if isinstance(seq, dict):
         return _dict_get(h, seq, index)
@@ -4442,15 +4553,52 @@ def _apy_format(h, a):
     # A user object formats ITSELF, and is asked BEFORE the empty-spec
     # shortcut: `f"{obj}"` is `format(obj, "")`, which calls `__format__("")`
     # and not `str(obj)`. A class defining both can tell the difference.
+    #
+    # EXCEPT AN INSTANCE OF `object` ITSELF, whose class is the one that
+    # carries `object`'s own `__format__` -- which is this function. It is in
+    # that dict because `dir(object)` is the dict's keys, and asking it here
+    # would be asking this function again with no base case. `object` is not a
+    # real base on anything (see `_apy_object_class`), so a plain `object()`
+    # is the whole of what this excludes, and for one of those
+    # `object.__format__` means exactly what the rest of this body does.
     if isinstance(v, Instance):
-        try:
-            got = v._send("__format__", spec)
-        except _UserFailed:
-            return 0
-        if h.err is not None:
-            return 0
-        if got is not NotImplemented:
-            return h._value(got)
+        if v.cls is not _object_root(h):
+            try:
+                got = v._send("__format__", spec)
+            except _UserFailed:
+                return 0
+            if h.err is not None:
+                return 0
+            if got is not NotImplemented:
+                return h._value(got)
+        # AND `object.__format__` REFUSES A NON-EMPTY SPEC, which is the
+        # whole of what tells it apart from `str(self)`.
+        # `object___format___impl` (Objects/typeobject.c) is four lines:
+        # when the spec has any length at all it raises `TypeError:
+        # unsupported format string passed to <type>.__format__`, naming
+        # `Py_TYPE(self)->tp_name`, and otherwise it calls `PyObject_Str`.
+        # Measured against CPython 3.14 with `class C: pass` -- `format(c,
+        # ">30")`, `format(c, "s")`, `f"{c:>300}"` and `"{:>300}".format(c)`
+        # are all that one TypeError, where this answered the INSTANCE ITSELF
+        # for a width the repr already exceeds and a padded repr otherwise.
+        #
+        # AN INSTANCE HOLDING A BUILTIN IS NOT ONE OF THESE and is why
+        # `held` is asked: `class S(str)` reaches `str.__format__`, which
+        # takes the whole mini-language, and the block below is that. A
+        # plain instance is the one that has `object`'s own.
+        #
+        # THE `object()` CASE IS WHY THE GUARD ABOVE IS NOW ONLY OVER THE
+        # HOOK. Widening `object`'s dict to the twenty-four names
+        # `dir(object)` answers gave `object()` a class that provides
+        # `__format__`, so asking it here would ask this function again --
+        # but skipping the WHOLE instance block, which is what the guard
+        # first did, let an `object()` with a spec fall through to code that
+        # has no arm for an instance and `format(object(), ">30")` trapped on
+        # a null. The C says the same thing in `apy_format`, where the guard
+        # has always been over the hook alone.
+        if spec and v.held is None:
+            return h._fail("TypeError", "unsupported format string passed "
+                                        f"to {h.kind_name(v)}.__format__")
         # A SUBCLASS OF str, FORMATTED BY str's OWN CODE, and the two spec
         # cases do not agree -- which is CPython's asymmetry and not a
         # tidiness to smooth over. Measured over thirteen specs:
@@ -4473,19 +4621,47 @@ def _apy_format(h, a):
         # the very object it was handed, so identity says exactly whether
         # that path was taken and equality would also catch a padded result
         # that happened to compare equal.
+        #
+        # AND `text` MUST NOT BE EMPTY, which is the one case where
+        # `made is text` is True for a reason that has nothing to do with
+        # the writer. `_PyUnicodeWriter_WriteStr` (Objects/unicodeobject.c)
+        # opens with `if (len == 0) return 0;`, so an EMPTY text is written
+        # nowhere and adopted by nothing; the writer finishes at `pos == 0`
+        # and `_PyUnicodeWriter_Finish` answers `unicode_empty`. That the
+        # answer then happens to be `text` again is only because both are
+        # the one empty string. Measured against CPython 3.14, with
+        # `xe = S("")`:
+        #     format(xe, ">0") is xe -> False, kind str
+        #     format(xe, ">0") is "" -> True
+        # and the same for `"{:>0}".format(xe)`, `f"{xe:>0}"` and
+        # `"%0s" % xe`. Without this the instance came back, subclass type
+        # and all, on the interpreter alone.
         text = h._text(v, False)
         try:
             made = format(text, spec)
         except _HOST_RAISES as exc:
             return h._fail_like(exc)
-        if spec and made is text:
+        if spec and text and made is text:
             return a[0]
         # A COPY, AND A DISTINCT ONE PER CALL: `format(x)` and `format(y)`
         # for two instances holding the same interned text are two objects in
-        # CPython. `_new` is what makes two of them -- `_value` would answer
-        # the one handle the held string already has, and both calls would
-        # come back the same object.
-        return h._new(made)
+        # CPython.
+        #
+        # A FRESH HANDLE IS NOT A DIFFERENT OBJECT, which is what this said
+        # and what the measurement contradicted: `_new` did hand back two
+        # handles, and `format(x) is format(y)` was still True here. Every
+        # value returned through a call goes back through `_value` -- see
+        # `_value`, and task 149 -- so two handles for one Python object
+        # collapse onto the interned one the moment either crosses a return.
+        # The object has to differ, so the COPY has to be a real one, and
+        # `_inst_text_result` is where that copy is made and explained.
+        #
+        # AND THROUGH `_value` ONCE IT IS A REAL COPY, because the copy of an
+        # EMPTY one is the shared empty string -- that is `_PyUnicode_Copy`'s
+        # single special case -- and `format(S("")) is ""` is True in CPython
+        # and on both compiled paths. `_new` minted a second handle for it and
+        # answered False.
+        return h._value(_inst_text_result(v, made))
     if not spec:
         # THROUGH `_value`: `format(s)` IS `s` for an exact str, and `_new`
         # minted a second handle for the receiver's own object, so `format(s)
@@ -5204,9 +5380,34 @@ def _apy_object_class(h, a):
     if made is not None:
         return made
     cls = Class("object")
+    # THE DICT IS THE ANSWER TO `dir(object)`. CPython's `dir` over a class is
+    # the merge of its MRO's dicts and `object`'s MRO is itself, so the two
+    # questions are one question -- and this filled SEVEN of the twenty-four
+    # names 3.14 answers, while the compiled halves filled ten. Nothing on
+    # either list was wrong; what was missing was the rest, so one question
+    # had three answers and none of them was CPython's.
+    #
+    # TWENTY-TWO ARE FILLED HERE, each through `_object_default`. `__doc__`
+    # is the twenty-third and is set below, because it is TEXT and not a
+    # method that function could answer. `__class__` is the twenty-fourth and
+    # is in no dict at all -- see `_apy_dir`.
     for nm in ("__init__", "__new__", "__repr__", "__str__", "__eq__",
-               "__ne__", "__hash__"):
+               "__ne__", "__hash__", "__getattribute__", "__setattr__",
+               "__delattr__", "__init_subclass__",
+               "__lt__", "__le__", "__gt__", "__ge__", "__format__",
+               "__dir__", "__sizeof__", "__subclasshook__", "__getstate__",
+               "__reduce__", "__reduce_ex__"):
         cls.dict[nm] = _object_default(h, nm)
+    # PEP 257, AND THE TEXT IS CPYTHON'S OWN. The generated doc table is keyed
+    # by the KINDS this runtime models and `object` is not one of them, so the
+    # string is written out rather than looked up -- it is `object.__doc__` in
+    # 3.14, copied verbatim. Both readers find it: the class through its dict,
+    # and `object()` through its class.
+    cls.dict["__doc__"] = (
+        "The base class of the class hierarchy.\n"
+        "\n"
+        "When called, it accepts no arguments and returns a new featureless\n"
+        "instance that has no instance attributes and cannot be given any.\n")
     made = h._new(cls)
     h._defaults["<object>"] = made
     return made
@@ -5457,11 +5658,23 @@ def _maketrans_mapping(h, table):
                                     "maketrans it must be a dict")
     out = {}
     for key, value in table.items():
-        if isinstance(key, str):
-            if len(key) != 1:
+        # A str SUBCLASS IS A STRING KEY. CPython's loop runs
+        # `PyUnicode_Check` -- the SUBCLASS-ADMITTING check, not
+        # `PyUnicode_CheckExact` -- and then `PyUnicode_READ_CHAR`, which
+        # reads the same C-level layout a subclass has, so
+        # `str.maketrans({S("a"): "z"})` is `{97: 'z'}` for `class S(str)`.
+        # Measured against CPython 3.14; `scratchpad/probes/d179adv.py`.
+        # Reaching the held text here is what `_held_text` is for, and it
+        # must come BEFORE the integer test rather than instead of it: an
+        # instance of a class extending BYTES unwraps to bytes, which is not
+        # a string key and not an integer one either, so it still lands on
+        # the TypeError below.
+        text = _held_text(key)
+        if isinstance(text, str):
+            if len(text) != 1:
                 return h._fail("ValueError", "string keys in translate "
                                              "table must be of length 1")
-            out[ord(key)] = value
+            out[ord(text)] = value
         elif _is_int_like(key):
             # KEPT AS THE OBJECT IT IS, not narrowed to an int. CPython's
             # `unicode_maketrans_impl` stores an integer key straight into
@@ -6685,7 +6898,16 @@ def _binop(name, op, sym):
                     if bad is not None:
                         return bad
                     try:
-                        return _result(h, op(bx, by))
+                        # AND A NO-OP OVER A SUBCLASS ANSWERS A FRESH PLAIN
+                        # ONE. `s * 1` and `s + ""` hand the receiver straight
+                        # back, and the receiver this step handed in is the
+                        # str INSIDE the instance -- which two instances built
+                        # from one literal SHARE. Either operand may be the
+                        # instance, so both are asked; the outer test sees the
+                        # inner's copy and stops. See `_inst_text_result`.
+                        got = op(bx, by)
+                        return _result(h, _inst_text_result(
+                            x, _inst_text_result(y, got)))
                     except _UserFailed:
                         return 0
                     except TypeError as e:
@@ -8953,8 +9175,21 @@ def _kind_attr(h, obj, want: str):
         # THE SPEC MINI-LANGUAGE IS `_apy_format`'s, not a second copy of it
         # -- and its answer is a handle, which this body must hand back
         # unwrapped because the caller wraps what it gets.
-        return made("__format__", lambda spec: h._get(
-            _apy_format(h, [h._new(obj), h._new(spec)]), "__format__"))
+        # A REFUSED SPEC IS A REPORT AND NOT A NULL TO READ. `_apy_format`
+        # answers 0 with the error flag up -- for an invalid spec, for a
+        # code the kind does not take, and now for `object`'s own
+        # `__format__` over a non-empty spec -- and handing that 0 to
+        # `_get` trapped the interpreter outright: `(3).__format__("zz")`
+        # died where CPython raises `ValueError: Unknown format code 'z'`.
+        # `_UserFailed` is how every other body here stops on a flag that
+        # is already set; see `_unbound_kind`.
+        def _formatted(spec):
+            got = _apy_format(h, [h._new(obj), h._new(spec)])
+            if not got:
+                raise _UserFailed
+            return h._get(got, "__format__")
+
+        return made("__format__", _formatted)
     if want in _RICH_COMPARISONS:
         return made(want, lambda o, _w=want: _rich_compare(h, _w, obj, o))
     # AND THE TWELVE `object` HANDS DOWN THAT NOTHING OVERRIDES. Every one
@@ -9175,15 +9410,28 @@ def _kind_attr(h, obj, want: str):
             # CPython's answer for a freshly built one is its length plus the
             # terminator, and nought for an empty one, which holds no buffer.
             return made("__alloc__", lambda: len(obj) + 1 if obj else 0)
-    # WHAT `copy` AND `pickle` REBUILD A VALUE FROM. Every immutable builtin
-    # answers `(self,)` -- a complex answers its two halves -- and a mutable
-    # one has none at all, because anything it handed back would be SHARED
-    # with the copy rather than rebuild it.
+    # WHAT `copy` AND `pickle` REBUILD A VALUE FROM. A mutable builtin has
+    # none at all, because anything it handed back would be SHARED with the
+    # copy rather than rebuild it; an immutable one answers a COPY of itself,
+    # and a complex answers its two halves as floats.
+    #
+    # A COPY AND NOT `(obj,)`, which is what this said. CPython's bodies copy
+    # -- `PyUnicode_Copy`, `PyBytes_FromStringAndSize`, `_PyLong_Copy`, a
+    # fresh float -- and only `tuple_getnewargs` shares, so
+    # `"abc".__getnewargs__()[0] is "abc"` is False there and was True here.
+    #
+    # CPYTHON'S OWN METHOD IS THE COPY. The values this interpreter holds ARE
+    # CPython objects, so the oracle for both the copying and the five places
+    # the copy lands back in a shared cell -- the empty str, the empty bytes,
+    # the 256 one-octet bytes, a small int, and a tuple, which is shared
+    # outright -- is the very method being modelled. Restating those five
+    # rules here is how the two would drift apart. The result travels back
+    # through `Host._value`, which gives one handle per object: a copy gets
+    # its own and a shared cell gets the one every other holder of it has,
+    # with nothing here having to say which is which.
     if want == "__getnewargs__" and isinstance(obj, (str, bytes, tuple, int,
                                                      float, complex)):
-        if is_complex:
-            return made("__getnewargs__", lambda: (obj.real, obj.imag))
-        return made("__getnewargs__", lambda: (obj,))
+        return made("__getnewargs__", lambda: obj.__getnewargs__())
     # `bytes(x)` ASKS `x` FOR ITSELF FIRST, and bytes is the kind that
     # answers -- a bytearray does not, which is why `bytes(ba)` copies.
     if want == "__bytes__" and isinstance(obj, bytes):
@@ -9318,6 +9566,15 @@ def _object_new_of(h):
     return _new
 
 
+def _object_root(h):
+    """The one `object` class cell, as a value rather than a handle.
+
+    WHAT A RECEIVER IS COMPARED AGAINST when a rule has to tell `object`'s own
+    default from something a class really overrode. See `_apy_dir`.
+    """
+    return h._get(_apy_object_class(h, []), "apy_object_class")
+
+
 def _object_default(h, name: str):
     """`object`'s own version of a dunder, as a callable value.
 
@@ -9353,6 +9610,71 @@ def _object_default(h, name: str):
         # Every class has one, and a user hook ends by calling it: `object`'s
         # is the no-op that terminates the chain.
         body = lambda *a, **kw: None
+    elif name == "__getattribute__":
+        # THE DEFAULT LOOKUP AND NOT `_apy_getattr`, which asks the class for
+        # an override first: `object.__getattribute__(self, n)` inside such an
+        # override is the only way out of that recursion, which is what a
+        # class defining one writes it for. The compiled halves say the same
+        # thing with `apy_default_getattr`.
+        body = lambda obj, n: _unwrap(
+            h, _apy_default_getattr(h, [h._new(obj), h._new(n)]))
+    elif name == "__setattr__":
+        body = lambda obj, n, v: _unwrap(
+            h, _apy_default_setattr(h, [h._new(obj), h._new(n), h._new(v)]))
+    elif name == "__delattr__":
+        body = lambda obj, n: _unwrap(
+            h, _apy_default_delattr(h, [h._new(obj), h._new(n)]))
+    elif name in ("__lt__", "__le__", "__gt__", "__ge__",
+                  "__subclasshook__"):
+        # FIVE THAT `object` DOES NOT DEFINE, and whose answer is therefore
+        # NotImplemented whatever they are given. `object_richcompare` has a
+        # case for Py_EQ and one for Py_NE and none at all for the four
+        # orderings, so they fall straight through -- `object.__lt__(1, 2)`
+        # is NotImplemented in CPython and NOT False, because a program
+        # writing it is asking `object` and not `int`. `__subclasshook__` is
+        # the same answer for the same reason: `object` vouches for no
+        # subclass, and it is `ABCMeta` that overrides it.
+        #
+        # ROUTING THESE THROUGH `_kind_attr` BELOW WAS THE BUG. That is the
+        # RECEIVER's table, so `object.__lt__(1, 2)` became int's `<` and
+        # answered True. The distinction is the whole point of reaching a
+        # method through `object` rather than through the value.
+        body = lambda *a: NotImplemented
+    elif name == "__format__":
+        # `object.__format__` KNOWS NO MINI-LANGUAGE. An empty spec answers
+        # `str(self)` and ANY other spec is a TypeError naming the receiver's
+        # type: `object.__format__(5, "03d")` is `unsupported format string
+        # passed to int.__format__`, not `'005'`. The formatting lives in
+        # `int.__format__`, a different method reached a different way, and
+        # handing this one to `_kind_attr` gave `object` the receiver's
+        # formatter.
+        def body(v, spec="", *rest):
+            if not isinstance(spec, str):
+                h._fail("TypeError", f"__format__() argument must be str, "
+                                     f"not {h.kind_name(spec)}")
+                raise _UserFailed
+            if spec == "":
+                return h._text(v, False)
+            h._fail("TypeError", f"unsupported format string passed to "
+                                 f"{h.kind_name(v)}.__format__")
+            raise _UserFailed
+    elif name in _OBJECT_ARITY:
+        # AND THE SIX WITH NO BODY OF THEIR OWN -- `__dir__`, `__sizeof__`,
+        # `__getstate__` and the two pickle hooks. Every one of them already
+        # has a body, in `_kind_attr`, which is where a builtin VALUE reaches
+        # it; what was missing was a value naming it from `object`. Writing
+        # them out again here would be a second copy of answers that have to
+        # stay the same as the first, so the receiver is looked up through
+        # the one that exists -- and for THESE that is right, because
+        # `object.__sizeof__(x)` really is `x`'s size. The six above are the
+        # ones for which it is not.
+        #
+        # UNBOUND, because `object.__sizeof__(x)` writes its receiver out:
+        # the reader binds one of these when it finds it on a class, exactly
+        # as it binds the ones above. `_OBJECT_ARITY` is the table of which
+        # names those are, and is the same list `apy_object_arity` holds for
+        # the compiled halves.
+        body = _unbound_kind(h, name)
     else:
         return None
     made = Native(name, body)
@@ -12111,7 +12433,16 @@ def _apy_dir(h, a):
     must not make it appear twice.
     """
     v = h._get(a[0], "apy_dir")
-    if isinstance(v, Instance) and v.cls.find("__dir__") is not None:
+    # EXCEPT FOR AN INSTANCE OF `object` ITSELF. `object`'s own `__dir__` IS
+    # this computation and not an override of it; it sits in `object`'s dict
+    # because `dir(object)` is that dict's keys, and `object()` finds it there
+    # through its class -- so asking it is asking this function again, with no
+    # base case. `object` is not installed as a real base on anything (see
+    # `_apy_object_class`), so a plain `object()` is the whole of what this
+    # excludes. CPython draws the same line: `object.__dir__` is a separate
+    # body that builds the list rather than calling `dir`.
+    if (isinstance(v, Instance) and v.cls is not _object_root(h)
+            and v.cls.find("__dir__") is not None):
         got = _user(h, lambda: v._send("__dir__"))
         if got == 0:
             return 0
@@ -12121,12 +12452,25 @@ def _apy_dir(h, a):
         for n in seq:
             if n not in names:
                 names.append(n)
-    if isinstance(v, Instance):
-        add(v.dict)
-        cls = v.cls
+    # `object`'s TWENTY-FOURTH NAME, ADDED WHERE THE CHAIN REACHES IT.
+    # `__class__` is the one of the twenty-four that is not an entry in
+    # `object`'s dict: it is answered from a RULE here -- `type(x)`, for every
+    # kind there is -- rather than from storage, so the dict has nothing to
+    # list and `dir(object)` came back one short of CPython's. Storing the
+    # `type` cell under that key instead would answer `type` for
+    # `object().__class__`, which CPython says is `object`: CPython's entry is
+    # a getset called with whoever asked, and one plain slot cannot be both
+    # answers.
+    root = h._get(_apy_object_class(h, []), "apy_dir")
+    def walk(cls):
         while isinstance(cls, Class):
             add(cls.dict)
+            if cls is root:
+                add(["__class__"])
             cls = cls.base
+    if isinstance(v, Instance):
+        add(v.dict)
+        walk(v.cls)
     elif (isinstance(v, Class) and not v.dict and v.base is None
             and v.meta is None and v.name in KIND_DIR):
         # A CLASS `_type_of` MINTED reads its KIND's row rather than a class
@@ -12136,10 +12480,7 @@ def _apy_dir(h, a):
         # below. See `apy_dir`.
         add(KIND_DIR[v.name])
     elif isinstance(v, Class):
-        cls = v
-        while isinstance(cls, Class):
-            add(cls.dict)
-            cls = cls.base
+        walk(v)
     elif h.kind_name(v) in KIND_DIR:
         # A BUILT-IN KIND, READ OUT OF THE GENERATED TABLE -- the same one
         # the compiled runtimes read, rather than live CPython. Asking
@@ -13427,12 +13768,19 @@ _STR_METHOD_SPEC = (
 def _apy_str_like(h, a):
     """Re-tag a str method's result to match its receiver.
 
-    A no-op here: the host calls Python's own methods, so a bytes receiver
-    already answers bytes. The binding exists because the frontend emits the
-    call for the C, which shares one implementation between the two kinds and
-    has to put the tag back.
+    THE RE-TAG IS a no-op here: the host calls Python's own methods, so a
+    bytes receiver already answers bytes. The binding exists because the
+    frontend emits the call for the C, which shares one implementation
+    between the two kinds and has to put the tag back.
+
+    THE SUBCLASS COPY IS NOT A NO-OP, and this is where it goes on every
+    path. The frontend hands this the receiver the PROGRAM wrote, still
+    wrapped, which makes it the only point on the method route that can still
+    see a `class S(str)` -- `apy_method_self` unwrapped it before the method
+    ran. See `_inst_text_result`, and `apy_inst_text_result` in
+    `objects/c/_core.py` for the same tail on the compiled side.
     """
-    return a[1]
+    return _inst_text_handle(h, h._get(a[0], "apy_str_like"), a[1])
 
 
 def _is_iterator(got) -> bool:

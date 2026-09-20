@@ -60,7 +60,10 @@ APY_API apy_value apy_native_of(int64_t sel, int64_t arity,
     return apy_native((int)sel, arity, (const char *)name);
 }
 static apy_value apy_native(int sel, int64_t arity, const char *name) {
-    static apy_value made[APY_NAT_GEN_CLOSE + 1];
+    /* SIZED BY THE LAST MEMBER, and `runtime/makers.py`'s
+       `apy_nat_count` must say the same number -- the IR keeps its own
+       copy of this cache and indexes it by the same selector. */
+    static apy_value made[APY_NAT_OBJ_ONLY + 1];
     apy_obj *o;
     /* INTERNED PER SELECTOR, so `super().__init__` reached twice is one
        object as any other attribute would be -- EXCEPT for the one selector
@@ -68,7 +71,8 @@ static apy_value apy_native(int sel, int64_t arity, const char *name) {
        built first and every builtin protocol method then behaved as that one.
        A fresh object there is also what CPython answers: `[].append is
        [].append` is False. */
-    if (sel != APY_NAT_KIND && made[sel]) return made[sel];
+    if (sel != APY_NAT_KIND && sel != APY_NAT_OBJ_ONLY && made[sel])
+        return made[sel];
     o = apy_alloc(APY_FUNC_K);
     o->v.fn.code = 0;
     o->v.fn.native = sel;
@@ -81,8 +85,15 @@ static apy_value apy_native(int sel, int64_t arity, const char *name) {
        check further down fills a missing trailing slot from `defaults` and
        then insists the count matches exactly, so an omitted argument was an
        arity error naming a method the program never declared. */
+    /* AND `object.__init_subclass__()` IS WRITTEN WITH NO ARGUMENT AT ALL.
+       CPython's is a classmethod, so the class is already bound and the
+       empty call is the whole spelling; the class-creation path here hands
+       the class over explicitly instead, so the slot is OPTIONAL rather than
+       absent. The body answers None whichever way it is reached, and without
+       this the two spellings disagreed: `object.__init_subclass__()` was an
+       arity error on the compiled halves and None in the interpreter. */
     if (sel == APY_NAT_BUILTIN_INIT || sel == APY_NAT_BUILTIN_NEW
-            || sel == APY_NAT_NEW) {
+            || sel == APY_NAT_NEW || sel == APY_NAT_INIT_SUBCLASS) {
         static apy_value absent[1];
         absent[0] = apy_none();
         o->v.fn.ndefaults = 1;
@@ -459,10 +470,26 @@ APY_API apy_value apy_builtin_new(apy_value type_name, int64_t kind,
    `hasattr` says about classes that define none of them. */
 APY_API apy_value apy_object_class(void) {
     static apy_value cls = 0;
+    /* THE DICT IS THE ANSWER TO `dir(object)`. CPython's `dir` over a class
+       is the merge of its MRO's dicts and `object`'s MRO is itself, so the
+       two questions are one question -- and this list held ten of the
+       twenty-four names 3.14 answers. Nothing on it was wrong; fourteen were
+       absent, so `dir(object)` was a list that under-reported by more than
+       half and `object.__sizeof__` was an AttributeError about an attribute
+       every value in the language carries.
+
+       TWENTY-TWO ARE HERE, each through `apy_object_default`. `__doc__` is
+       the twenty-third and is set below, because it is TEXT and not a method
+       that function could answer. `__class__` is the twenty-fourth and is in
+       no dict at all -- see `apy_dir`. */
     static const char *names[] = {"__init__", "__new__", "__repr__", "__str__",
                                   "__eq__", "__ne__", "__hash__",
                                   "__getattribute__", "__setattr__",
-                                  "__delattr__"};
+                                  "__delattr__", "__init_subclass__",
+                                  "__lt__", "__le__", "__gt__", "__ge__",
+                                  "__format__", "__dir__", "__sizeof__",
+                                  "__subclasshook__", "__getstate__",
+                                  "__reduce__", "__reduce_ex__"};
     size_t i;
     if (cls) return cls;
     cls = apy_type_new(apy_lit("object"), 0);
@@ -470,6 +497,18 @@ APY_API apy_value apy_object_class(void) {
         apy_dict_set(O(cls)->v.t.dict, apy_name(names[i]),
                      apy_object_default(
                          (apy_value)(uintptr_t)names[i]));
+    /* PEP 257, AND THE TEXT IS CPYTHON'S OWN. The generated doc table is
+       keyed by the KINDS this runtime models and `object` is not one of
+       them, so the string is written out here rather than looked up -- it is
+       `object.__doc__` in 3.14, copied verbatim. Both readers find it: the
+       class through its dict, and `object()` through its class. */
+    apy_dict_set(O(cls)->v.t.dict, apy_name("__doc__"),
+                 apy_lit("The base class of the class hierarchy.\n"
+                         "\n"
+                         "When called, it accepts no arguments and returns a "
+                         "new featureless\n"
+                         "instance that has no instance attributes and cannot "
+                         "be given any.\n"));
     return cls;
 }
 
@@ -773,7 +812,12 @@ APY_API int64_t apy_object_arity(apy_value wantv) {
     if (strcmp(want, "__setattr__") == 0) return 3;
     if (strcmp(want, "__delattr__") == 0) return 2;
     if (strcmp(want, "__init_subclass__") == 0) return 1;
-    if (strcmp(want, "__subclasshook__") == 0) return 2;
+    /* ONE, NOT TWO. `object.__subclasshook__` is a CLASSMETHOD in CPython,
+       so the class is already bound and `object.__subclasshook__(int)` is
+       the whole spelling -- measured: nought arguments and two are both
+       "takes exactly one argument". Declared as two, the ordinary call was
+       an arity error about a method the program had written correctly. */
+    if (strcmp(want, "__subclasshook__") == 0) return 1;
     if (strcmp(want, "__dir__") == 0) return 1;
     if (strcmp(want, "__sizeof__") == 0) return 1;
     if (strcmp(want, "__reduce__") == 0) return 1;
@@ -1747,6 +1791,38 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
        existed as runtime behaviour with nothing naming them, so a program
        that ASKS -- and `enum` asks, to tell a member from a method -- got
        False for a descriptor. */
+    case APY_NAT_OBJ_ONLY: {
+        /* WHAT `object` ITSELF SAYS, which for five of the six is "nothing".
+           `object_richcompare` has a case for Py_EQ and Py_NE and none for
+           the four orderings, so they fall through to NotImplemented however
+           they are called -- `object.__lt__(1, 2)` is NotImplemented in
+           CPython and not False, and a program that writes it is asking
+           `object` and not `int`. `__subclasshook__` is the same answer for
+           the same reason: `object` vouches for no subclass, and it is ABCMeta
+           that overrides it.
+
+           `__format__` IS THE ONE WITH A BODY, and it is two lines: an empty
+           spec answers `str(self)`, and any other spec is a TypeError naming
+           the RECEIVER's type -- `object.__format__(5, "03d")` is
+           `unsupported format string passed to int.__format__`, NOT `'005'`.
+           The formatting belongs to `int.__format__`, which is a different
+           method reached a different way; `object`'s knows no mini-language
+           at all. */
+        const char *w = APY_CSTR(O(f)->v.fn.name);
+        if (strcmp(w, "__format__") != 0)
+            return apy_notimplemented();
+        if (n < 2) return apy_fail("TypeError",
+                                   "__format__() takes exactly one argument "
+                                   "(0 given)");
+        if (O(a[1])->kind != APY_STR_K)
+            return apy_fail2("TypeError",
+                             "__format__() argument must be str, not %s%s",
+                             apy_kind_name(a[1]), "");
+        if (O(a[1])->v.s.n == 0) return apy_str(a[0]);
+        return apy_fail2("TypeError",
+                         "unsupported format string passed to %s.__format__%s",
+                         apy_kind_name(a[0]), "");
+    }
     case APY_NAT_KIND: {
         /* ONE SELECTOR FOR THE LOT, dispatched on the name it carries: the
            bodies are all one existing runtime entry point, and a selector per
@@ -1906,14 +1982,44 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
             return apy_fail2("TypeError", "cannot pickle '%s' object%s",
                              apy_kind_name(a[0]), "");
         /* AND THE SEVEN A PARTICULAR KIND CARRIES, which `apy_kind_attr_of`
-           gates -- so a name reaching here already belongs to the receiver
-           and nothing below needs to ask which kind it is twice. */
+           gates for every read written as an attribute -- so a name reaching
+           here NORMALLY belongs to the receiver.
+
+           NORMALLY AND NOT ALWAYS, which is worth saying because a body
+           below read it as always. A builtin type reached through a variable
+           -- `C = str; C.__getnewargs__(x)` -- calls straight through with
+           no receiver check, so any kind at all can arrive. Measured on both
+           compiled paths. A body here may therefore not ASSUME its receiver
+           is one the gate would have allowed; it must at worst do nothing
+           harmful to one that is not. */
         if (strcmp(w, "__getnewargs__") == 0) {
-            /* WHAT `copy` AND `pickle` REBUILD A VALUE FROM. `(self,)` for
-               every immutable kind, because handing the value back IS the
-               argument that remakes it -- and a complex is the one that
-               rebuilds from two numbers rather than from itself. */
+            /* WHAT `copy` AND `pickle` REBUILD A VALUE FROM, and it is a
+               COPY rather than the receiver for every kind but one. This
+               answered `(self,)` for all of them, which is a different
+               claim: `"abc".__getnewargs__()[0] is "abc"` is False in
+               CPython and was True on all three paths here.
+
+               CPython's five bodies, measured kind by kind against 3.14 and
+               then read: `unicode_getnewargs` calls `PyUnicode_Copy`,
+               `bytes_getnewargs` builds with `Py_BuildValue("(y#)", ...)`,
+               `long_getnewargs` calls `_PyLong_Copy`, `float_getnewargs`
+               builds with `Py_BuildValue("(d)", ...)` -- and
+               `tuple_getnewargs` is the ONE that shares, because its
+               `tupleslice(v, 0, Py_SIZE(v))` hands an exact tuple straight
+               back rather than slicing it.
+
+               THE COPY GOES THROUGH THE ORDINARY CONSTRUCTOR, so the shared
+               cells come out right by themselves and nothing here has to
+               name one: `apy_from_int` re-interns a small integer exactly as
+               `_PyLong_Copy` does, and `apy_bytes_copy` answers the empty
+               and the 256 one-octet cells exactly as
+               `PyBytes_FromStringAndSize` does. STR IS THE EXCEPTION, and
+               `apy_str_fresh` is where the difference is explained:
+               `PyUnicode_New` shares the empty string ALONE, so a copy of
+               `"a"` is a fresh object where this runtime's own funnel would
+               answer the shared cell. */
             apy_value out = apy_tuple_new(2);
+            apy_value one;
             if (!out) return 0;
             if (O(a[0])->kind == APY_COMPLEX_K) {
                 if (!apy_seq_push(out, apy_from_float(O(a[0])->v.z.re)))
@@ -1922,7 +2028,77 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
                     return 0;
                 return out;
             }
-            if (!apy_seq_push(out, a[0])) return 0;
+            switch (O(a[0])->kind) {
+            case APY_STR_K:
+                one = apy_str_fresh(O(a[0])->v.s.p, O(a[0])->v.s.n);
+                break;
+            case APY_BYTES_K:
+                /* AND NOT A BYTEARRAY, which wears this same kind tag and is
+                   told apart from bytes by `v.s.mut` -- the test
+                   `apy_kind_attr_of`, the `__bytes__` arm above it and
+                   `apy_inst_text_result` all make, and the one this switch
+                   was missing.
+
+                   A MUTABLE RECEIVER MUST NOT COME BACK IMMUTABLE. A
+                   bytearray has no `__getnewargs__` at all in CPython, so
+                   there is no right answer to give one; handing back the
+                   receiver is what every other kind this body was never
+                   meant to see already gets, and it is what this arm did
+                   before the copy was added. Turning it into a bytes is the
+                   one answer that is worse than either, because the caller
+                   is then holding something it can no longer write to.
+
+                   AND BECAUSE `apy_bytes_copy` ANSWERS A SHARED CELL. An
+                   empty or one-octet bytearray came back as the shared empty
+                   bytes or one of the 256 one-octet cells -- measured:
+                   `C = str; C.__getnewargs__(bytearray(b"a"))[0] is b"a"`
+                   was True on both compiled paths. Nothing was re-tagged or
+                   written into, so no later literal was harmed, but handing
+                   a program one of those cells in answer to a mutable object
+                   is the first half of the way that goes wrong. */
+                if (O(a[0])->v.s.mut)
+                    one = a[0];
+                else
+                    one = apy_bytes_copy(O(a[0])->v.s.p, O(a[0])->v.s.n);
+                break;
+            case APY_BOOL_K:
+            case APY_INT_K:
+                /* AND A bool ANSWERS AN int. `_PyLong_Copy` is handed the
+                   bool's value and builds an integer out of it, so
+                   `True.__getnewargs__()` is `(1,)` -- not `(True,)`, and
+                   not the `True` object either. */
+                one = apy_from_int(O(a[0])->v.i);
+                break;
+            case APY_BIG_K:
+                one = apy_big_dup(a[0]);
+                break;
+            case APY_FLOAT_K:
+                one = apy_from_float(O(a[0])->v.f);
+                break;
+            default:
+                /* A TUPLE, the one kind CPython shares: `tuple_getnewargs`
+                   calls `tupleslice(v, 0, Py_SIZE(v))`, which hands an exact
+                   tuple straight back rather than slicing it.
+
+                   AND ANYTHING ELSE THAT REACHES HERE, which is not nothing
+                   -- `apy_kind_attr_of` is not the only door. A builtin TYPE
+                   reached through a VARIABLE calls this body with no
+                   receiver check at all: `C = str; C.__getnewargs__(x)`
+                   answers for every kind there is, where CPython raises
+                   `descriptor '__getnewargs__' for 'str' objects doesn't
+                   apply to a 'list' object`. Measured on both compiled
+                   paths, with a memoryview, a dict, a set, a frozenset,
+                   None, a range, a function, an instance, an iterator, a
+                   generator and a class, all of which land here. That gate
+                   is the one task 184 is about and it is not this body's to
+                   mend; handing the receiver back is the harmless answer and
+                   the arms above must not do anything WORSE than that to a
+                   kind they were never meant to see. */
+                one = a[0];
+                break;
+            }
+            if (!one) return 0;
+            if (!apy_seq_push(out, one)) return 0;
             return out;
         }
         if (strcmp(w, "__rmod__") == 0) return apy_notimplemented();
@@ -2178,6 +2354,36 @@ APY_API apy_value apy_object_default(apy_value wantv) {
        the no-op that terminates the chain. */
     if (strcmp(want, "__init_subclass__") == 0)
         return apy_native(APY_NAT_INIT_SUBCLASS, 1, "__init_subclass__");
+    /* AND THE ELEVEN WITH NO SELECTOR OF THEIR OWN -- the four orderings,
+       `__format__`, `__dir__`, `__sizeof__`, `__subclasshook__`,
+       `__getstate__` and the two pickle hooks. Every one of them already has
+       a body, in `APY_NAT_KIND`'s dispatch, which is where a builtin VALUE
+       reaches it; what was missing was a value naming it from `object`. A
+       selector per name would be eleven enum members that differ only in
+       which name they carry, so the name IS the selector -- and
+       `apy_object_arity` is already the table of which names `object` hands
+       down and how many slots each takes.
+
+       UNBOUND, because `object.__sizeof__(x)` writes its receiver out: the
+       reader binds one of these when it finds it on a class, exactly as it
+       binds the ten above. */
+    /* SIX OF THEM ARE NOT THE RECEIVER'S, and must not reach the dispatch
+       above. `APY_NAT_KIND` answers with the KIND's own body, which is right
+       for `__dir__`, `__sizeof__`, `__getstate__` and the two pickle hooks --
+       `object.__sizeof__(x)` IS `x`'s size -- and wrong for these, because
+       `object` does not define them at all. Routed there,
+       `object.__lt__(1, 2)` became `int.__lt__` and answered True; CPython
+       answers NotImplemented, for every pair, because `object_richcompare`
+       has no ordering case. Measured, all four: lt, le, gt, ge. */
+    if (strcmp(want, "__lt__") == 0 || strcmp(want, "__le__") == 0
+            || strcmp(want, "__gt__") == 0 || strcmp(want, "__ge__") == 0
+            || strcmp(want, "__subclasshook__") == 0
+            || strcmp(want, "__format__") == 0)
+        return apy_native(APY_NAT_OBJ_ONLY, apy_object_arity(wantv), want);
+    {
+        int64_t common = apy_object_arity(wantv);
+        if (common) return apy_native(APY_NAT_KIND, common, want);
+    }
     return 0;
 }
 

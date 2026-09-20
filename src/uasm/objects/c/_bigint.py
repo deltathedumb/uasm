@@ -210,6 +210,26 @@ static apy_obj *apy_as_big(apy_value v) {
     return apy_big_of_i64(O(v)->v.i);
 }
 
+/* THE SAME INTEGER IN A CELL OF ITS OWN -- CPython's `_PyLong_Copy`, which is
+   the whole of what `int.__getnewargs__` hands back (Objects/longobject.c).
+   Only the big half needs one: `_PyLong_Copy` re-interns a value in the small
+   range and `apy_from_int` already does exactly that, so the compact kinds
+   copy by going through the ordinary constructor.
+
+   THROUGH `apy_big_done` LIKE EVERY OTHER BIG RESULT. A copy of an already
+   normal magnitude cannot demote, so the call changes nothing here; it is
+   written because "every big leaves through `apy_big_done`" is the invariant
+   that keeps a magnitude that FITS an int64 from ever reaching a program as
+   a big, and one exception to it is how that invariant stops being true. */
+static apy_value apy_big_dup(apy_value v) {
+    apy_obj *o = apy_big_alloc(O(v)->v.big.n);
+    int64_t i;
+    o->v.big.neg = O(v)->v.big.neg;
+    for (i = 0; i < O(v)->v.big.n; i++)
+        o->v.big.limb[i] = O(v)->v.big.limb[i];
+    return apy_big_done(o);
+}
+
 /* `apy_obj *` CROSSES AS A PLAIN WORD, because the subset has no
    pointer-to-struct to declare -- see `runtime/calling.py` for where
    this first bit. The locals below give the body its names back. */

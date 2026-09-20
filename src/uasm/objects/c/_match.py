@@ -107,7 +107,15 @@ APY_API apy_value apy_sizeof(apy_value v) {
 
 APY_API apy_value apy_dir(apy_value v) {
     apy_value out, hook;
-    if (O(v)->kind == APY_INST_K
+    /* `object`'s OWN `__dir__` IS THIS COMPUTATION and not an override of
+       it. It sits in `object`'s dict because `dir(object)` is that dict's
+       keys, and `object()` finds it there through its class -- so asking it
+       is asking this function again, with no base case. `object` is not
+       installed as a real base on anything (see `apy_object_class`), so a
+       plain `object()` is the whole of what this excludes. CPython draws the
+       same line: `object.__dir__` is a separate body that builds the list
+       rather than calling `dir`. */
+    if (O(v)->kind == APY_INST_K && O(v)->v.o.cls != apy_object_class()
             && (hook = apy_class_find(O(v)->v.o.cls, apy_name("__dir__")))) {
         apy_value got = apy_call_n(apy_bind(hook, v), NULL, 0);
         if (!got) return 0;
@@ -128,6 +136,18 @@ APY_API apy_value apy_dir(apy_value v) {
             for (i = 0; i < O(cd)->v.d.n; i++)
                 if (apy_set_find(out, O(cd)->v.d.keys[i]) < 0)
                     apy_seq_push(out, O(cd)->v.d.keys[i]);
+            /* `object`'s TWENTY-FOURTH NAME, and the only one of the
+               twenty-four that is not an entry in its dict. `__class__` is
+               answered from a RULE here -- `type(x)`, for every kind there
+               is -- rather than from storage, so the dict has nothing to
+               list and `dir(object)` came back one short of CPython's.
+               Storing the `type` cell under that key instead would answer
+               `type` for `object().__class__`, which CPython says is
+               `object`: CPython's entry is a getset called with whoever
+               asked, and one plain slot cannot be both answers. */
+            if (cls == apy_object_class()
+                    && apy_set_find(out, apy_name("__class__")) < 0)
+                apy_seq_push(out, apy_name("__class__"));
             cls = O(cls)->v.t.base;
         }
     } else if (O(v)->kind == APY_TYPE_K
@@ -141,6 +161,18 @@ APY_API apy_value apy_dir(apy_value v) {
             for (i = 0; i < O(cd)->v.d.n; i++)
                 if (apy_set_find(out, O(cd)->v.d.keys[i]) < 0)
                     apy_seq_push(out, O(cd)->v.d.keys[i]);
+            /* `object`'s TWENTY-FOURTH NAME, and the only one of the
+               twenty-four that is not an entry in its dict. `__class__` is
+               answered from a RULE here -- `type(x)`, for every kind there
+               is -- rather than from storage, so the dict has nothing to
+               list and `dir(object)` came back one short of CPython's.
+               Storing the `type` cell under that key instead would answer
+               `type` for `object().__class__`, which CPython says is
+               `object`: CPython's entry is a getset called with whoever
+               asked, and one plain slot cannot be both answers. */
+            if (cls == apy_object_class()
+                    && apy_set_find(out, apy_name("__class__")) < 0)
+                apy_seq_push(out, apy_name("__class__"));
             cls = O(cls)->v.t.base;
         }
     } else {

@@ -235,11 +235,51 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
        spec is parsed and before the empty-spec shortcut: `f"{obj}"` is
        `format(obj, "")`, which calls `__format__("")` -- not `str(obj)`, and
        a class defining both can tell the difference. */
-    if (O(v)->kind == APY_INST_K) {
+    /* EXCEPT AN INSTANCE OF `object` ITSELF, whose class is the one that
+       carries `object`'s own `__format__` -- which is this function. It is
+       in that dict because `dir(object)` is the dict's keys, and asking it
+       here would be asking this function again with no base case. `object`
+       is not a real base on anything (see `apy_object_class`), so a plain
+       `object()` is the whole of what this excludes, and for one of those
+       `object.__format__` means exactly what the rest of this body does. */
+    if (O(v)->kind == APY_INST_K && O(v)->v.o.cls != apy_object_class()) {
         apy_value r = apy_method1(v, "__format__", spec);
         if (r || apy_error_occurred()) return r;
     }
-    /* An EMPTY spec is `str(v)` and nothing else. */
+    /* AND `object.__format__` REFUSES A NON-EMPTY SPEC, which is the whole of
+       what tells it apart from `str(self)`. `object___format___impl`
+       (Objects/typeobject.c) is four lines: when the spec has any length at
+       all it raises `TypeError: unsupported format string passed to
+       <type>.__format__`, naming `Py_TYPE(self)->tp_name`, and otherwise it
+       calls `PyObject_Str`. Measured against CPython 3.14 with
+       `class C: pass` -- `format(c, ">30")`, `format(c, "s")`, `format(c,
+       ".2")`, `f"{c:>300}"` and `"{:>300}".format(c)` are all that one
+       TypeError, where this answered `ValueError: Unknown format code 's'
+       for object of type 'C'` for most specs and a padded repr for `"s"`.
+
+       AN INSTANCE HOLDING A BUILTIN IS NOT ONE OF THESE and is why `held`
+       is asked: `class S(str)` reaches `str.__format__`, which takes the
+       whole mini-language, and the branch below is that. A plain instance
+       is the one that has `object`'s own.
+
+       THE `object()` CASE IS WHY THIS IS NEEDED HERE RATHER THAN LEFT TO
+       THE FALL-THROUGH. Since `object`'s dict was widened to the twenty-four
+       names `dir(object)` answers, `object()` has a class that provides
+       `__format__` -- so the hook above has to skip it or ask this function
+       again, and what it skipped into was a body with no arm for an
+       instance. The interpreter's twin of this trapped on a null. */
+    if (O(v)->kind == APY_INST_K && slen && !O(v)->v.o.held)
+        return apy_fail2("TypeError",
+                         "unsupported format string passed to "
+                         "%s.__format__%s", apy_kind_name(v), "");
+    /* An EMPTY spec is `str(v)` and nothing else, which is the whole of the
+       rule for it: `str.__format__` with an empty spec is
+       `unicode_result_unchanged`, which hands an EXACT str back and copies
+       for anything else -- and `apy_str` draws that same line for this
+       runtime, through `apy_inst_text_result`. So `format(s) is s` is True,
+       `format(x) is x` is False for a subclass instance `x`, and
+       `format(x) is "abc"` is False too rather than answering the literal
+       `x` holds. A NON-EMPTY spec parts company with all of that below. */
     if (!slen) return apy_str(v);
     if (!apy_spec_parse(sptr, slen, &sp))
         return apy_fail2("ValueError", "Invalid format specifier '%s'%s",
@@ -266,6 +306,83 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
            `"éàb"` is `"éà"`. Truncating bytes cut the `à` in half. */
         if (sp.has_precision && sp.precision < apy_str_chars(s))
             len = apy_char_to_byte(s, sp.precision);
+        /* A SPEC THAT CHANGES NOTHING ANSWERS THE RECEIVER ITSELF, and for a
+           str SUBCLASS that means the INSTANCE, subclass type and all. This
+           is the asymmetry a non-empty spec has against the empty one above
+           and it is CPython's rather than an economy taken here: an empty
+           spec goes through `PyObject_Format`'s `PyUnicode_CheckExact` fast
+           path and then copies, while a non-empty one reaches
+           `_PyUnicode_FormatAdvancedWriter`, which has no such test -- it
+           pads nothing, truncates nothing and hands the writer the object it
+           was given, and an empty writer adopts that object as its result.
+           Measured against CPython 3.14, with `x = S("abc")`:
+               format(x, "s")   is x -> True, kind S
+               format(x, ">3")  is x -> True, kind S   (three wide already)
+               format(x, "*>3") is x -> True, kind S   (a fill changes nothing)
+               format(x, ".3")  is x -> True, kind S   (nothing truncated)
+               format(x, ">5")  is x -> False, kind str (it padded)
+               format(x, ".2")  is x -> False, kind str (it truncated)
+           NOTHING TRUNCATED IS `len` UNMOVED and nothing padded is a width
+           the text already meets, which is exactly what `apy_spec_pad` would
+           decide a line later -- the test is up here because only this
+           function still knows which object the text came out of.
+
+           THE TEXT MUST BE `v`'s OWN, AND IT IS COMPARED BY CONTENT rather
+           than by pointer, which is not fussiness: `apy_str` of an instance
+           answers a FRESH COPY of the held string rather than the held
+           string itself -- `apy_inst_text_result` makes it one, so that
+           `str(x) is "abc"` is False as CPython says -- so a pointer test
+           here recognises no subclass at all and silently gives up the whole
+           rule.
+
+           A CLASS WHOSE `__str__` ANSWERS OTHER TEXT IS STILL WRONG HERE,
+           and the content test is what LIMITS the damage rather than what
+           settles the case. `_PyUnicode_FormatAdvancedWriter` never calls
+           `__str__` at all -- it formats `self`'s own text -- so with
+               class T(str):
+                   def __str__(self): return "zzz"
+           CPython 3.14 measures
+               format(T("abc"), ">3") is T("abc") -> True, kind T
+               format(T("abc"), ">5")             -> '  abc'
+           while every path here formats what `apy_str` answered and says
+               format(t, ">3") -> 'zzz', kind str;  format(t, ">5") -> '  zzz'
+           The EMPTY spec really is `str(v)` and really does say `'zzz'`, so
+           the two specs part company over more than identity. That is older
+           than this rule and is not fixed by it: the body would have to come
+           from `apy_text_like(v)` rather than from `apy_str(v)`, which is a
+           change to what every path prints and belongs with the interpreter's
+           half of it. Left as it is, on the measurement, and written down
+           here so the next reader does not take the content test for a
+           statement that this case is settled. The kind test carries the other
+           half: a bytes reaching this branch through `sp.type == 's'` is
+           formatted as the repr `apy_str` made of it and must not be handed
+           back.
+
+           AN EMPTY TEXT IS NEVER THE ANSWER, however inert the spec, and
+           that is the one place the "pads nothing, truncates nothing" rule
+           stops short of the writer. `_PyUnicodeWriter_WriteStr`
+           (Objects/unicodeobject.c) opens with `if (len == 0) return 0;` --
+           it writes nothing and adopts nothing -- so the writer reaches
+           `_PyUnicodeWriter_Finish` with `pos == 0` and that returns
+           `unicode_empty`, not the object it was handed. Measured against
+           CPython 3.14 with `xe = S("")`:
+               format(xe, ">0") is xe -> False, kind str
+               format(xe, ">0") is "" -> True
+           and the same for `"{:>0}".format(xe)`, `f"{xe:>0}"` and
+           `"%0s" % xe`. WITHOUT THIS TEST THE RULE ANSWERS `xe`, which is a
+           row these two runtimes had RIGHT before the rule was added: the
+           fall-through below ends at `apy_str_copy(body, 0)`, and that is
+           the shared empty cell already. */
+        {
+            apy_value own = apy_text_like(v);
+            if (O(own)->kind == APY_STR_K && O(s)->v.s.n > 0
+                    && len == O(s)->v.s.n
+                    && sp.width <= apy_str_chars(s)
+                    && O(own)->v.s.n == len
+                    && (own == s || memcmp(APY_CSTR(own), APY_CSTR(s),
+                                           (size_t)len) == 0))
+                return v;
+        }
         return apy_spec_pad(APY_CSTR(s), len, &sp, 0);
     }
     if (sp.type == 'b' || sp.type == 'o' || sp.type == 'x' || sp.type == 'X'
@@ -507,9 +624,10 @@ static apy_value apy_format_at(apy_value fmt, apy_value args, apy_value kw,
         }
         {
             /* One replacement field: `{field!conv:spec}`. */
+            int64_t field_at = i;
             int64_t start = ++i, colon = -1, bang = -1, depth = 0;
             char field[128], conv = 0;
-            apy_value value, spec, shown;
+            apy_value value, spec, shown, given;
             while (i < n && (p[i] != '}' || depth)) {
                 if (p[i] == '{') depth++;
                 else if (p[i] == '}') depth--;
@@ -524,7 +642,17 @@ static apy_value apy_format_at(apy_value fmt, apy_value args, apy_value kw,
                                 "Single '{' encountered in format string");
             }
             {
-                int64_t fend = colon >= 0 ? colon : (bang >= 0 ? bang : i);
+                /* THE NAME STOPS AT WHICHEVER COMES FIRST, and a `!` always
+                   comes before a `:` -- the scan above only records a bang
+                   while `colon < 0`, so the two can never be out of order.
+                   Asking the colon first meant a field wearing BOTH read its
+                   name as everything up to the colon, conversion included:
+                   `"{!s:>3}".format("abc")` looked up an argument called
+                   `!s` and died as `KeyError: '!s'` on both compiled paths,
+                   where CPython and the interpreter both answer `abc`.
+                   Neither `{!s}` nor `{:>3}` alone shows it, which is why it
+                   survived every probe until one wrote the pair. */
+                int64_t fend = bang >= 0 ? bang : (colon >= 0 ? colon : i);
                 int64_t flen = fend - start;
                 int64_t blen;
                 if (flen >= (int64_t)sizeof field) flen = sizeof field - 1;
@@ -656,6 +784,9 @@ static apy_value apy_format_at(apy_value fmt, apy_value args, apy_value kw,
                     if (!value) { free(out); return 0; }
                 }
             }
+            /* THE OBJECT THE FIELD NAMED, before any conversion runs over
+               it: what the identity rule below is allowed to hand back. */
+            given = value;
             if (bang >= 0) conv = p[bang + 1];
             if (colon >= 0) {
                 /* A NESTED spec -- `{:{width}}` -- is itself formatted first,
@@ -682,6 +813,35 @@ static apy_value apy_format_at(apy_value fmt, apy_value args, apy_value kw,
             if (!value) { free(out); return 0; }
             shown = apy_format(value, spec);
             if (!shown) { free(out); return 0; }
+            /* ONE WHOLE FIELD AND NOTHING ELSE IS `format()` ITSELF, so the
+               object it answered is the answer: `"{}".format(s)` IS `s`,
+               `"{:>3}".format(x)` IS the subclass instance `x`, and
+               `"{0.a}".format(obj)` is `obj.a`. CPython's writer is what
+               makes that so -- a field is written with
+               `_PyUnicodeWriter_WriteStr`, which for the FIRST thing written
+               into a writer with no buffer yet adopts the object as the
+               buffer and hands it back at the end. Joining anything to it,
+               even one literal character, allocates and the result is a new
+               string by construction, which is why this asks that the field
+               begin at 0 and its `}` end the string.
+
+               `shown == given` AND NOT MERELY "this was the only field":
+               what the writer adopts is the object it was handed, so only an
+               object that came THROUGH `apy_format` unchanged may be handed
+               on. It rules out `{!r}` and `{!s}` of a subclass, where the
+               conversion built a second string, and it rules out
+               `"{}".format(5)`, whose text this runtime shares a cell for
+               where CPython builds a fresh `"5"` every time. */
+            if (field_at == 0 && i + 1 == n && shown == given) {
+                free(out);
+                return shown;
+            }
+            /* THE TEXT, NOT THE INSTANCE. `apy_format` answers the receiver
+               itself for a str subclass under a spec that changes nothing,
+               and that object's payload is an instance's and not a string's
+               -- so reading it as one here would copy an object header into
+               the result. */
+            shown = apy_text_like(shown);
             while (out_n + O(shown)->v.s.n >= out_cap) {
                 out_cap = out_cap * 2 + O(shown)->v.s.n;
                 out = (char *)realloc(out, (size_t)out_cap + 1);
@@ -790,6 +950,8 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
        -- and nothing is consumed positionally, so an unused entry is not an
        error. `"ab" % {"ab": 1}` is just `"ab"`. */
     int mapping = O(right)->kind == APY_DICT_K;
+    /* THE ONE ARGUMENT THIS WHOLE FORMAT IS, or 0 -- see where it is set. */
+    apy_value lone = 0;
     supplied = many ? O(right)->v.q.n : 1;
 
     out = (char *)malloc((size_t)out_cap + 1);
@@ -797,8 +959,8 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
 
     while (i < n) {
         char spec[64];
-        int64_t sn = 0;
-        apy_value value, shown, named = 0;
+        int64_t sn = 0, conv_at = i;
+        apy_value value, shown, given, named = 0;
         char conv;
         int minus = 0, zero = 0;
 
@@ -894,6 +1056,10 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
         } else {
             value = named;
         }
+        /* THE ARGUMENT AS THE PROGRAM HANDED IT OVER, before `%s` turns it
+           into text: what the identity rule at the end of this iteration is
+           allowed to answer. */
+        given = value;
 
         /* `%s` and `%r` have no mini-language type character: the value
            becomes text FIRST and the spec then pads that text. */
@@ -961,6 +1127,35 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
         spec[sn] = 0;
         shown = apy_format(value, apy_str_copy(spec, sn));
         if (!shown) { free(out); return 0; }
+        /* ONE CONVERSION AND NOTHING ELSE HANDS THE ARGUMENT BACK: `"%s" % s`
+           IS `s` in CPython, because `%s` calls `PyObject_Str` -- which
+           answers an exact str unchanged -- and the format writer, with
+           nothing written into it yet and nothing to follow, adopts that one
+           object as its result. Measured against CPython 3.14 with
+           `s = "abc"`:
+               ("%s" % s)  is s -> True        ("%3s" % s) is s -> True
+               ("%(a)s" % {"a": s}) is s -> True
+               ("%.5s" % s) is s -> True       ("%.2s" % s) is s -> False
+               ("%5s" % s) is s -> False       ("%s%s" % (s, "")) is s -> False
+           `shown == given` carries the padding and the truncation rows
+           without repeating them: `apy_format` above has just decided the
+           same question, and it answers the object it was given only when
+           the spec changed nothing.
+
+           `%c` IS THE ONE CONVERSION THIS DOES NOT HOLD FOR, and it is not
+           an oversight of CPython's: `%c` goes through `formatchar`, which
+           writes a CHARACTER into the buffer rather than handing the writer
+           an object, so `("%c" % w) is w` is False for a one-character `w`
+           that is not latin-1 while `("%s" % w) is w` is True. For an ASCII
+           one both are True there and here, by way of the shared
+           one-character cell rather than by way of this rule.
+
+           A BYTES FORMAT IS LEFT OUT because its result must be bytes and
+           the loop's own `%s` re-tags its argument into a str to pad it;
+           `(b"%s" % b"ab") is b"ab"` is False in CPython too. */
+        if (conv_at == 0 && i == n && shown == given && conv != 'c'
+                && O(fmt)->kind == APY_STR_K)
+            lone = shown;
         while (out_n + O(shown)->v.s.n >= out_cap) {
             out_cap = out_cap * 2 + O(shown)->v.s.n;
             out = (char *)realloc(out, (size_t)out_cap + 1);
@@ -977,6 +1172,12 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
                         "formatting");
     }
     out[out_n] = 0;
+    /* THE LONE ARGUMENT, and only once the two checks above have had their
+       say: `"%s" % (s, 1)` is "not all arguments converted" in CPython even
+       though its one conversion did hand `s` straight through, so the
+       shortcut is remembered during the loop and taken here rather than
+       returned from inside it. */
+    if (lone) { free(out); return lone; }
     /* `b"%d" % 3` IS BYTES. The whole of the difference is the kind: the
        format string's own bytes are ASCII either way, and every conversion
        above produced text. */
@@ -990,6 +1191,12 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
    the str elements of a sequence result, and nothing else. One place, at the
    call site, rather than a change to each of the fifty-odd methods. */
 APY_API apy_value apy_str_like(apy_value recv, apy_value out) {
+    /* AND A SUBCLASS'S NO-OP ANSWERS A FRESH PLAIN ONE. This is the call
+       site's fixup and `recv` is the value the PROGRAM wrote, still wrapped
+       -- the only point on the method route that can still see a `class
+       S(str)`, because `apy_method_self` unwrapped it before the method ran.
+       See `apy_inst_text_result`. */
+    out = apy_inst_text_result(recv, out);
     if (!out || O(recv)->kind != APY_BYTES_K) return out;
     /* A RESULT THAT IS ALREADY BYTES STILL MAY NOT BE THE RIGHT ONE.
        `bytearray(b"a-b").partition(b"-")` hands back the SEPARATOR the
