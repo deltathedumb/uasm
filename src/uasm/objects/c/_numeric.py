@@ -506,6 +506,13 @@ static apy_value apy_str_repeat(apy_value s, int64_t k) {
     /* `s * 1 IS s`, exactly as `t * 1 is t` -- see `apy_seq_repeat`. */
     if (k == 1) return s;
     if (k < 0) k = 0;
+    /* CHECKED BEFORE THE MULTIPLY, for the reason `apy_bytes_repeat` gives
+       at length: the product is what sizes the allocation, and a product
+       that wraps to a small positive number allocates that and then copies
+       the real length into it. CPython's `unicode_repeat` has the same
+       division ahead of the same multiply, and words it for str. */
+    if (k > 0 && O(s)->v.s.n > (INT64_MAX - 1) / k)
+        return apy_fail("OverflowError", "repeated string is too long");
     n = O(s)->v.s.n * k;
     buf = (char *)malloc((size_t)n + 1);
     for (i = 0; i < k; i++) memcpy(buf + i * O(s)->v.s.n, O(s)->v.s.p, (size_t)O(s)->v.s.n);
@@ -520,6 +527,13 @@ static apy_value apy_seq_repeat(apy_value seq, int64_t k) {
        and CPython hands the receiver back -- while `xs * 1` on a LIST is a
        copy, because one of the two may be written to. */
     if (k == 1 && O(seq)->kind == APY_TUPLE_K) return seq;
+    /* AND THE SAME FOR A SEQUENCE, whose product sizes a slot count rather
+       than a byte count -- the wrap is the same and so is the check. CPython
+       answers MemoryError here rather than OverflowError, which is not a
+       tidy distinction but is what `(1, 2) * 2**62` and `[1, 2] * 2**62`
+       both raise; only the two TEXT kinds get the "too long" wording. */
+    if (k > 0 && O(seq)->v.q.n > (INT64_MAX - 1) / k)
+        return apy_fail("MemoryError", "");
     out = apy_seq_new(O(seq)->kind, O(seq)->v.q.n * (k > 0 ? k : 1) + 1);
     for (r = 0; r < k; r++)
         for (i = 0; i < O(seq)->v.q.n; i++) apy_seq_push(out, O(seq)->v.q.items[i]);

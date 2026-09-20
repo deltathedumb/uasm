@@ -644,7 +644,25 @@ static apy_value apy_bytes_repeat(apy_value v, apy_value count) {
        will need the `apy_str_fresh` treatment on the bytes side too. It does
        not compile today (E0076 refuses the base class on all three paths),
        so nothing reaches that row yet. */
+    /* THE PRODUCT IS WHAT SIZES THE ALLOCATION, so it is checked BEFORE it
+       is computed -- CPython's `bytes_repeat` opens with `if (n > 0 &&
+       Py_SIZE(a) > PY_SSIZE_T_MAX / n) return PyErr_NoMemory();`, a division
+       done first for exactly this reason. Multiplying and then looking at
+       the answer is not a check: signed overflow is undefined, and the
+       wrapped value is what the allocation would believe.
+
+       IT WAS A HEAP OVERFLOW, not a large allocation that fails. Measured:
+       `b"abcd" * (2 ** 62 + 2)` has a count that fits an index-sized integer
+       and a product of 2**64 + 8, which wraps to EIGHT -- so `malloc(9)`
+       SUCCEEDED and the loop below then copied 2**62 + 2 times into it.
+       Segfault, from ordinary Python, on both compiled paths. `b"ab" *
+       2**62` hid it: that product wraps to a huge `size_t` instead, malloc
+       fails, and the runtime exits cleanly saying so.
+
+       THE `+ 1` IS IN THE BOUND because the terminator is in the malloc. */
     if ((n == 0 || k == 1) && !O(v)->v.s.mut) return v;
+    if (k > 0 && n > (INT64_MAX - 1) / k)
+        return apy_fail("OverflowError", "repeated bytes are too long");
     { char *out = (char *)malloc((size_t)(n * k) + 1);
       if (!out) { fputs("uasm: out of memory\n", stderr); exit(1); }
       for (i = 0; i < k; i++) memcpy(out + i * n, O(v)->v.s.p, (size_t)n);
