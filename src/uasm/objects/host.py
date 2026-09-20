@@ -7685,7 +7685,13 @@ def _apy_to_int(h, a):
     # for a `class S(str)` parses the text in CPython -- the conversion reads
     # the C-level layout, which a subclass has.
     v = _held_text(v)
-    if not isinstance(v, (int, float, str)):
+    # A BYTES IS ONE TOO, and the refusal below says so: `int(b"12")` is 12
+    # in CPython and was refused here by a message that NAMES a bytes-like
+    # object as acceptable. Python's own `int()` takes all three, so the
+    # conversion needs only the gate widened.
+    if isinstance(v, memoryview):
+        v = bytes(v)
+    if not isinstance(v, (int, float, str, bytes, bytearray)):
         return h._fail("TypeError",
                        f"int() argument must be a string, a bytes-like "
                        f"object or a real number, not '{h.kind_name(v)}'")
@@ -7713,7 +7719,10 @@ def _apy_to_float(h, a):
         return 0
     # THE BUILTIN A CLASS EXTENDS ANSWERS -- see `_apy_to_int`.
     v = _held_text(h._get(a[0], "apy_to_float"))
-    if not isinstance(v, (int, float, str)):
+    # A BYTES IS ONE TOO -- see `_apy_to_int`. `float(b"1.5")` is 1.5.
+    if isinstance(v, memoryview):
+        v = bytes(v)
+    if not isinstance(v, (int, float, str, bytes, bytearray)):
         return h._fail("TypeError",
                        f"float() argument must be a string or a real number, "
                        f"not '{h.kind_name(v)}'")
@@ -7856,7 +7865,12 @@ def _apy_to_int_base(h, a):
     # A str SUBCLASS IS A str HERE TOO -- see `_held_text`.
     v = _held_text(h._get(a[0], "apy_to_int_base"))
     base = h._get(a[1], "apy_to_int_base")
-    if not isinstance(v, str):
+    # A BYTES IS A STRING FOR THIS. `int(b"ff", 16)` is 255 in CPython, and
+    # the refusal below is about the BASE being explicit, not about the text
+    # being a str -- see `_apy_to_int`.
+    if isinstance(v, memoryview):
+        v = bytes(v)
+    if not isinstance(v, (str, bytes, bytearray)):
         return h._fail("TypeError",
                        "int() can't convert non-string with explicit base")
     if isinstance(base, bool) or not isinstance(base, int):

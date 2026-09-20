@@ -4259,6 +4259,62 @@ PROGRAMS = {
         print("compare:", s == "b", p == "b", hash(p) == hash("b"))
         print("keys:", {p: 1}["b"], ["b"].index(p), p in ["b"])
     """,
+    # `int()` AND `float()` TAKE A BYTES, and the refusal said so while
+    # refusing one: `int() argument must be a string, a bytes-like object or
+    # a real number, not 'bytes'` is worse than a plain refusal, because a
+    # reader checking it against the argument concludes the value is not
+    # what it is. The parse is byte-wise already and bytes shares the str
+    # layout, so the arm serves both; a VIEW is flattened first.
+    #
+    # AND AN EMBEDDED NUL IS NOT A TERMINATOR, which the bytes rows are what
+    # exposed: the parse copies into a C string and both callers measured it
+    # with `strlen`, so `int("1\x002")` answered 1 and `float("1\x002")`
+    # answered 1.0 where CPython raises. A wrong answer, not a missing
+    # feature -- and a str bug, found only because bytes made it worth
+    # asking twice.
+    "int_and_float_read_a_bytes_and_stop_at_no_nul": """
+        def w(label, f):
+            try:
+                print(f"{label:22} {f()!r}")
+            except Exception as e:
+                print(f"{label:22} !{type(e).__name__}: {e}")
+
+        w("int bytes", lambda: int(b"12"))
+        w("int bytearray", lambda: int(bytearray(b"12")))
+        w("int memoryview", lambda: int(memoryview(b"12")))
+        w("float bytes", lambda: float(b"1.5"))
+        w("float bytearray", lambda: float(bytearray(b"1.5")))
+        w("int bytes b16", lambda: int(b"ff", 16))
+        w("int bytearray b16", lambda: int(bytearray(b"ff"), 16))
+        w("int bytes spaces", lambda: int(b"  12  "))
+        w("int bytes sign", lambda: int(b"-12"))
+        w("int bytes under", lambda: int(b"1_2"))
+        # THE REFUSALS name the value and repr it as the kind it is.
+        w("int bytes bad", lambda: int(b"zz"))
+        w("int bytes b16 bad", lambda: int(b"zz", 16))
+        w("float bytes bad", lambda: float(b"zz"))
+        w("int list", lambda: int([1]))
+        w("float list", lambda: float([1]))
+        # A NUL IS A BYTE LIKE ANY OTHER, wherever it falls.
+        w("int str nul", lambda: int("1\\x002"))
+        w("int bytes nul", lambda: int(b"1\\x002"))
+        w("float str nul", lambda: float("1\\x002"))
+        w("float bytes nul", lambda: float(b"1\\x002"))
+        w("int bytes trailing", lambda: int(b"12\\x00"))
+        w("int str leading", lambda: int("\\x0012"))
+        # AND A SUBCLASS RIDES ON THE SAME GATES, through the held value.
+        class B(bytes):
+            pass
+
+        class S(str):
+            pass
+
+        w("int B", lambda: int(B(b"12")))
+        w("float B", lambda: float(B(b"1.5")))
+        w("int B b16", lambda: int(B(b"ff"), 16))
+        w("int S", lambda: int(S("12")))
+        w("int S b16", lambda: int(S("ff"), 16))
+    """,
     # AND THE BYTES TWIN OF IT, which could not be written until `class
     # B(bytes)` compiled at all: the base was refused with E0076, so the
     # whole of the bytes half of the subclass contract was unmeasurable.

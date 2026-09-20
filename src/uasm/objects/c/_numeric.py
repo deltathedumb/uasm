@@ -2066,7 +2066,15 @@ APY_API apy_value apy_ge(apy_value a, apy_value b) { return apy_cmp(">=", a, b, 
 
    `float` still accepts `inf`/`nan` (as CPython does, case-insensitively via
    strtod) and rejects the `infinity`-with-junk forms the same way. */
-static int apy_strip_us(const char *p, int64_t n, char *out, size_t cap) {
+/* THE WRITTEN LENGTH IS ANSWERED and not left to `strlen`, because a NUL is
+   a byte like any other in the input and a terminator in the copy. Both
+   callers measured with `strlen` and so stopped at the first one:
+   `int("1\0" "2")` answered 1 and `float("1\0" "2")` answered 1.0, where
+   CPython raises `invalid literal` for both -- a WRONG ANSWER rather than a
+   refusal, and the kind that reads like a working program. `int(b"12\0")`
+   is the same sentence with the NUL at the end. */
+static int apy_strip_us(const char *p, int64_t n, char *out, size_t cap,
+                        int64_t *outn) {
     int64_t i;
     size_t o = 0;
     for (i = 0; i < n; i++) {
@@ -2081,6 +2089,7 @@ static int apy_strip_us(const char *p, int64_t n, char *out, size_t cap) {
         out[o++] = p[i];
     }
     out[o] = '\0';
+    *outn = (int64_t)o;
     return 1;
 }
 
@@ -2137,22 +2146,33 @@ APY_API apy_value apy_to_int(apy_value v) {
     }
     if (apy_is_big(v)) return v;
     if (apy_is_int_like(v)) return apy_from_int(O(v)->v.i);
-    if (O(v)->kind == APY_STR_K) {
+    /* A BYTES IS ONE TOO, and the refusal above says so: `int(b"12")` is 12
+       in CPython, `int(bytearray(b"12"))` is 12, and `int(memoryview(b"12"))`
+       is 12. All three were refused here by a message that NAMES a bytes-like
+       object as acceptable -- worse than a plain refusal, since a reader
+       checking it against the argument concludes the value is not what it is.
+       The parse below is byte-wise already and bytes shares the str layout,
+       so the arm serves both; a VIEW has an offset and a step, so it is
+       flattened first. */
+    if (O(v)->kind == APY_MVIEW_K) {
+        v = apy_mview_bytes(v);
+        if (!v) return 0;
+    }
+    if (O(v)->kind == APY_STR_K || O(v)->kind == APY_BYTES_K) {
         /* LENGTH IS NOT BOUNDED any more. This used to refuse a literal of
            128 characters or more, which was right when the answer had to fit
            an int64 and is a wrong answer now -- `int('1' + '0' * 200)` is an
            ordinary Python expression. The scratch buffer is sized to the
            input instead of to a guess. */
-        int64_t n = O(v)->v.s.n, lo = 0, hi;
+        int64_t n = O(v)->v.s.n, lo = 0, hi = 0;
         char *clean = (char *)malloc((size_t)n + 1);
         apy_value r;
         int neg = 0;
         if (!clean) { fputs("uasm: out of memory\n", stderr); exit(1); }
-        if (!apy_strip_us(O(v)->v.s.p, n, clean, (size_t)n + 1)) {
+        if (!apy_strip_us(O(v)->v.s.p, n, clean, (size_t)n + 1, &hi)) {
             free(clean);
             return apy_conv_error("invalid literal for int() with base 10: ", v);
         }
-        hi = (int64_t)strlen(clean);
         while (lo < hi && apy_is_space(clean[lo])) lo++;
         while (hi > lo && apy_is_space(clean[hi - 1])) hi--;
         if (lo < hi && (clean[lo] == '+' || clean[lo] == '-')) {
@@ -2202,17 +2222,23 @@ APY_API apy_value apy_to_float(apy_value v) {
         return apy_from_float(d);
     }
     if (apy_is_int_like(v)) return apy_from_float((double)O(v)->v.i);
-    if (O(v)->kind == APY_STR_K) {
+    /* A BYTES IS ONE TOO -- see `apy_to_int`, which says it at length.
+       `float(b"1.5")` is 1.5 in CPython and was refused here. */
+    if (O(v)->kind == APY_MVIEW_K) {
+        v = apy_mview_bytes(v);
+        if (!v) return 0;
+    }
+    if (O(v)->kind == APY_STR_K || O(v)->kind == APY_BYTES_K) {
         /* The scratch buffer is sized to the INPUT, not to a guess. A fixed
            128 bytes was right while `int()` could not answer past 19 digits
            either, and it made `float('1' * 300)` a ValueError -- an ordinary
            expression with an ordinary answer, 1.11e299. */
-        int64_t n = O(v)->v.s.n;
+        int64_t n = O(v)->v.s.n, cleaned = 0;
         char *clean = (char *)malloc((size_t)n + 1), *end;
         const char *p, *q;
         double r;
         if (!clean) { fputs("uasm: out of memory\n", stderr); exit(1); }
-        if (!apy_strip_us(O(v)->v.s.p, n, clean, (size_t)n + 1)) {
+        if (!apy_strip_us(O(v)->v.s.p, n, clean, (size_t)n + 1, &cleaned)) {
             free(clean);
             return apy_conv_error("could not convert string to float: ", v);
         }
@@ -2226,7 +2252,10 @@ APY_API apy_value apy_to_float(apy_value v) {
         }
         r = strtod(p, &end);
         while (apy_is_space(*end)) end++;
-        if (end == p || *end) {
+        /* AGAINST THE WRITTEN LENGTH, not against the terminator: `*end` is
+           NUL both at the real end and at an embedded one. See
+           `apy_strip_us`. */
+        if (end == p || (int64_t)(end - clean) != cleaned) {
             free(clean);
             return apy_conv_error("could not convert string to float: ", v);
         }

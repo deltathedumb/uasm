@@ -203,7 +203,15 @@ APY_API apy_value apy_to_int_base(apy_value v, apy_value base) {
     apy_value acc;
     /* A str SUBCLASS IS A str HERE TOO -- see `apy_text_like`. */
     v = apy_text_like(v);
-    if (O(v)->kind != APY_STR_K)
+    /* A BYTES IS A STRING FOR THIS. `int(b"ff", 16)` is 255 in CPython, and
+       so is `int(bytearray(b"ff"), 16)`; the digit walk below is byte-wise
+       and bytes shares the str layout, so the arm serves both. A VIEW is
+       flattened first, since it has an offset and a step. */
+    if (O(v)->kind == APY_MVIEW_K) {
+        v = apy_mview_bytes(v);
+        if (!v) return 0;
+    }
+    if (O(v)->kind != APY_STR_K && O(v)->kind != APY_BYTES_K)
         return apy_fail2("TypeError",
                          "int() can't convert non-string with explicit base%s%s",
                          "", "");
