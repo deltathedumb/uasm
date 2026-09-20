@@ -92,8 +92,19 @@ static apy_value apy_native(int sel, int64_t arity, const char *name) {
        absent. The body answers None whichever way it is reached, and without
        this the two spellings disagreed: `object.__init_subclass__()` was an
        arity error on the compiled halves and None in the interpreter. */
+    /* AND `__subclasshook__` IS THE SAME SHAPE AS `__init_subclass__`,
+       for the same reason: it is a CLASSMETHOD, so reading it off a VALUE
+       binds the class and `[].__subclasshook__(int)` fills both slots, while
+       reading it off `object` binds nothing and
+       `object.__subclasshook__(int)` fills one. Declared as one it was an
+       arity error on the value route; declared as two it was an arity error
+       on the object route. OPTIONAL rather than either, which is the answer
+       `__init_subclass__` already arrived at -- the body answers
+       NotImplemented whichever way it is reached. */
     if (sel == APY_NAT_BUILTIN_INIT || sel == APY_NAT_BUILTIN_NEW
-            || sel == APY_NAT_NEW || sel == APY_NAT_INIT_SUBCLASS) {
+            || sel == APY_NAT_NEW || sel == APY_NAT_INIT_SUBCLASS
+            || (sel == APY_NAT_OBJ_ONLY
+                && strcmp(name, "__subclasshook__") == 0)) {
         static apy_value absent[1];
         absent[0] = apy_none();
         o->v.fn.ndefaults = 1;
@@ -812,12 +823,7 @@ APY_API int64_t apy_object_arity(apy_value wantv) {
     if (strcmp(want, "__setattr__") == 0) return 3;
     if (strcmp(want, "__delattr__") == 0) return 2;
     if (strcmp(want, "__init_subclass__") == 0) return 1;
-    /* ONE, NOT TWO. `object.__subclasshook__` is a CLASSMETHOD in CPython,
-       so the class is already bound and `object.__subclasshook__(int)` is
-       the whole spelling -- measured: nought arguments and two are both
-       "takes exactly one argument". Declared as two, the ordinary call was
-       an arity error about a method the program had written correctly. */
-    if (strcmp(want, "__subclasshook__") == 0) return 1;
+    if (strcmp(want, "__subclasshook__") == 0) return 2;
     if (strcmp(want, "__dir__") == 0) return 1;
     if (strcmp(want, "__sizeof__") == 0) return 1;
     if (strcmp(want, "__reduce__") == 0) return 1;

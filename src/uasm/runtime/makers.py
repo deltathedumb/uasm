@@ -619,8 +619,18 @@ def apy_native_of(sel: i64, arity: i64, name: ptr) -> ptr:
     # body answers None whichever way it is reached, and without this the two
     # spellings disagreed: `object.__init_subclass__()` was an arity error on
     # the compiled halves and None in the interpreter.
+    # AND `__subclasshook__` IS THE SAME SHAPE, for the same reason: it is a
+    # CLASSMETHOD, so reading it off a VALUE binds the class and
+    # `[].__subclasshook__(int)` fills both slots, while reading it off
+    # `object` binds nothing and `object.__subclasshook__(int)` fills one.
+    # Declared as one it was an arity error on the value route; declared as
+    # two it was an arity error on the object route. It is the only name on
+    # `apy_nat_obj_only` that takes the optional slot -- the four orderings
+    # and `__format__` want both of theirs.
     if (sel == apy_nat_builtin_init() or sel == apy_nat_builtin_new()
-            or sel == apy_nat_new() or sel == apy_nat_init_subclass()):
+            or sel == apy_nat_new() or sel == apy_nat_init_subclass()
+            or (sel == apy_nat_obj_only()
+                and apy_cstr_eq(name, rodata(b"__subclasshook__\0")))):
         store(u64, u64(apy_none()), apy_native_absent())
         store(i64, 1, offset(o, apy_fn_ndefaults_offset()))
         store(u64, u64(apy_native_absent()),

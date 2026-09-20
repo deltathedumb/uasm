@@ -773,7 +773,10 @@ def apy_object_default(want: ptr) -> ptr:
     if apy_cstr_eq(want, rodata(b"__ge__\0")):
         return apy_native_of(apy_nat_obj_only(), 2, want)
     if apy_cstr_eq(want, rodata(b"__subclasshook__\0")):
-        return apy_native_of(apy_nat_obj_only(), 1, want)
+        # TWO SLOTS, THE SECOND OPTIONAL -- see `apy_native_of`. Read off a
+        # VALUE the class is bound and both are filled; read off `object`
+        # only one is, and it is a classmethod either way.
+        return apy_native_of(apy_nat_obj_only(), 2, want)
     if apy_cstr_eq(want, rodata(b"__format__\0")):
         return apy_native_of(apy_nat_obj_only(), 2, want)
     common: i64 = apy_object_arity(want)
@@ -1079,11 +1082,7 @@ def apy_object_arity(want: ptr) -> i64:
     if apy_cstr_eq(want, rodata(b"__init_subclass__\0")):
         return 1
     if apy_cstr_eq(want, rodata(b"__subclasshook__\0")):
-        # ONE, NOT TWO. It is a CLASSMETHOD in CPython, so the class is
-        # already bound and `object.__subclasshook__(int)` is the whole
-        # spelling -- measured, nought arguments and two are both "takes
-        # exactly one argument". The C says 1 for the same reason.
-        return 1
+        return 2
     if apy_cstr_eq(want, rodata(b"__dir__\0")):
         return 1
     if apy_cstr_eq(want, rodata(b"__sizeof__\0")):
