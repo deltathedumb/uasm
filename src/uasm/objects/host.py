@@ -3954,10 +3954,21 @@ def _apy_getitem(h, a):
             return h._value(seq[index])
         except (TypeError, IndexError) as exc:
             return h._fail_like(exc)
-    if isinstance(index, slice) and isinstance(seq, (list, tuple, str, bytes)):
+    if isinstance(index, slice) and isinstance(seq, (list, tuple, str, bytes,
+                                                     bytearray)):
         # `xs[slice(1, 5)]`. `xs[1:5]` never comes this way -- the frontend
         # slices it directly -- but a slice built as a VALUE has to work as a
         # subscript too.
+        #
+        # `bytearray` IS NAMED SEPARATELY because it is not a `bytes`:
+        # `isinstance(bytearray(), bytes)` is False, so leaving it out of
+        # this tuple did not fall back to the bytes branch -- it fell through
+        # to the INDEX path, which refused the slice with "bytearray indices
+        # must be integers or slices, not slice". A message that names a
+        # slice while saying slices are allowed is the shape of this
+        # particular omission, and the fix is here rather than in the
+        # message: the message is right about every kind it is still
+        # reachable for.
         return h._value(seq[index])
     if not _is_int_like(index) and isinstance(index, Instance)             and index.cls.find("__index__") is not None:
         # `__index__` -- how a user object BECOMES an index. PEP 357, and a
@@ -4440,15 +4451,84 @@ def _apy_format(h, a):
             return 0
         if got is not NotImplemented:
             return h._value(got)
-        return h._new(format(h._text(v, False), spec))
+        # A SUBCLASS OF str, FORMATTED BY str's OWN CODE, and the two spec
+        # cases do not agree -- which is CPython's asymmetry and not a
+        # tidiness to smooth over. Measured over thirteen specs:
+        #
+        #   format(x)        -> a plain str COPY, `is x` False, kind str
+        #   format(x, "s")   -> x ITSELF, kind S
+        #   format(x, ">3")  -> x ITSELF, kind S      (three wide already)
+        #   format(x, ">5")  -> a plain str, kind str (it padded)
+        #   format(x, ".3")  -> x ITSELF, kind S      (nothing truncated)
+        #   format(x, ".2")  -> a plain str, kind str (it truncated)
+        #
+        # The empty spec goes through `PyObject_Format`'s CheckExact fast
+        # path, which a subclass fails, and then `unicode__format__` copies.
+        # A NON-EMPTY spec goes to `_PyUnicode_FormatAdvancedWriter`, which
+        # has no such test: when the width is already met and nothing is
+        # truncated it writes the object straight through, and the writer
+        # hands back the one object it was given -- subclass type and all.
+        #
+        # `made is text` IS THE TEST, not `==`: CPython's fast path returns
+        # the very object it was handed, so identity says exactly whether
+        # that path was taken and equality would also catch a padded result
+        # that happened to compare equal.
+        text = h._text(v, False)
+        try:
+            made = format(text, spec)
+        except _HOST_RAISES as exc:
+            return h._fail_like(exc)
+        if spec and made is text:
+            return a[0]
+        # A COPY, AND A DISTINCT ONE PER CALL: `format(x)` and `format(y)`
+        # for two instances holding the same interned text are two objects in
+        # CPython. `_new` is what makes two of them -- `_value` would answer
+        # the one handle the held string already has, and both calls would
+        # come back the same object.
+        return h._new(made)
     if not spec:
-        return h._new(h._text(v, False))
+        # THROUGH `_value`: `format(s)` IS `s` for an exact str, and `_new`
+        # minted a second handle for the receiver's own object, so `format(s)
+        # is s` was False here and True in CPython and in both compiled
+        # runtimes. `h._text` hands back the receiver itself for a str, so
+        # there is nothing else to do.
+        return h._value(h._text(v, False))
     if isinstance(v, Exc):
-        return h._new(format(h._text(v, False), spec))
+        return h._value(format(h._text(v, False), spec))
     try:
-        return h._new(format(v, spec))
+        # AND WITH A SPEC TOO, for the same reason: `format("abc", ">3")` is
+        # `"abc"` itself, because the width is already met. Python's own
+        # `format` decides that, and `_value` is what carries the decision
+        # across -- one handle per object, which is CPython's identity.
+        return h._value(format(v, spec))
     except _HOST_RAISES as exc:
         return h._fail_like(exc)
+
+
+def _lone_field_spec(fmt):
+    """The spec of `"{:...}"` or `"{0:...}"` or `"{}"`, or None.
+
+    None means "this is not one bare field", which covers every format
+    string with literal text in it, a `!r` conversion, an attribute or item
+    lookup, a nested spec, or more than one field. Only the exact shape is
+    claimed, because `format()`'s identity rule applies to the WHOLE result
+    and anything joined to anything else is a new string by construction.
+    """
+    if not isinstance(fmt, str):
+        return None
+    if len(fmt) < 2 or fmt[0] != "{" or fmt[-1] != "}":
+        return None
+    body = fmt[1:-1]
+    if "{" in body or "}" in body:
+        return None
+    name, sep, spec = body.partition(":")
+    if not sep:
+        name, spec = body, ""
+    if "!" in name or "." in name or "[" in name:
+        return None
+    if name not in ("", "0"):
+        return None
+    return spec
 
 
 def _apy_str_format(h, a):
@@ -4461,8 +4541,30 @@ def _apy_str_format(h, a):
                        f"'{h.kind_name(fmt)}' object has no attribute 'format'")
     args = list(h._get(a[1], "apy_str_format"))
     kw = dict(h._get(a[2], "apy_str_format"))
+    # ONE WHOLE FIELD AND NOTHING ELSE IS `format()`, and it has to go
+    # through `apy_format` rather than through Python's `str.format` here:
+    # `"{:>3}".format(x)` for a str SUBCLASS `x` is `x` itself in CPython,
+    # subclass type and all, and Python's own `str.format` cannot answer
+    # that from this side -- it calls `__format__` on the host's `Instance`,
+    # which has to return a str, so the instance can never come back out of
+    # it. `apy_format` knows the rule and is where it is written down.
+    #
+    # ONLY THE EXACT SHAPE, because anything else really is a join of
+    # pieces: literal text around the field, a `!r` conversion, a second
+    # field, or a field naming anything but the first positional argument.
+    spec = _lone_field_spec(fmt)
+    if spec is not None and args:
+        # SURPLUS ARGUMENTS AND KEYWORDS DO NOT MATTER HERE. `str.format`
+        # does not mind an argument no field names -- `"{}".format(s, 9)` is
+        # `s` in CPython, and so is `"{}".format(s, a=1)` -- so the only
+        # thing this branch needs is that the ONE field names the FIRST
+        # positional, which `_lone_field_spec` has already established.
+        return _apy_format(h, [h._value(args[0]), h._value(spec)])
     try:
-        return h._new(fmt.format(*args, **kw))
+        # `_value` AND NOT `_new`: `"{}".format(s)` IS `s` in CPython -- the
+        # single-field case writes the argument straight through -- and a
+        # fresh handle for it made that False here alone.
+        return h._value(fmt.format(*args, **kw))
     except (IndexError, KeyError, ValueError, TypeError) as exc:
         return h._fail_like(exc)
 
@@ -5335,18 +5437,78 @@ def _apy_typing_mark(h, a):
     return a[0]
 
 
+def _maketrans_mapping(h, table):
+    """`str.maketrans({...})` -- the one-argument form.
+
+    KEYS BECOME ORDINALS AND VALUES ARE LEFT ALONE. A key is a
+    one-character string or an integer, and anything else is refused here; a
+    VALUE is not checked at all -- `str.maketrans({"a": 1.0})` is
+    `{97: 1.0}` in CPython and it is `translate` that refuses it later, when
+    the character it cannot make is actually reached. Checking values here
+    would refuse a table CPython builds, for a program that may never
+    translate the character it is wrong about.
+
+    A VALUE MAY BE LONGER THAN ONE CHARACTER, which is the other half of the
+    same point: `{"a": "zz"}` is a legal table and `"abc".translate` of it is
+    `"zzbc"`.
+    """
+    if not isinstance(table, dict):
+        return h._fail("TypeError", "if you give only one argument to "
+                                    "maketrans it must be a dict")
+    out = {}
+    for key, value in table.items():
+        if isinstance(key, str):
+            if len(key) != 1:
+                return h._fail("ValueError", "string keys in translate "
+                                             "table must be of length 1")
+            out[ord(key)] = value
+        elif _is_int_like(key):
+            # KEPT AS THE OBJECT IT IS, not narrowed to an int. CPython's
+            # `unicode_maketrans_impl` stores an integer key straight into
+            # the new dict, so `str.maketrans({True: "z"})` is `{True: 'z'}`
+            # there and not `{1: 'z'}` -- a program printing the table sees
+            # what it wrote. It translates the same either way, since True
+            # hashes as 1; the difference is only visible in the table.
+            #
+            # AND THE RANGE IS NOT CHECKED. `{0x110000: "z"}` and `{-1: "z"}`
+            # both build here, exactly as they do in CPython: a key outside
+            # the code points simply never matches, and refusing it would
+            # refuse a table CPython makes.
+            out[key] = value
+        else:
+            return h._fail("TypeError", "keys in translate table must be "
+                                        "strings or integers")
+    return h._new(out)
+
+
 def _apy_str_maketrans(h, a):
-    """`str.maketrans(a, b)` and `str.maketrans(a, b, drop)`.
+    """`str.maketrans(a, b)`, `str.maketrans(a, b, drop)` -- and the
+    ONE-ARGUMENT MAPPING FORM, which is a different function wearing the
+    same name.
 
     The result is an ORDINARY DICT keyed by code point -- the documented
     shape, not an internal one, so a program may build the same table by hand
-    and hand it to `translate`. None as the third argument is the
-    two-argument form; the frontend always passes three.
+    and hand it to `translate`. None as the second and third arguments is how
+    a shorter call arrives; the frontend always passes three.
     """
     # A str SUBCLASS IS A str HERE TOO -- see `_held_text`.
     first = _held_text(h._get(a[0], "apy_str_maketrans"))
     second = _held_text(h._get(a[1], "apy_str_maketrans"))
     drop = _held_text(h._get(a[2], "apy_str_maketrans"))
+    # THE ONE-ARGUMENT FORM TAKES A DICT AND NOTHING ELSE, and it is not a
+    # convenience spelling of the other one: the two-argument form PAIRS two
+    # equal-length strings, and this one reads a table that is already a
+    # table and only has to turn its keys into ordinals. CPython gives the
+    # wrong shape its own sentence rather than the pairing error, which is
+    # why that message is not reused here.
+    if second is None and drop is None:
+        return _maketrans_mapping(h, first)
+    if not isinstance(first, str) and second is not None:
+        # A MAPPING WITH A SECOND ARGUMENT is neither form. CPython names the
+        # FIRST argument, because that is the one that decides which form
+        # this was going to be.
+        return h._fail("TypeError", "first maketrans argument must be a "
+                                    "string if there is a second argument")
     if not isinstance(first, str) or not isinstance(second, str):
         return h._fail("TypeError", "maketrans() arguments must be strings")
     if len(first) != len(second):
@@ -5394,13 +5556,31 @@ def _apy_str_translate(h, a):
         if to is None:
             continue
         if isinstance(to, str):
+            # A VALUE MAY BE LONGER THAN ONE CHARACTER. `{97: "zz"}` is a
+            # legal table and `"abc".translate` of it is `"zzbc"`, which is
+            # why this appends the whole string rather than a character.
             out.append(to)
         elif _is_int_like(to):
+            # TWO DIFFERENT REFUSALS, and CPython words them apart: a value
+            # of the WRONG KIND is a TypeError naming the three kinds that
+            # are allowed, and an INTEGER OUT OF RANGE is a ValueError naming
+            # the range. Both were the TypeError here, and the ValueError
+            # leaked `chr()` -- a function the program never called.
+            if not 0 <= int(to) < 0x110000:
+                return h._fail("ValueError", "character mapping must be in "
+                                             "range(0x110000)")
             out.append(chr(int(to)))
         else:
-            return h._fail("TypeError",
-                           "character mapping must be in range(0x110000)")
-    return h._new("".join(out))
+            return h._fail("TypeError", "character mapping must return "
+                                        "integer, None or str")
+    # THROUGH `_value` AND NOT `_new`, because an EMPTY result is CPython's
+    # own shared `""` and a fresh handle for it makes `"".translate(t) is ""`
+    # False here and True everywhere else. `_value` answers one handle per
+    # Python object, which IS CPython's identity -- so a non-empty result,
+    # which `join` builds fresh every time, still gets a handle of its own.
+    # The compiled runtimes answer their shared empty cell for the same case;
+    # see `apy_shared_str`.
+    return h._value("".join(out))
 
 
 #: What counts as bytes for a translation table or a delete set. A MEMORYVIEW
@@ -5487,7 +5667,26 @@ def _apy_bytes_translate(h, a):
     # compares handles.
     if out is s:
         return a[0]
-    return h._new(bytearray(out) if isinstance(s, bytearray) else out)
+    # AN EMPTY RESULT IS THE SHARED `b""` AND A ONE-BYTE ONE IS NOT, which is
+    # not a distinction anyone would invent -- it is CPython's, and it comes
+    # from `_PyBytes_Resize`: that function special-cases a new size of zero
+    # and hands back the interned empty, and for every other size it simply
+    # reallocs, so the one-byte result never reaches the 256-object cache
+    # that a literal or a slice does. Measured, both ways round:
+    #     b"abc".translate(None, b"abc") is b""   -> True
+    #     b"abc".translate(None, b"bc")  is b"a"  -> False
+    # `_value` normalises a one-byte bytes INTO that cache -- it has to, for
+    # the four constructors that read bytes out of interpreter memory -- so
+    # it is right for the empty here and wrong for the one-byte, and the two
+    # get different calls.
+    #
+    # THE str SIDE IS NOT THE SAME and keeps plain `_value`: a one-character
+    # str result IS the shared latin-1 cell there, because the unicode writer
+    # consults that cache where `_PyBytes_Resize` does not.
+    #
+    # A BYTEARRAY IS WRAPPED FRESH and shares nothing either way.
+    made = bytearray(out) if isinstance(s, bytearray) else out
+    return h._value(made) if made == b"" else h._new(made)
 
 
 def _apy_translate_kw(h, a):
@@ -6728,7 +6927,12 @@ def _percent(h, fmt, right):
         return h._fail("TypeError",
                        "not all arguments converted during string formatting")
     joined = "".join(out)
-    return h._new(joined.encode("latin-1") if raw else joined)
+    # `_value` AND NOT `_new`, so that a format that adds nothing hands the
+    # ARGUMENT back: `"%s" % s` is `s` in CPython -- `format(s, "")` answers
+    # the receiver and `"".join` of one exact str answers its one item -- and
+    # a fresh handle made that False here alone. `_value` is one handle per
+    # object, which is exactly the identity CPython reports.
+    return h._value(joined.encode("latin-1") if raw else joined)
 
 
 def _reject(h, sym: str, x, y):
@@ -13397,7 +13601,10 @@ def _apy_str_format_map(h, a):
     # `"".format_map(None)` is `''` rather than a complaint about None. A
     # check here could not tell the two apart.
     try:
-        return h._new(fmt.format_map(mapping))
+        # `_value` for the reason `_apy_str_format` gives: `"{a}".format_map
+        # ({"a": s})` IS `s`, the single field being written straight
+        # through, and `_new` reported a different object for it.
+        return h._value(fmt.format_map(mapping))
     except (IndexError, KeyError, ValueError, TypeError) as exc:
         return h._fail_like(exc)
 
