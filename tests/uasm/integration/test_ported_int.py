@@ -49,9 +49,13 @@ def write(tmp_path: Path, source: str, name: str = "prog.py") -> Path:
 
 
 def build_and_run(tmp_path: Path, source: Path) -> subprocess.CompletedProcess:
+    # `--link` BECAUSE `build` STOPS AT AN UNLINKED OBJECT. Every test that
+    # comes through here observes the ported runtime by RUNNING a program and
+    # reading what it printed, so the object has to be linked before the
+    # exec below has anything it is allowed to run.
     out = tmp_path / "prog.exe"
-    built = _cli("build", str(source), "--backend", "c", "-o", str(out),
-                 "--workdir", str(tmp_path / "wd"))
+    built = _cli("build", str(source), "--backend", "c", "--link",
+                 "-o", str(out), "--workdir", str(tmp_path / "wd"))
     assert built.returncode == 0, built.stdout + built.stderr
     return subprocess.run([str(out)], capture_output=True, text=True)
 
@@ -1094,7 +1098,7 @@ class TestTheCRuntimeIsStillSupported:
         outputs = {}
         for mode in ("ir", "c"):
             out = tmp_path / f"prog_{mode}.exe"
-            built = _cli("build", str(source), "--backend", "c",
+            built = _cli("build", str(source), "--backend", "c", "--link",
                          "--object-runtime", mode, "-o", str(out),
                          "--workdir", str(tmp_path / f"wd_{mode}"))
             assert built.returncode == 0, built.stdout + built.stderr

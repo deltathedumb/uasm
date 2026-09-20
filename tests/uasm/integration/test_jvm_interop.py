@@ -91,7 +91,14 @@ class TestImportingJava:
         jar = tmp_path / "mod.jar"
         # `-o` with `--emit-ir` writes the IR TO THAT FILE rather than to
         # stdout, so a test reading the IR must not ask for both.
-        output = [] if "--emit-ir" in extra else ["-o", str(jar)]
+        #
+        # `--link` BECAUSE `build` STOPS AT AN UNLINKED OBJECT, and what
+        # every test on this path checks is a program a JVM loads and runs
+        # -- `java -cp mod.jar Mod` needs the packaged jar, not the artifact
+        # the build would otherwise leave behind. The flag belongs with `-o`
+        # and not in the `--emit-ir` branch: a caller asking for the IR is
+        # asking the build to stop at it, and there is nothing to link.
+        output = [] if "--emit-ir" in extra else ["-o", str(jar), "--link"]
         r = run_cli("build", str(path), "--backend", "jvm",
                     "--java-version", "21", "--classpath", str(api_jar),
                     *output, *extra)

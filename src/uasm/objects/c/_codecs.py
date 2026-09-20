@@ -827,8 +827,14 @@ APY_API apy_value apy_any_fromhex(apy_value self, apy_value text) {
 APY_API apy_value apy_bytearray_fromhex(apy_value self, apy_value text) {
     apy_value got = apy_bytes_fromhex(self, text);
     if (!got) return 0;
-    O(got)->v.s.mut = 1;
-    return got;
+    if (O(got)->v.s.mut) return got;
+    /* A COPY AND NOT A FLAG WRITTEN ON WHAT CAME BACK. The receiver here is
+       the TYPE, so the call above took the immutable path -- which answers a
+       SHARED cell for the empty and the one-byte values, and `mut = 1` on
+       one of those turned every later `b"A"` in the program into a
+       bytearray, literals included. `apy_bytearray_copy` is the same answer
+       `apy_bytearray()` reaches for, and for the same reason. */
+    return apy_bytearray_copy(O(got)->v.s.p, O(got)->v.s.n);
 }
 
 /* The `k`-th byte of an integer's MAGNITUDE, least significant first, and

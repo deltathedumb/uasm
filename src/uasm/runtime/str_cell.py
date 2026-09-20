@@ -585,12 +585,20 @@ def apy_bytes_fromhex(self: ptr, text: ptr) -> ptr:
             rodata(b"ValueError\0"),
             rodata(b"non-hexadecimal number found in fromhex() arg\0"))
     store(u8, u8(0), offset(buf, out))
-    made: ptr = apy_bytes_literal(buf, out)
-    if made:
-        # AND THE ANSWER IS THE KIND IT WAS REACHED THROUGH, which is what
-        # makes `bytearray.fromhex` answer a bytearray.
-        if self:
-            if i64(load(i32, offset(self, 0))) == apy_bytes_kind():
-                if load(i32, offset(self, apy_s_mut_offset())):
-                    store(i32, i32(1), offset(made, apy_s_mut_offset()))
-    return made
+    # AND THE ANSWER IS THE KIND IT WAS REACHED THROUGH, which is what makes
+    # `bytearray().fromhex(s)` answer a bytearray.
+    #
+    # DECIDED BEFORE THE CELL IS MADE AND NOT WRITTEN ONTO IT AFTERWARDS.
+    # `apy_bytes_literal` answers a SHARED cell for the empty and one-byte
+    # values, so setting `mut` on what it returned turned every later `b"A"`
+    # in the program -- literals included -- into a bytearray. That is the
+    # rule `apy_bytes_cell`'s own docstring states, and this was the one
+    # place still breaking it.
+    mut: i64 = 0
+    if self:
+        if i64(load(i32, offset(self, 0))) == apy_bytes_kind():
+            if load(i32, offset(self, apy_s_mut_offset())):
+                mut = 1
+    if mut:
+        return apy_bytes_cell(buf, out, 1)
+    return apy_bytes_literal(buf, out)

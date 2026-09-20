@@ -147,12 +147,17 @@ def ir(body: str, *, externals=("put_int",), prelude: str = "") -> str:
 
 @harness.needs("java")
 class TestItRuns:
+    # EVERY BUILD IN THIS CLASS PASSES `--link` BECAUSE `build` STOPS AT AN
+    # UNLINKED OBJECT. The jar is the JVM toolchain's product, not the
+    # backend's: without the link step `java -jar` is handed a file no
+    # packager ever wrote. What each test here checks is a program that runs,
+    # so each one has to ask for a program.
     def test_a_compiled_python_program_prints_what_cpython_would(
             self, tmp_path):
         source = tmp_path / "prog.py"
         source.write_text(PROGRAM, encoding="utf-8")
         jar = tmp_path / "prog.jar"
-        r = run_cli("build", str(source), "--backend", "jvm",
+        r = run_cli("build", str(source), "--backend", "jvm", "--link",
                     "--java-version", "21", "-o", str(jar))
         assert r.returncode == 0, r.stderr
         assert jar.exists()
@@ -164,7 +169,7 @@ class TestItRuns:
         source.write_text("def main() -> int:\n    return 3\n",
                           encoding="utf-8")
         jar = tmp_path / "prog.jar"
-        assert run_cli("build", str(source), "--backend", "jvm",
+        assert run_cli("build", str(source), "--backend", "jvm", "--link",
                        "-o", str(jar)).returncode == 0
         assert java(jar).returncode == 3
 
@@ -174,7 +179,7 @@ class TestItRuns:
         source.write_text('def main() -> int:\n    print(41 + 1)\n'
                           '    return 0\n', encoding="utf-8")
         jar = tmp_path / "prog.jar"
-        assert run_cli("build", str(source), "--backend", "jvm",
+        assert run_cli("build", str(source), "--backend", "jvm", "--link",
                        "-o", str(jar)).returncode == 0
         assert java(jar).stdout.strip() == "42"
 
@@ -184,7 +189,7 @@ class TestItRuns:
         source = tmp_path / "prog.py"
         source.write_text(PROGRAM, encoding="utf-8")
         jar = tmp_path / f"prog{release}.jar"
-        r = run_cli("build", str(source), "--backend", "jvm",
+        r = run_cli("build", str(source), "--backend", "jvm", "--link",
                     "--java-version", release, "-o", str(jar))
         assert r.returncode == 0, r.stderr
         got = java(jar)
@@ -198,7 +203,7 @@ class TestItRuns:
         source = tmp_path / "prog.py"
         source.write_text(PROGRAM, encoding="utf-8")
         jar = tmp_path / "prog.jar"
-        r = run_cli("build", str(source), "--backend", "jvm",
+        r = run_cli("build", str(source), "--backend", "jvm", "--link",
                     "--class-version", "75", "-o", str(jar))
         assert r.returncode == 0, r.stderr
         got = java(jar)

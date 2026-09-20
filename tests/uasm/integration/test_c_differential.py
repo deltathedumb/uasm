@@ -3876,6 +3876,13 @@ def _uasm(*argv: str, cwd: Path, stdin_text: str | None = None,
     reads one or asks about the other has to be given them from outside: the
     host services read the real descriptor and the real environment, which
     is the point of them.
+
+    A BUILD WHOSE ARTIFACT IS THEN EXECUTED PASSES `--link`, because `build`
+    stops at an unlinked object and `uasm link` is the verb that turns
+    objects into a program: without it the test would try to run an object
+    file, or look for a jar that was never packaged. The sites that assert a
+    refusal, and the ones that only read the artifact's bytes, do not pass it
+    and must not -- they are testing what `build` itself produces.
     """
     import uasm
     root = Path(uasm.__file__).parents[1]
@@ -3924,7 +3931,7 @@ class TestTheOtherBackendsToo:
         exe = tmp_path / "small.exe"
         built = _uasm("build", str(source), "--backend", "x86-64",
                            "--target", "x86_64-linux", "-o", str(exe),
-                           cwd=tmp_path)
+                           "--link", cwd=tmp_path)
         if built.returncode != 0:
             harness.skip(f"the x86-64 path is unavailable here: "
                          f"{(built.stderr or built.stdout)[:160]}")
@@ -3938,7 +3945,7 @@ class TestTheOtherBackendsToo:
         source.write_text(SMALL, encoding="utf-8")
         jar = tmp_path / "small.jar"
         built = _uasm("build", str(source), "--backend", "jvm",
-                           "-o", str(jar), cwd=tmp_path)
+                           "-o", str(jar), "--link", cwd=tmp_path)
         assert built.returncode == 0, built.stderr or built.stdout
         ran = subprocess.run([shutil.which("java"), "-jar", str(jar)],
                              capture_output=True, text=True)
@@ -4217,7 +4224,7 @@ class TestTheHostServicesAgreeToo:
         ours.mkdir()
         (ours / "prog.c").write_text(OURS_PRELUDE + source, encoding="utf-8")
         built = _uasm("build", "-b", "c", "-o", "prog.exe", "prog.c",
-                           cwd=ours)
+                           "--link", cwd=ours)
         assert built.returncode == 0, built.stderr
         ran = subprocess.run([str(ours / "prog.exe"), *HOST_ARGS],
                              capture_output=True, text=True, input=HOST_INPUT,
@@ -4409,7 +4416,7 @@ class TestSeveralTranslationUnits:
         (ours / "main.c").write_text(OURS_PRELUDE + first, encoding="utf-8")
         (ours / "other.c").write_text(second, encoding="utf-8")
         made = _uasm("build", "-b", "c", "-o", "prog.exe", "main.c",
-                     "--c:unit", "other.c", cwd=ours)
+                     "--c:unit", "other.c", "--link", cwd=ours)
         assert made.returncode == 0, made.stdout + made.stderr
         ran = subprocess.run([str(ours / "prog.exe")], capture_output=True,
                              text=True, cwd=str(ours))

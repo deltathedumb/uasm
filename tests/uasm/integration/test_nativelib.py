@@ -84,8 +84,18 @@ class TestImportingADeclaredLibrary:
             print({CALL})
         """)
         out = tmp_path / "prog.exe"
+        # `--link` BECAUSE `build` STOPS AT AN UNLINKED OBJECT, and what this
+        # class checks is a program that runs -- an object would only show the
+        # declaration compiled, never that the library was found and called.
+        #
+        # `-ln cc` BECAUSE A DECLARED LIBRARY IS A SHARED LIBRARY, and the
+        # builtin linker says outright that it links none; it is the default
+        # now that `build` no longer goes through the C backend, so the one
+        # toolchain here that can resolve `libm.so.6` has to be asked for by
+        # name. The build in the test below wants both for the same reasons.
         built = _cli("build", str(prog), "--native-library", str(libs),
-                     "-o", str(out), "--workdir", str(tmp_path / "wd"))
+                     "--link", "-ln", "cc", "-o", str(out),
+                     "--workdir", str(tmp_path / "wd"))
         assert built.returncode == 0, built.stdout + built.stderr
         ran = subprocess.run([str(out)], capture_output=True, text=True)
         assert ran.returncode == 0, ran.stdout + ran.stderr
@@ -106,7 +116,8 @@ class TestImportingADeclaredLibrary:
         """)
         out = tmp_path / "prog.exe"
         built = _cli("build", str(prog), "--native-library", str(libs),
-                     "-o", str(out), "--workdir", str(tmp_path / "wd"))
+                     "--link", "-ln", "cc", "-o", str(out),
+                     "--workdir", str(tmp_path / "wd"))
         assert built.returncode == 0, built.stdout + built.stderr
 
     def test_a_program_declaring_nothing_is_unaffected(self, tmp_path):

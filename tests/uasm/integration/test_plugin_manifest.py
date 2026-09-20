@@ -126,7 +126,7 @@ class TestAddIsRemembered:
     def test_it_survives_into_a_build(self, ws):
         run(ws, "plugin", "add", "my_plugin_module")
         done = run(ws, "build", "prog.py", "--backend", "my-backend",
-                   "--toolchain", "my-linker", "-o", "out.bin")
+                   "--toolchain", "my-linker", "--link", "-o", "out.bin")
         assert done.returncode == 0, done.stderr + done.stdout
         assert (ws / "out.bin").read_bytes() == b"linked\n"
 

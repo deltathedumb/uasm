@@ -44,9 +44,15 @@ def write(tmp_path: Path, source: str) -> Path:
 
 
 def build_and_run(tmp_path: Path, source: str) -> subprocess.CompletedProcess:
+    """Compile through the C backend and run what comes out.
+
+    `--link` BECAUSE `build` STOPS AT AN UNLINKED OBJECT and every caller of
+    this helper is asking what the host services DO when the program runs,
+    which an object file cannot be made to answer.
+    """
     out = tmp_path / "prog.exe"
     built = _cli("build", str(write(tmp_path, source)), "--backend", "c",
-                 "-o", str(out), "--workdir", str(tmp_path / "wd"))
+                 "--link", "-o", str(out), "--workdir", str(tmp_path / "wd"))
     assert built.returncode == 0, built.stdout + built.stderr
     return subprocess.run([str(out)], capture_output=True, text=True,
                           cwd=str(tmp_path))

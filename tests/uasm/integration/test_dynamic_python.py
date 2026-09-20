@@ -10846,6 +10846,36 @@ PROGRAMS = {
         except ValueError as e:
             print("other exception travels:", e)
     """,
+    # A MUTABLE ANSWER MUST NEVER BE A SHARED CELL, which is the hazard the
+    # shared empty and one-byte values created and the one thing a program
+    # can see go wrong everywhere at once. `bytearray.fromhex("41")` used to
+    # build the SHARED `b"A"` and then write "mutable" onto it, so every
+    # later one-byte bytes in the program -- literals included -- was a
+    # bytearray. The order below is the test: the same expression before and
+    # after, and a literal at the end that nothing in between went near.
+    "a_bytearray_does_not_poison_the_shared_bytes": """
+        print("fromhex before:", bytes.fromhex("41"),
+              type(bytes.fromhex("41")).__name__)
+        made = bytearray.fromhex("41")
+        print("the bytearray:", made, type(made).__name__)
+        print("fromhex after:", bytes.fromhex("41"),
+              type(bytes.fromhex("41")).__name__)
+        print("a literal:", b"A", type(b"A").__name__)
+        print("the empty one:", bytearray.fromhex(""),
+              bytes.fromhex(""), b"", type(b"").__name__)
+
+        # AND THE RECEIVER DECIDES, which is the behaviour the re-tagging was
+        # there to produce: reached through a bytearray the answer is one,
+        # reached through bytes or the type it is not.
+        print("through a value:", type(bytearray(b"x").fromhex("41")).__name__,
+              type(b"x".fromhex("41")).__name__)
+        print("still a literal:", b"A", type(b"A").__name__)
+
+        # THE SAME SHAPE FOR THE OTHER CONSTRUCTOR that takes a shared cell.
+        one = bytearray(b"A")
+        one.append(66)
+        print("appended:", one, b"A", type(b"A").__name__)
+    """,
 }
 
 

@@ -144,9 +144,15 @@ class TestItIsReachableFromTheCommandLine:
 
 class TestItBuildsWithThirdPartyPartsOnly:
     def test_backend_target_and_toolchain_together(self, workspace):
+        """`--link` BECAUSE `build` STOPS AT AN UNLINKED OBJECT.
+
+        A third party's toolchain is only exercised once something asks for
+        a program, so without the flag `counting-link` would never be called
+        and `out.bin` would hold the backend's artifact instead.
+        """
         done = run(workspace, "build", "prog.py", "--plugin", "mypack",
                    "--backend", "counting", "--toolchain", "counting-link",
-                   "-o", "out.bin")
+                   "--link", "-o", "out.bin")
         assert done.returncode == 0, done.stderr + done.stdout
         assert (workspace / "out.bin").read_bytes() == b"counted\n"
 
