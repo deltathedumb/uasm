@@ -13,18 +13,30 @@
 
 
 def apy_default_eq(a: ptr, b: ptr) -> ptr:
-    """`object.__eq__`: equal only to itself.
+    """`object.__eq__`: equal to itself, and NOT UNEQUAL to anything else.
 
-    THE SAME COMPARISON AS `apy_is`, and deliberately a separate function.
-    They are one line each and could share, but they answer different
+    NEARLY THE SAME COMPARISON AS `apy_is`, and deliberately a separate
+    function. They are short enough to share and they answer different
     questions: `is` is what a program WRITES, and this is what a class
     INHERITS. A class overriding `__eq__` replaces this and leaves `is`
     alone, so a shared implementation would tie two things together that are
-    supposed to come apart.
+    supposed to come apart -- and they no longer even agree, which is the
+    change here.
+
+    NotImplemented AND NOT False FOR A PAIR IT CANNOT JUDGE.
+    `object_richcompare` answers Py_True for identity and NotImplemented for
+    everything else: it does not claim two different objects are unequal, it
+    declines to say. `object.__eq__(1, 2)` is NotImplemented in CPython and
+    was False here, and False is a CLAIM where CPython makes none.
+
+    THE `==` OPERATOR IS NOT THIS. `apy_eq` asks the written dunders and
+    falls back to a raw comparison, so `a == b` for two plain instances still
+    answers False -- the identity fallback lives there, where CPython's
+    `do_richcompare` keeps it, and not in the method.
     """
     if u64(a) == u64(b):
         return apy_from_bool(1)
-    return apy_from_bool(0)
+    return apy_notimplemented()
 
 
 def apy_default_hash(v: ptr) -> ptr:

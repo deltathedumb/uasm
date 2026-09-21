@@ -1946,11 +1946,26 @@ APY_API apy_value apy_default_repr(apy_value v) {
     return apy_str_copy(buf, (int64_t)strlen(buf));
 }
 
-/* `object.__eq__(a, b)` is IDENTITY, and `object.__hash__(x)` agrees with it.
-   That pairing is the contract: two objects that compare equal must hash
-   equally, and the default satisfies it by comparing nothing but address. */
+/* `object.__eq__(a, b)` is IDENTITY OR NotImplemented, and
+   `object.__hash__(x)` agrees with it. That pairing is the contract: two
+   objects that compare equal must hash equally, and the default satisfies it
+   by comparing nothing but address.
+
+   NOT False FOR A PAIR IT CANNOT JUDGE, which is the half this had wrong.
+   `object_richcompare` answers Py_True for identity and NotImplemented for
+   everything else -- it does not claim two different objects are unequal, it
+   declines to say. The difference shows the moment a program writes the
+   method out: `object.__eq__(1, 2)` is NotImplemented in CPython and was
+   False here, and False is a CLAIM where CPython makes none.
+
+   THE `==` OPERATOR IS NOT THIS. `apy_eq` asks the written dunders and falls
+   back to `apy_eq_raw`, so `a == b` for two plain instances still answers
+   False -- the identity fallback lives there, where CPython's
+   `do_richcompare` keeps it, and not in the method. Measured both ways
+   before this was changed. */
 APY_API apy_value apy_default_eq(apy_value a, apy_value b) {
-    return apy_from_bool(a == b);
+    if (a == b) return apy_from_bool(1);
+    return apy_notimplemented();
 }
 
 /* `object.__init__(self)` -- the default, which does nothing. A subclass

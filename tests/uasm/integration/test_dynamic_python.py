@@ -4573,6 +4573,91 @@ PROGRAMS = {
         w("bound value 4", lambda: bm(1, 2, 3, 4))
         w("metaclass new", lambda: (WithMeta.made, type(WithMeta).__name__))
     """,
+    # `object.__ne__` IS NOT `object.__eq__`, and the frontend's table said it
+    # was: `OBJECT_DEFAULTS` mapped both names to `apy_default_eq` on adjacent
+    # lines, so a written `object.__ne__(x, y)` computed EQUALITY.
+    # `object.__ne__(1, 1)` answered True and `object.__ne__(1, 2)` False,
+    # each the exact opposite of CPython's. It reads as a copied line rather
+    # than a decision.
+    #
+    # AND `object.__eq__` DECLINES WHERE IT USED TO CLAIM.
+    # `object_richcompare` answers True for identity and NotImplemented for
+    # everything else -- it does not say two different objects are unequal, it
+    # says it cannot judge. `object.__eq__(1, 2)` is NotImplemented there and
+    # was False here, and False is a claim CPython does not make.
+    #
+    # THE `==` OPERATOR IS NOT THIS and is unchanged: `a == b` for two plain
+    # instances is still False, because the identity fallback lives in the
+    # operator -- where CPython's `do_richcompare` keeps it -- and not in the
+    # method. Both are measured below, side by side, because moving the one
+    # would have been the easy way to break the other.
+    #
+    # WHAT `__ne__` ASKS IS THE RECEIVER'S `__eq__`, and only the receiver's:
+    # `object.__ne__(A(), B())` is NotImplemented even when B writes one, and
+    # `object.__ne__(B(), A())` is False when B's says True. There is no
+    # reflection here, which is what makes it different from `!=`.
+    "objects_ne_is_not_eq_and_eq_declines_to_judge": """
+        def w(label, f):
+            try:
+                print(f"{label:30} {f()!r}")
+            except Exception as e:
+                print(f"{label:30} !{type(e).__name__}: {e}")
+
+        class P:
+            pass
+
+        class Q:
+            def __eq__(self, other):
+                return NotImplemented
+
+        class R:
+            def __eq__(self, other):
+                return True
+
+        class A2:
+            pass
+
+        class B2:
+            def __eq__(self, other):
+                return True
+
+        class S(str):
+            pass
+
+        a, b, q = P(), P(), Q()
+        # `object.__eq__` IS IDENTITY OR NOTHING.
+        w("eq 1 2", lambda: object.__eq__(1, 2))
+        w("eq 1 1", lambda: object.__eq__(1, 1))
+        w("eq a b", lambda: object.__eq__(a, b))
+        w("eq a a", lambda: object.__eq__(a, a))
+        w("eq R R", lambda: object.__eq__(R(), R()))
+        w("eq S S", lambda: object.__eq__(S("a"), S("a")))
+        # `object.__ne__` DERIVES FROM THE RECEIVER'S `__eq__`.
+        w("ne 1 2", lambda: object.__ne__(1, 2))
+        w("ne 1 1", lambda: object.__ne__(1, 1))
+        w("ne a b", lambda: object.__ne__(a, b))
+        w("ne a a", lambda: object.__ne__(a, a))
+        w("ne str", lambda: object.__ne__("a", "b"))
+        w("ne list", lambda: object.__ne__([1], [1]))
+        w("ne R", lambda: object.__ne__(R(), R()))
+        w("ne Q", lambda: object.__ne__(Q(), Q()))
+        w("ne q q", lambda: object.__ne__(q, q))
+        # NO REFLECTION: only the LEFT operand's type is asked.
+        w("ne A2 B2", lambda: object.__ne__(A2(), B2()))
+        w("ne B2 A2", lambda: object.__ne__(B2(), A2()))
+        # A CLASS EXTENDING A BUILTIN COMPARES AS THE BUILTIN.
+        w("ne S S", lambda: object.__ne__(S("a"), S("a")))
+        # AND THE OPERATORS ARE UNTOUCHED, which is the other half.
+        w("a == b", lambda: a == b)
+        w("a != b", lambda: a != b)
+        w("a == a", lambda: a == a)
+        w("a != a", lambda: a != a)
+        w("q == q", lambda: q == q)
+        w("q != q", lambda: q != q)
+        w("S == S", lambda: S("a") == S("a"))
+        w("1 == 1", lambda: 1 == 1)
+        w("[1] != [1]", lambda: [1] != [1])
+    """,
     # A CLASS REACHED AS A TYPE INHERITS, and did not. `P.__eq__`,
     # `P.__init__`, `P.__repr__` and eight more were every one an
     # AttributeError about an attribute Python guarantees; `S.upper` for a

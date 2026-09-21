@@ -47,7 +47,12 @@ OBJECT_DEFAULTS = {
     "__repr__": ("apy_default_repr", 1),
     "__str__": ("apy_default_repr", 1),
     "__eq__": ("apy_default_eq", 2),
-    "__ne__": ("apy_default_eq", 2),
+    # NOT `apy_default_eq`, WHICH IS WHAT THIS SAID. The two names sat on
+    # adjacent lines mapping to one symbol, so a written `object.__ne__(x, y)`
+    # computed EQUALITY -- `object.__ne__(1, 1)` was True and
+    # `object.__ne__(1, 2)` False, each the exact opposite of CPython's. It
+    # reads as a copied line rather than a decision.
+    "__ne__": ("apy_default_ne", 2),
     "__hash__": ("apy_default_hash", 1),
     "__init__": ("apy_default_init", 1),
 }

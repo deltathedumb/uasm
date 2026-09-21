@@ -9770,6 +9770,37 @@ def _object_root(h):
     return h._get(_apy_object_class(h, []), "apy_object_class")
 
 
+def _self_eq(h, a, b):
+    """What `object.__ne__` asks: the RECEIVER's own `__eq__`, and no other.
+
+    A WRITTEN `__eq__` WINS, then the builtin an instance extends, then
+    `object`'s identity. A value that is not an instance is a real Python
+    object here, so its own `__eq__` IS CPython's and answers NotImplemented
+    for a pair it cannot judge without any help from this.
+    """
+    if isinstance(a, Instance):
+        # ASKED WHETHER THE CLASS HAS ONE BEFORE IT IS CALLED, because
+        # `_send` answers NotImplemented for BOTH "no such method" and "the
+        # method returned NotImplemented" -- and here those are different
+        # answers. A class whose `__eq__` returns NotImplemented makes
+        # `object.__ne__(q, q)` NotImplemented in CPython, where the identity
+        # fallback below would make it False.
+        if a.cls.find("__eq__") is not None:
+            return a._send("__eq__", b)
+        # A CLASS EXTENDING A BUILTIN COMPARES AS THE BUILTIN, which is what
+        # inheriting its `tp_richcompare` means: `object.__ne__(S("a"),
+        # S("a"))` for a `class S(str)` is False in CPython, and identity
+        # alone answers NotImplemented -- a wrong "cannot say" about a pair
+        # str knows perfectly well.
+        got = _held_binary(a, "__eq__", b)
+        if got is not NotImplemented:
+            return got
+        return True if a is b else NotImplemented
+    if isinstance(b, Instance):
+        return True if a is b else NotImplemented
+    return a.__eq__(b)
+
+
 def _object_class_entry(h):
     """The one getset descriptor `object.__dict__["__class__"]` holds.
 
@@ -9828,9 +9859,40 @@ def _object_default(h, name: str):
         body = lambda v, *a: (_inst_repr(v) if isinstance(v, Instance)
                               else h._text(v, True))
     elif name == "__eq__":
-        body = lambda a, b, *r: a is b
+        # IDENTITY OR NotImplemented, and not False for a pair it cannot
+        # judge. `object_richcompare` answers True for identity and
+        # NotImplemented for everything else: it does not claim two different
+        # objects are unequal, it declines to say. `object.__eq__(1, 2)` is
+        # NotImplemented in CPython and was False here, and False is a CLAIM
+        # where CPython makes none.
+        #
+        # THE `==` OPERATOR IS NOT THIS. `Instance.__eq__` asks the written
+        # dunder and falls back to identity, so `a == b` for two plain
+        # instances still answers False -- the fallback lives there, where
+        # CPython's `do_richcompare` keeps it, and not in the method.
+        body = lambda a, b, *r: True if a is b else NotImplemented
     elif name == "__ne__":
-        body = lambda a, b, *r: a is not b
+        # DERIVED FROM `__eq__`, AND FROM THE RECEIVER'S. CPython's
+        # `object_richcompare` under Py_NE calls
+        # `Py_TYPE(self)->tp_richcompare(self, other, Py_EQ)` and inverts what
+        # comes back unless it is NotImplemented. So the answer depends on the
+        # type of the LEFT operand only: `object.__ne__(A(), B())` is
+        # NotImplemented even when B writes an `__eq__`, and
+        # `object.__ne__(B(), A())` is False when B's says True. Measured both
+        # ways -- there is no reflection here, which is what makes this
+        # different from the `!=` operator.
+        #
+        # THIS INVERTED IDENTITY INSTEAD, so every row was wrong:
+        # `object.__ne__(1, 2)` was False where CPython asks int's `__eq__`
+        # and answers True, and `object.__ne__(a, a)` was True where CPython
+        # answers False.
+        def body(a, b, *r):
+            # THE SAME RULE THE WRITTEN SPELLING REACHES, through the same
+            # helper: a program may say `object.__ne__(x, y)`, which the
+            # frontend lowers straight to `apy_default_ne`, or read the method
+            # off the dict and call it, which arrives here.
+            got = _self_eq(h, a, b)
+            return got if got is NotImplemented else not got
     elif name == "__hash__":
         body = lambda v, *a: id(v)
     elif name == "__init_subclass__":
@@ -11656,11 +11718,42 @@ def _apy_default_repr(h, a):
 
 
 def _apy_default_eq(h, a):
-    """IDENTITY, and `__hash__` agrees with it. That pairing is the contract:
-    two objects that compare equal must hash equally, and the default
-    satisfies it by comparing nothing but identity."""
-    return h._bool(h._get(a[0], "apy_default_eq")
-                   is h._get(a[1], "apy_default_eq"))
+    """IDENTITY OR NotImplemented, and `__hash__` agrees with it. That pairing
+    is the contract: two objects that compare equal must hash equally, and the
+    default satisfies it by comparing nothing but identity.
+
+    NOT False FOR A PAIR IT CANNOT JUDGE. `object_richcompare` answers True
+    for identity and NotImplemented for everything else -- it does not claim
+    two different objects are unequal, it declines to say.
+    `object.__eq__(1, 2)` is NotImplemented in CPython and was False here, and
+    False is a CLAIM where CPython makes none.
+
+    THE `==` OPERATOR IS NOT THIS, and still falls back to identity: see
+    `Instance.__eq__`, which is where CPython's `do_richcompare` keeps it.
+    """
+    one = h._get(a[0], "apy_default_eq")
+    if one is h._get(a[1], "apy_default_eq"):
+        return h._bool(True)
+    return h._new(NotImplemented)
+
+
+def _apy_default_ne(h, a):
+    """`object.__ne__(a, b)` -- derived from `__eq__`, and from the RECEIVER's.
+
+    A FUNCTION OF ITS OWN, which is the whole of the bug this closes. The
+    frontend's `OBJECT_DEFAULTS` mapped both `__eq__` and `__ne__` to
+    `apy_default_eq`, so a written `object.__ne__(x, y)` computed EQUALITY:
+    `object.__ne__(1, 1)` answered True and `object.__ne__(1, 2)` False, each
+    the exact opposite of CPython's.
+
+    NotImplemented PASSES THROUGH UNINVERTED. `not NotImplemented` is False,
+    which would turn "I cannot say" into "they are equal".
+    """
+    got = _self_eq(h, h._get(a[0], "apy_default_ne"),
+                   h._get(a[1], "apy_default_ne"))
+    if got is NotImplemented:
+        return h._new(NotImplemented)
+    return h._bool(not got)
 
 
 def _apy_default_hash(h, a):
@@ -14760,6 +14853,7 @@ _TABLE.update({
     "apy_default_getattr": _apy_default_getattr,
     "apy_default_repr": _apy_default_repr,
     "apy_default_eq": _apy_default_eq,
+    "apy_default_ne": _apy_default_ne,
     "apy_default_hash": _apy_default_hash,
     "apy_default_init": _apy_default_init,
     "apy_getattr": _apy_getattr,

@@ -1664,6 +1664,61 @@ static apy_value apy_kind_compare(const char *w, apy_value a, apy_value b) {
     return apy_ge(a, b);
 }
 
+/* WHAT `object.__ne__` ASKS: the RECEIVER's own `__eq__`, and nothing else.
+
+   CPython's `object_richcompare` under Py_NE calls
+   `Py_TYPE(self)->tp_richcompare(self, other, Py_EQ)` and inverts what comes
+   back unless it is NotImplemented. So the answer depends on the type of the
+   LEFT operand only -- `object.__ne__(A(), B())` is NotImplemented even when
+   B writes an `__eq__`, and `object.__ne__(B(), A())` is False when B's says
+   True. Measured both ways; there is no reflection here, which is what makes
+   this different from the `!=` operator.
+
+   A WRITTEN `__eq__` WINS, which `apy_kind_compare` alone cannot give: its
+   own comment says an instance reaching it has no comparison of its own,
+   because the class chain is searched before it. So the chain is searched
+   here first, and what is left falls to it -- an instance without one gets
+   `object`'s identity, and a builtin value gets its kind's. */
+static apy_value apy_self_eq(apy_value a, apy_value b) {
+    if (O(a)->kind == APY_INST_K) {
+        apy_value hook = apy_class_find(O(a)->v.o.cls, apy_name("__eq__"));
+        if (hook) {
+            apy_value arg = b;
+            return apy_call_n(apy_bind(hook, a), &arg, 1);
+        }
+        /* AND A CLASS EXTENDING A BUILTIN COMPARES AS THE BUILTIN, which is
+           what inheriting its `tp_richcompare` means: `object.__ne__(S("a"),
+           S("a"))` for a `class S(str)` is False in CPython, and identity
+           alone answers NotImplemented -- a wrong "cannot say" about a pair
+           str knows perfectly well. The same unwrap `apy_eq` does. */
+        if (O(a)->v.o.held) {
+            apy_value hb = (O(b)->kind == APY_INST_K && O(b)->v.o.held)
+                ? apy_as_builtin(b, "__eq__") : b;
+            return apy_kind_compare("__eq__",
+                                    apy_as_builtin(a, "__eq__"), hb);
+        }
+    }
+    return apy_kind_compare("__eq__", a, b);
+}
+
+/* `object.__ne__(a, b)` -- DERIVED FROM `__eq__`, AND FROM THE RECEIVER'S.
+
+   A SYMBOL OF ITS OWN, which is the whole of the bug this closes. The
+   frontend's `OBJECT_DEFAULTS` mapped BOTH `__eq__` and `__ne__` to
+   `apy_default_eq`, so a written `object.__ne__(x, y)` computed EQUALITY:
+   `object.__ne__(1, 1)` answered True and `object.__ne__(1, 2)` False, each
+   the exact opposite of CPython. The two names sat on adjacent lines of one
+   table and it reads as a copied line rather than a decision.
+
+   NotImplemented PASSES THROUGH UNINVERTED. `not NotImplemented` is False,
+   which would turn "I cannot say" into "they are equal". */
+APY_API apy_value apy_default_ne(apy_value a, apy_value b) {
+    apy_value r = apy_self_eq(a, b);
+    if (!r) return r;
+    if (O(r)->kind == APY_NOTIMPL_K) return r;
+    return apy_from_bool(!apy_truth(r));
+}
+
 static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
     switch (O(f)->v.fn.native) {
     case APY_NAT_POSITIONS:
@@ -1816,10 +1871,13 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
     case APY_NAT_REPR:
     case APY_NAT_STR:      return n < 1 ? 0 : apy_default_repr(a[0]);
     case APY_NAT_EQ:       return n < 2 ? 0 : apy_default_eq(a[0], a[1]);
-    case APY_NAT_NE: {
-        apy_value r = n < 2 ? 0 : apy_default_eq(a[0], a[1]);
-        return r ? apy_from_bool(!apy_truth(r)) : r;
-    }
+    /* THE SAME BODY THE WRITTEN SPELLING REACHES, and it has to be: a
+       program may say `object.__ne__(x, y)`, which the frontend lowers
+       straight to the symbol, or read the method off the dict and call it,
+       which arrives here. Two implementations of one rule is one of them
+       waiting to drift. */
+    case APY_NAT_NE:
+        return n < 2 ? 0 : apy_default_ne(a[0], a[1]);
     case APY_NAT_HASH:     return n < 1 ? 0 : apy_default_hash(a[0]);
     case APY_NAT_GETATTR:  return n < 2 ? 0 : apy_default_getattr(a[0], a[1]);
     case APY_NAT_SETATTR:
