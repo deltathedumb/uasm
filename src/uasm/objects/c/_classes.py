@@ -515,7 +515,20 @@ APY_API apy_value apy_init_subclass(apy_value cls, apy_value kwd) {
     base = O(cls)->v.t.base;
     if (!base || O(base)->kind != APY_TYPE_K) return apy_none();
     hook = apy_class_find(base, apy_name("__init_subclass__"));
-    if (!hook) return apy_none();
+    if (!hook) {
+        /* NOBODY WROTE ONE, SO `object`'s RUNS -- and it takes no keyword,
+           so a class keyword with no hook to consume it is an error. This
+           returned silently, and `class D(Plain, extra=1)` built a class
+           where CPython raises. The message names the class BEING CREATED,
+           as CPython's does: its classmethod is bound to that class. */
+        if (kwd && O(kwd)->kind == APY_DICT_K && O(kwd)->v.d.n) {
+            char b[128];
+            snprintf(b, sizeof b, "%s.__init_subclass__() takes no keyword "
+                     "arguments", APY_CSTR(O(cls)->v.t.name));
+            return apy_fail("TypeError", b);
+        }
+        return apy_none();
+    }
     {
         apy_value arg = cls;
         /* THE CLASS KEYWORDS TRAVEL WITH IT: `class A(Base, tag="a")` is how

@@ -4259,6 +4259,74 @@ PROGRAMS = {
         print("compare:", s == "b", p == "b", hash(p) == hash("b"))
         print("keys:", {p: 1}["b"], ["b"].index(p), p in ["b"])
     """,
+    # `object.__init_subclass__` TAKES NOTHING AT ALL, which is what makes a
+    # class keyword an error rather than a silence. CPython's is a
+    # classmethod over a function of one parameter, `cls`, already bound by
+    # the time a program can reach it -- so the signature a caller sees takes
+    # no argument and no keyword.
+    #
+    # THE BINDING IS BY ARGUMENT HERE AND BY CLOSURE THERE, which is the
+    # whole difficulty: `super().__init_subclass__(**kw)` passes the class
+    # OUT, so a leading class is the bound receiver and is dropped before the
+    # count is taken. On the compiled paths the optional slot arrives filled
+    # with None for the same reason, and that is dropped too.
+    #
+    # WHAT IT COST BEFORE: `object.__init_subclass__(1, 2)` answered None on
+    # the interpreter, the compiled paths counted the bound class as a
+    # parameter and said `takes from 0 to 1 positional arguments`, and a
+    # class keyword that reached the end of the chain was swallowed -- so
+    # `class D(Plain, extra=1)` built a class on every path where CPython
+    # raises.
+    "objects_init_subclass_takes_nothing_at_all": """
+        def w(label, f):
+            try:
+                print(f"{label:30} {f()!r}")
+            except Exception as e:
+                print(f"{label:30} !{type(e).__name__}: {e}")
+
+        # A USER HOOK CONSUMES ITS KEYWORDS and ends by calling object's,
+        # which must still answer: this is the ordinary spelling.
+        class Base:
+            def __init_subclass__(cls, tag=None, **kw):
+                super().__init_subclass__(**kw)
+                cls.tag = tag
+
+        class C(Base, tag="x"):
+            pass
+
+        w("C.tag", lambda: C.tag)
+
+        class Eat:
+            def __init_subclass__(cls, **kw):
+                super().__init_subclass__()
+                cls.saw = sorted(kw)
+
+        class E(Eat, a=1, b=2):
+            pass
+
+        w("E.saw", lambda: E.saw)
+
+        # NOBODY WROTE ONE, so object's runs and the keyword is an error --
+        # named after the class BEING CREATED, as CPython names it.
+        class Plain:
+            pass
+
+        try:
+            class DTop(Plain, extra=1):
+                pass
+        except TypeError as e:
+            print(f"{'keyword, no hook':30} !TypeError: {e}")
+
+        class D2(Plain):
+            pass
+
+        w("no keyword, no hook", lambda: D2.__name__)
+        # AND WRITTEN OUT, where nothing is bound.
+        w("isc()", lambda: object.__init_subclass__())
+        w("isc(1)", lambda: object.__init_subclass__(1))
+        w("isc(1, 2)", lambda: object.__init_subclass__(1, 2))
+        w("isc(k=1)", lambda: object.__init_subclass__(k=1))
+    """,
     # A CLASS REACHED AS A TYPE INHERITS, and did not. `P.__eq__`,
     # `P.__init__`, `P.__repr__` and eight more were every one an
     # AttributeError about an attribute Python guarantees; `S.upper` for a

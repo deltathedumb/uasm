@@ -1808,7 +1808,29 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
                             "type.__new__() takes 4 arguments");
         return apy_type_from_ns(a[0], a[1], a[2], a[3]);
     case APY_NAT_TYPE_INIT:
-    case APY_NAT_INIT_SUBCLASS: return apy_none();
+    case APY_NAT_INIT_SUBCLASS: {
+        /* A LEADING CLASS IS THE BOUND RECEIVER AND NOT AN ARGUMENT.
+           CPython's is a classmethod, so `cls` is bound by the time a
+           program can call it and the signature a caller sees takes
+           nothing; here `super().__init_subclass__()` passes the class OUT,
+           because the binding is by argument rather than by closure. So it
+           is dropped, and what is left is what the caller actually wrote --
+           which for `object.__init_subclass__(1)` is one argument too many.
+           This answered None to anything at all. */
+        /* A NONE FIRST SLOT IS THE OPTIONAL DEFAULT AND NOT AN ARGUMENT,
+           which the declaration above fills whether or not a caller passed
+           anything -- so `object.__init_subclass__()` arrives here with one
+           None. The same rule `APY_NAT_BUILTIN_INIT` states for its own
+           content slot. */
+        if (n > 0 && O(a[0])->kind != APY_TYPE_K
+                && O(a[0])->kind != APY_NONE_K) {
+            char b[96];
+            snprintf(b, sizeof b, "object.__init_subclass__() takes no "
+                     "arguments (%lld given)", (long long)n);
+            return apy_fail("TypeError", b);
+        }
+        return apy_none();
+    }
     /* THE DESCRIPTOR PROTOCOL AS VALUES. A property answers `hasattr(p,
        "__get__")` with True in CPython because the methods exist; here they
        existed as runtime behaviour with nothing naming them, so a program
@@ -2603,6 +2625,18 @@ static apy_value apy_fn_arity_error(apy_value f, int64_t given, int64_t kwo) {
     if (least < 0) least = 0;
 
     if (given > bypos && !O(f)->v.fn.vararg) {
+        /* `object.__init_subclass__` SAYS IT TAKES NOTHING, because that is
+           the signature a caller sees: CPython binds `cls` and this does
+           not, so the generic sentence counted the bound class as a
+           parameter and said `takes from 0 to 1 positional arguments`. The
+           count excludes the class for the same reason -- see the body in
+           `apy_native_call`, which drops it. */
+        if (O(f)->v.fn.native == APY_NAT_INIT_SUBCLASS) {
+            char b[96];
+            snprintf(b, sizeof b, "object.__init_subclass__() takes no "
+                     "arguments (%lld given)", (long long)given);
+            return apy_fail("TypeError", b);
+        }
         if (least == bypos)
             snprintf(lead, sizeof lead,
                      "%s() takes %lld positional argument%s", who,
@@ -3891,6 +3925,16 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
                owns it, and owns every name at once; by this point the only
                keyword still unplaced is one the signature does not declare
                at all. */
+            /* AND `object.__init_subclass__` TAKES NO KEYWORD AT ALL,
+               which CPython words as a fact about the signature rather than
+               about the name given: a class keyword that reaches the end of
+               the `__init_subclass__` chain is an error, and this is where
+               the chain ends. */
+            if (O(f)->kind == APY_FUNC_K
+                    && O(f)->v.fn.native == APY_NAT_INIT_SUBCLASS)
+                return apy_fail("TypeError",
+                                "object.__init_subclass__() takes no "
+                                "keyword arguments");
             snprintf(b, sizeof b,
                      "%s() got an unexpected keyword argument '%s'",
                      who, APY_CSTR(nm));

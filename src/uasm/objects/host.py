@@ -9755,7 +9755,35 @@ def _object_default(h, name: str):
     elif name == "__init_subclass__":
         # Every class has one, and a user hook ends by calling it: `object`'s
         # is the no-op that terminates the chain.
-        body = lambda *a, **kw: None
+        #
+        # AND IT TAKES NOTHING AT ALL, which is what makes a class keyword
+        # an error rather than a silence. CPython's is a classmethod over a
+        # function of one parameter, `cls`, already bound by the time a
+        # program can reach it -- so `object.__init_subclass__(1)` is
+        # `takes no arguments (1 given)` and `object.__init_subclass__(k=1)`
+        # is `takes no keyword arguments`. This swallowed both, which is how
+        # `class D(Plain, extra=1)` came to build a class here and raise in
+        # CPython: the keyword reached the end of the chain and nothing was
+        # left to refuse it.
+        def body(*a, **kw):
+            # A LEADING CLASS IS THE BOUND RECEIVER AND NOT AN ARGUMENT.
+            # CPython's is a classmethod, so `cls` is already bound by the
+            # time a program can call it and the signature a caller sees
+            # takes nothing. Here `super().__init_subclass__(**kw)` reaches
+            # this body with the class passed OUT, because the binding is by
+            # argument rather than by closure -- so it is dropped here, and
+            # what is left is what the caller actually wrote.
+            rest = a[1:] if a and isinstance(a[0], Class) else a
+            if kw:
+                h._fail("TypeError", "object.__init_subclass__() takes no "
+                                     "keyword arguments")
+                raise _UserFailed
+            if rest:
+                h._fail("TypeError",
+                        f"object.__init_subclass__() takes no arguments "
+                        f"({len(rest)} given)")
+                raise _UserFailed
+            return None
     elif name == "__getattribute__":
         # THE DEFAULT LOOKUP AND NOT `_apy_getattr`, which asks the class for
         # an override first: `object.__getattribute__(self, n)` inside such an
@@ -9823,7 +9851,13 @@ def _object_default(h, name: str):
         body = _unbound_kind(h, name)
     else:
         return None
-    made = Native(name, body)
+    # `__init_subclass__` TAKES ITS OWN KEYWORDS, which is the only way its
+    # body can refuse them in CPython's words. The generic refusal names the
+    # OWNER, and this Native has none -- `object.__init_subclass__(k=1)` was
+    # `NoneType.__init_subclass__() takes no keyword arguments`, about a
+    # receiver that is not there. Variadic hands the keywords to the body,
+    # which says `object.__init_subclass__()` because it knows whose it is.
+    made = Native(name, body, variadic=(name == "__init_subclass__"))
     h._defaults[name] = made
     # ONE CELL AND SO ONE HANDLE -- see `_value`, which reads this set.
     if isinstance(made, Native):
@@ -10120,6 +10154,16 @@ def _apy_init_subclass(h, a):
         return h._none
     hook = cls.base.find("__init_subclass__")
     if hook is None:
+        # NOBODY WROTE ONE, SO `object`'s RUNS -- and it takes no keyword,
+        # so a class keyword with no hook to consume it is an error. This
+        # returned silently, and `class D(Plain, extra=1)` built a class
+        # where CPython raises. The message names the class BEING CREATED,
+        # as CPython's does: its classmethod is bound to that class.
+        left = h._get(a[1], "apy_init_subclass") if len(a) > 1 else {}
+        if left:
+            return h._fail("TypeError",
+                           f"{cls.name}.__init_subclass__() takes no "
+                           f"keyword arguments")
         return h._none
     # THE CLASS KEYWORDS TRAVEL WITH IT: `class A(Base, tag="a")` is how a
     # program configures the hook, and dropping them left every subclass
