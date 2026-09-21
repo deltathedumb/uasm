@@ -296,6 +296,9 @@ class _Emitter:
     lines: list[str] = field(default_factory=list)
     #: Byte offset from SP where alloca space begins.
     alloca_base: int = 0
+    #: Offset from sp of the word an indirect call parks its target in, or 0
+    #: for a function that makes none. See `Op.CALL_PTR`.
+    call_slot: int = 0
     alloca_used: int = 0
 
     def emit(self, text: str) -> None:
@@ -532,8 +535,17 @@ class Arm64Backend(Backend):
                            if ins.op is Op.ALLOCA)
         e.alloca_base = alloc.frame_size
         frame = alloc.frame_size + alloca_bytes + 8 * len(saved)
-        frame = (frame + 15) & ~15
         saved_base = alloc.frame_size + alloca_bytes
+        # AND ONE WORD MORE FOR AN INDIRECT CALL'S TARGET. The address has to
+        # survive the argument shuffle and NO REGISTER CAN HOLD IT: an
+        # allocated one is a destination the shuffle may write, x16 is its
+        # memory-to-memory staging and x17 is what it breaks a cycle through.
+        # A slot is the only place it cannot be reached from. Reserved only
+        # where there is such a call. See `Op.CALL_PTR`.
+        if any(ins.op is Op.CALL_PTR for _, ins in fn.instructions()):
+            e.call_slot = frame
+            frame += 8
+        frame = (frame + 15) & ~15
 
         if frame > MAX_FRAME:
             # SEE `MAX_FRAME`. Refusing beats emitting a frame whose upper
@@ -770,16 +782,32 @@ class Arm64Backend(Backend):
 
             case Op.CALL | Op.CALL_PTR:
                 if op is Op.CALL_PTR:
-                    # Loaded before the arguments: x17 is reserved, so the
-                    # argument moves cannot clobber it.
-                    target = e.into(ins.args[0], SCRATCH_B)
-                    if target != SCRATCH_B:
-                        e.emit(f"mov {SCRATCH_B}, {target}")
+                    # THE TARGET IS PARKED, AND NOT LEFT IN x17. It was loaded
+                    # into x17 here before the arguments moved -- the right
+                    # ORDER -- under a comment saying x17 is reserved so the
+                    # argument moves cannot clobber it. Reserved means the
+                    # ALLOCATOR never uses it; the shuffle does, and x17 is
+                    # exactly what `_emit_parallel_moves` breaks a cycle
+                    # through. So a call with enough arguments to make a cycle
+                    # overwrote the target with an argument and branched to
+                    # it. The x86-64 emitter had the same mistake wearing the
+                    # other face -- there the target was read too LATE, out of
+                    # a register an argument had since been written to -- and
+                    # a slot is the answer to both.
+                    held = e.into(ins.args[0], SCRATCH_B)
+                    if held != SCRATCH_B:
+                        e.emit(f"mov {SCRATCH_B}, {held}")
+                    e.emit(f"str {SCRATCH_B}, [sp, #{e.call_slot}]")
                 adjust = self._place_arguments(e, ins, abi,
                                                skip_first=op is Op.CALL_PTR)
                 if op is Op.CALL:
                     e.emit(f"bl {self.symbol(ins.sym, dialect)}")
                 else:
+                    # `+ adjust` BECAUSE SP HAS MOVED. `_place_arguments`
+                    # subtracts it for the stacked arguments, and every slot
+                    # read after that carries the same bias -- see `bias` in
+                    # there.
+                    e.emit(f"ldr {SCRATCH_B}, [sp, #{e.call_slot + adjust}]")
                     e.emit(f"blr {SCRATCH_B}")
                 if adjust:
                     _move_sp(e, "add", adjust)
