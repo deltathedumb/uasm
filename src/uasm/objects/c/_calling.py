@@ -219,6 +219,82 @@ APY_API apy_value apy_type_builtin_pending(apy_value name, int64_t kind) {
     return apy_none();
 }
 
+/* Does anything ABOVE this class in its chain already carry `want`?
+
+   The class's own dict is deliberately not looked at: the question is
+   whether an ANCESTOR supplies the slot, and a class that supplies it to
+   itself is exactly the case that has to answer no. */
+static int apy_above_carries(apy_value cls, const char *want) {
+    apy_value order = O(cls)->v.t.mro;
+    int64_t i;
+    if (order && apy_is_seq(order)) {
+        for (i = 1; i < O(order)->v.q.n; i++) {
+            apy_value here = O(order)->v.q.items[i];
+            if (here && O(here)->kind == APY_TYPE_K
+                    && apy_dict_find(O(here)->v.t.dict, apy_name(want)) >= 0)
+                return 1;
+        }
+        return 0;
+    }
+    {
+        apy_value here = O(cls)->v.t.base;
+        while (here && O(here)->kind == APY_TYPE_K) {
+            if (apy_dict_find(O(here)->v.t.dict, apy_name(want)) >= 0)
+                return 1;
+            here = O(here)->v.t.base;
+        }
+    }
+    return 0;
+}
+
+/* `__dict__` and `__weakref__`: the two slots `type.__new__` adds, and the
+   last two names in a class dict before `__doc__`.
+
+   BOTH ARE `getset_descriptor`s and neither is written by a program -- they
+   stand for storage the instance layout provides, which is why a class
+   DECLARING `__slots__` gets neither and why a subclass of a class that
+   already has them gets neither: the storage is there once.
+
+   A BUILTIN BASE DECIDES FOR ITSELF, and the two answers come apart. Read
+   off CPython rather than reasoned about, because the reason is a layout
+   detail: a variable-sized builtin (`tuple`, `bytes`) has no room to add a
+   weak-reference list, and one that is ALREADY weak-referenceable (`set`)
+   needs no second one -- so all three give `__dict__` and none of them
+   `__weakref__`. An EXCEPTION is the other way round: `BaseException`
+   carries an instance dict already, so a subclass adds only `__weakref__`.
+
+   `__doc__` COMES AFTER BOTH, which is why it is supplied here rather than
+   by the lowering that writes the rest: CPython's class dict ends with a
+   `__doc__` the body did not write, and the order of a class dict is
+   readable. */
+static void apy_type_two_slots(apy_value cls, apy_value name) {
+    int gives_dict = 1, gives_weak = 1;
+    apy_value dict = O(cls)->v.t.dict;
+    if (apy_dict_find(dict, apy_name("__slots__")) >= 0)
+        gives_dict = gives_weak = 0;
+    if (apy_above_carries(cls, "__dict__")) gives_dict = 0;
+    if (apy_above_carries(cls, "__weakref__")) gives_weak = 0;
+    {
+        apy_value here = cls;
+        int kind = 0;
+        while (here && O(here)->kind == APY_TYPE_K && !kind) {
+            kind = O(here)->v.t.builtin;
+            here = O(here)->v.t.base;
+        }
+        if (kind == APY_TUPLE_K || kind == APY_BYTES_K || kind == APY_SET_K)
+            gives_weak = 0;
+    }
+    if (name && O(name)->kind == APY_STR_K
+            && apy_exc_parent(APY_CSTR(name)) != NULL)
+        gives_dict = 0;
+    if (gives_dict)
+        apy_dict_set(dict, apy_name("__dict__"), apy_getset_descriptor());
+    if (gives_weak)
+        apy_dict_set(dict, apy_name("__weakref__"), apy_getset_descriptor());
+    if (apy_dict_find(dict, apy_name("__doc__")) < 0)
+        apy_dict_set(dict, apy_name("__doc__"), apy_none());
+}
+
 static apy_value apy_type_from_ns(apy_value mcls, apy_value name,
                                   apy_value bases, apy_value ns) {
     apy_value base = 0, cls;
@@ -265,6 +341,7 @@ static apy_value apy_type_from_ns(apy_value mcls, apy_value name,
     if (!apy_dict_get_or(O(cls)->v.t.dict, apy_name("__module__"), 0))
         apy_dict_set(O(cls)->v.t.dict, apy_name("__module__"),
                      apy_lit("__main__"));
+    apy_type_two_slots(cls, name);
     return cls;
 }
 

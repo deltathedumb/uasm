@@ -442,6 +442,25 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
                         O(apy_object_class())->v.t.dict,
                         apy_name("__class__"), 0))
                 return O(obj)->v.o.cls;
+            /* `x.__dict__` AND `x.__weakref__` ARE THE STORAGE, not the
+               stand-in. A class now carries a `getset_descriptor` under each
+               name -- that is what `C.__dict__` shows and what `dir(C)`
+               counts -- and finding one HERE, on an instance read, means the
+               slot it stands for: the instance's own dict, and None for a
+               weak reference nothing holds. Without this, `x.__dict__` was
+               the descriptor itself and `type(x.__dict__)` read
+               `getset_descriptor` where CPython says `dict`. */
+            if (O(found)->kind == APY_INST_K
+                    && strcmp(APY_CSTR(O(O(found)->v.o.cls)->v.t.name),
+                              "getset_descriptor") == 0) {
+                if (strcmp(want, "__dict__") == 0) {
+                    if (!apy_slot_allows(O(obj)->v.o.cls, apy_lit("__dict__")))
+                        return apy_no_attribute(obj, name);
+                    return O(obj)->v.o.dict;
+                }
+                if (strcmp(want, "__weakref__") == 0)
+                    return apy_none();
+            }
             /* A NON-DATA descriptor -- `staticmethod`, `classmethod`, or a
                user class with only `__get__` -- is asked here, after the
                instance dict has missed. */

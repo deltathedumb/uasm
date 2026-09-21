@@ -2187,6 +2187,25 @@ def apy_inst_getattr(obj: ptr, name: ptr) -> ptr:
                 if u64(found) == load(u64, offset(rvals,
                                                   rat * apy_value_size())):
                     return cls
+        # `x.__dict__` AND `x.__weakref__` ARE THE STORAGE, not the stand-in.
+        # A class now carries a `getset_descriptor` under each name -- that is
+        # what `C.__dict__` shows and what `dir(C)` counts -- and finding one
+        # HERE, on an instance read, means the slot it stands for: the
+        # instance's own dict, and None for a weak reference nothing holds.
+        # Without this, `type(x.__dict__)` read `getset_descriptor` where
+        # CPython says `dict`.
+        if i64(load(i32, offset(found, 0))) == apy_inst_kind():
+            fcls: ptr = ptr(load(u64, offset(found, apy_o_cls_offset())))
+            fname: ptr = ptr(load(u64, offset(
+                ptr(load(u64, offset(fcls, apy_t_name_offset()))),
+                apy_str_ptr_offset())))
+            if apy_cstr_eq(fname, rodata(b"getset_descriptor\0")):
+                if apy_cstr_eq(w0, rodata(b"__dict__\0")):
+                    if not apy_slot_allows_of(cls, name):
+                        return apy_no_attribute(obj, name)
+                    return ptr(load(u64, offset(obj, apy_o_dict_offset())))
+                if apy_cstr_eq(w0, rodata(b"__weakref__\0")):
+                    return apy_none()
         if apy_is_descriptor_of(found):
             return apy_descr_get_of(found, obj, cls)
         if i64(load(i32, offset(found, 0))) == apy_func_kind():

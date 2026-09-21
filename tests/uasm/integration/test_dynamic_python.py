@@ -4724,6 +4724,101 @@ PROGRAMS = {
         w("kinds differ", lambda: (type(bytes.fromhex("41")).__name__,
                                    type(bytearray.fromhex("41")).__name__))
     """,
+    # THE NAMES A `class` STATEMENT CREATES BESIDE THE BODY'S, and the
+    # ORDER they land in -- PEP 520 makes a class dict's order readable, so
+    # where a name sits is part of the answer. CPython's is `__module__`,
+    # `__firstlineno__`, the body, `__static_attributes__`, `__dict__`,
+    # `__weakref__`, and last a `__doc__` the body did not write.
+    #
+    # TWO ARE THE COMPILER'S and two are `type.__new__`'s. `__firstlineno__`
+    # is where the STATEMENT begins, which for a decorated class is the first
+    # decorator's line; `__static_attributes__` is the names its functions
+    # assign through `self`, and its rule is stranger than it sounds -- see
+    # `_static_attributes`. `__dict__` and `__weakref__` stand for storage
+    # the instance layout provides, which is why a class declaring
+    # `__slots__` gets neither, a subclass of a class that has them gets
+    # neither, and a builtin base answers for itself: the variable-sized ones
+    # give no `__weakref__`, and an exception already carries an instance
+    # dict so it takes only that.
+    "a_class_statement_creates_four_names_beside_the_bodys": """
+        class Plain:
+            x = 1
+
+            def m(self):
+                self.y = 2
+                self.z = 3
+
+        class Doc:
+            'A docstring.'
+
+            k = 1
+
+        class Sub(Plain):
+            pass
+
+        class Slotted:
+            __slots__ = ("a",)
+
+        class D(dict):
+            pass
+
+        class T(tuple):
+            pass
+
+        class E(Exception):
+            tag = 1
+
+        class Odd:
+            def m(this):
+                this.a = 1
+
+            def n(self):
+                self.b = 1
+
+            @staticmethod
+            def s():
+                self = Plain()
+                self.c = 1
+
+            def deep(self):
+                def inner():
+                    self.d = 1
+                return inner
+
+            def aug(self):
+                self.r += 1
+                (self.s1, self.s2) = (1, 2)
+
+        def w(label, f):
+            try:
+                print(f"{label:22} {f()!r}")
+            except Exception as e:
+                print(f"{label:22} !{type(e).__name__}: {e}")
+
+        w("plain order", lambda: list(Plain.__dict__))
+        w("doc order", lambda: list(Doc.__dict__))
+        w("firstlineno", lambda: Plain.__firstlineno__)
+        w("doc firstlineno", lambda: Doc.__firstlineno__)
+        w("static", lambda: Plain.__static_attributes__)
+        w("none static", lambda: Doc.__static_attributes__)
+        # THE FOUR WAYS THE RULE SURPRISES, in one tuple: `this.a` is left
+        # out, a staticmethod's local `self` is counted, a nested `def`
+        # counts, and `self.r += 1` is not a store.
+        w("odd static", lambda: Odd.__static_attributes__)
+        for label, cls in (("sub", Sub), ("slotted", Slotted), ("dict", D),
+                           ("tuple", T), ("exception", E)):
+            w(label + " slots", lambda cls=cls: ("__dict__" in cls.__dict__,
+                                                 "__weakref__" in cls.__dict__))
+        w("descriptor kind", lambda: type(Plain.__dict__["__dict__"]).__name__)
+        # AND THE STORAGE THEY STAND FOR, read off an INSTANCE: the class
+        # carries the descriptor and the instance answers its own dict.
+        w("instance dict", lambda: type(Plain().__dict__).__name__)
+        w("instance weakref", lambda: Plain().__weakref__)
+        w("slotted instance", lambda: Slotted().__dict__)
+        w("runtime built", lambda: list(type("R", (), {}).__dict__))
+        w("runtime sub", lambda: list(type("R", (Plain,), {}).__dict__))
+        w("exception works", lambda: isinstance(E("x"), Exception))
+    """,
     # PEP 3155: A CLASS QUALIFIES THROUGH WHATEVER IT WAS WRITTEN INSIDE.
     # `mk.<locals>.D` for a class written in a function, `C.Inner` for one
     # written in another class -- and the bare name at module level, which

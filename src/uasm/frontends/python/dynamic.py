@@ -238,6 +238,47 @@ DYN_METHOD = {
 }
 
 
+def _static_attributes(node: ast.ClassDef) -> tuple:
+    """3.13's `__static_attributes__`: the names this class's own functions
+    assign through `self`, sorted and without repeats.
+
+    THE RULE IS NARROWER AND WIDER THAN "the attributes an instance has", and
+    all four of the ways it surprises were read off CPython rather than
+    guessed:
+
+      * LITERALLY `self`. A method whose first parameter is named `this`
+        contributes NOTHING -- the compiler matches the name, not the
+        receiver, so `def m(this): this.a = 1` leaves `a` out.
+      * AND ANY `self`, receiver or not. A `@staticmethod` that binds a local
+        called `self` and assigns through it contributes everything it
+        assigns, because the same name match is all there is.
+      * A NESTED `def` COUNTS. `def deep(self): def inner(): self.d = 1`
+        contributes `d`, reached through the closure.
+      * AN AUGMENTED ASSIGNMENT DOES NOT. `self.r += 1` reads before it
+        writes, and CPython leaves `r` out -- which is why the targets of
+        `AugAssign` are skipped rather than walked like any other store.
+
+    A CLASS NESTED IN THE BODY IS NOT WALKED: its own functions are its own
+    statement's, and it gets its own tuple.
+    """
+    found: set = set()
+    skip: set = set()
+    for stmt in node.body:
+        if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for sub in ast.walk(stmt):
+            if isinstance(sub, ast.AugAssign):
+                skip.add(id(sub.target))
+        for sub in ast.walk(stmt):
+            if (isinstance(sub, ast.Attribute)
+                    and isinstance(sub.ctx, ast.Store)
+                    and id(sub) not in skip
+                    and isinstance(sub.value, ast.Name)
+                    and sub.value.id == "self"):
+                found.add(sub.attr)
+    return tuple(sorted(found))
+
+
 def _is_type_call(node) -> bool:
     """Is this the `type(x)` of a `type(x).__name__` pair?"""
     return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -5529,22 +5570,14 @@ class DynamicLowering:
         self._dyn_check()
         setter = "apy_dict_set"
         self._dyn_check()
-        # PEP 257: A CLASS BODY OPENING WITH A STRING BINDS `__doc__`, and a
-        # class without one binds None -- CPython puts the name in every
-        # class dict either way. It was a BARE EXPRESSION here, so it ran and
-        # vanished and `C.__doc__` was an AttributeError about the attribute
-        # `help` is built on and every docstring tool reads. Written into the
-        # mapping FIRST, so a class that assigns `__doc__` itself wins.
-        opening = node.body[0] if node.body else None
-        told = (opening.value.value
-                if isinstance(opening, ast.Expr)
-                and isinstance(opening.value, ast.Constant)
-                and isinstance(opening.value.value, str) else None)
-        self.b.call(T.PTR, setter,
-                    [cls, self._dyn_str_literal("__doc__"),
-                     self._dyn_str_literal(told) if told is not None
-                     else self.b.call(T.PTR, "apy_none", [])])
-        self._dyn_check()
+        # THE ORDER OF THESE IS OBSERVABLE. PEP 520 makes a class dict's
+        # order part of what a program can read, and CPython's is
+        # `__module__`, `__firstlineno__`, the body, `__static_attributes__`,
+        # `__dict__`, `__weakref__` and last of all a `__doc__` the body did
+        # not write. A class WITH a docstring binds `__doc__` where the
+        # docstring stands, which is first in its body -- so it is written
+        # here, between `__firstlineno__` and the rest.
+        #
         # `__module__` IS WHERE THE CLASS WAS WRITTEN, and CPython puts it in
         # every class dict -- `repr(C)` is `<class '__main__.C'>` and pickling
         # reads it to find the class again. A compiled program IS the script
@@ -5556,6 +5589,32 @@ class DynamicLowering:
                      self._dyn_str_literal(
                          _bundled_module_of(info.name) or "__main__")])
         self._dyn_check()
+        # 3.13's `__firstlineno__`: WHERE THE STATEMENT BEGINS, which for a
+        # DECORATED class is the first decorator's line and not the `class`
+        # keyword's -- `inspect.getsource` is the reader, and it wants the
+        # whole statement. Written by the compiler because nothing at run
+        # time knows it.
+        self.b.call(T.PTR, setter,
+                    [cls, self._dyn_str_literal("__firstlineno__"),
+                     self._dyn_int_literal(
+                         node.decorator_list[0].lineno if node.decorator_list
+                         else node.lineno)])
+        self._dyn_check()
+        # PEP 257: A CLASS BODY OPENING WITH A STRING BINDS `__doc__`, and a
+        # class without one binds None -- CPython puts the name in every
+        # class dict either way. It was a BARE EXPRESSION here, so it ran and
+        # vanished and `C.__doc__` was an AttributeError about the attribute
+        # `help` is built on and every docstring tool reads.
+        opening = node.body[0] if node.body else None
+        told = (opening.value.value
+                if isinstance(opening, ast.Expr)
+                and isinstance(opening.value, ast.Constant)
+                and isinstance(opening.value.value, str) else None)
+        if told is not None:
+            self.b.call(T.PTR, setter,
+                        [cls, self._dyn_str_literal("__doc__"),
+                         self._dyn_str_literal(told)])
+            self._dyn_check()
         # THE BODY'S OWN NAMESPACE while it runs. A class body is a scope
         # executed top to bottom, and a name it bound is readable further down
         # -- `y = x + 1`, and `@v.setter` reading the property that the `def v`
@@ -5614,6 +5673,22 @@ class DynamicLowering:
             self._dyn_check()
         self._class_scope = outer_scope
         self._class_binds = outer_binds
+        # 3.13's `__static_attributes__`: the names the class's own functions
+        # assign through `self`, sorted, once the body has been written.
+        # AFTER THE BODY because that is where CPython puts it -- the order
+        # of a class dict is readable, so where a name lands is part of the
+        # answer. See `_static_attributes` for the rule, which is stranger
+        # than "the attributes an instance has".
+        names = _static_attributes(node)
+        made = self.b.call(T.PTR, "apy_tuple_new",
+                           [self.b.const(T.I64, len(names) + 1)])
+        for one in names:
+            self.b.call(T.PTR, "apy_seq_push",
+                        [made, self._dyn_str_literal(one)])
+        self.b.call(T.PTR, setter,
+                    [cls, self._dyn_str_literal("__static_attributes__"),
+                     made])
+        self._dyn_check()
         # THE KIND IS ANNOUNCED BEFORE THE CLASS EXISTS, not recorded after
         # it. The `apy_type_builtin` call further down runs once
         # `apy_class_build` has ANSWERED, which for a class with a metaclass

@@ -5291,6 +5291,56 @@ def _apy_type_builtin_pending(h, a):
     return h._none
 
 
+#: The builtin bases a subclass takes NO `__weakref__` from. Read off
+#: CPython rather than reasoned about, because the reason is a layout
+#: detail: a variable-sized builtin has no room to add a weak-reference
+#: list, and one that is already weak-referenceable needs no second one.
+_NO_WEAKREF_BASE = (tuple, bytes, bytearray, set, frozenset)
+
+
+def _two_slots(h, cls, name) -> None:
+    """`__dict__` and `__weakref__`: the two slots `type.__new__` adds, and
+    the last two names in a class dict before `__doc__`.
+
+    BOTH ARE `getset_descriptor`s and neither is written by a program -- they
+    stand for storage the instance layout provides, which is why a class
+    DECLARING `__slots__` gets neither and why a subclass of a class that
+    already has them gets neither: the storage is there once.
+
+    A BUILTIN BASE DECIDES FOR ITSELF and the two answers come apart: all of
+    them give `__dict__` and the variable-sized ones give no `__weakref__`.
+    An EXCEPTION is the other way round -- `BaseException` carries an
+    instance dict already, so a subclass adds only `__weakref__`.
+
+    `__doc__` COMES AFTER BOTH, which is why it is supplied here rather than
+    by the lowering that writes the rest: CPython's class dict ends with a
+    `__doc__` the body did not write, and the order of a class dict is
+    readable. The C twin is `apy_type_two_slots`.
+    """
+    gives_dict = gives_weak = True
+    if "__slots__" in cls.dict:
+        gives_dict = gives_weak = False
+    for above in cls.order()[1:]:
+        if "__dict__" in above.dict:
+            gives_dict = False
+        if "__weakref__" in above.dict:
+            gives_weak = False
+    if cls.builtin_kind() in _NO_WEAKREF_BASE:
+        gives_weak = False
+    # AN EXCEPTION CLASS, asked the way `_apy_exc_parent_of` asks: the
+    # program's own tree first and Python's own after it.
+    held = str(name) if name is not None else ""
+    base = getattr(__import__("builtins"), held, None)
+    if held in h.user_exc or (isinstance(base, type)
+                              and issubclass(base, BaseException)):
+        gives_dict = False
+    if gives_dict:
+        cls.dict["__dict__"] = Instance(h._getset_descriptor_class(), h)
+    if gives_weak:
+        cls.dict["__weakref__"] = Instance(h._getset_descriptor_class(), h)
+    cls.dict.setdefault("__doc__", None)
+
+
 def _type_from_ns(h, mcls, name, bases, ns):
     """`type(name, bases, ns)` as an OBJECT: what `super().__new__` inside a
     metaclass's `__new__` answers."""
@@ -5329,6 +5379,7 @@ def _type_from_ns(h, mcls, name, bases, ns):
     # unqualified. There is no frame to ask and only a program's own module
     # can reach this. See `apy_type_from_ns`.
     cls.dict.setdefault("__module__", "__main__")
+    _two_slots(h, cls, name)
     return cls
 
 
@@ -10867,6 +10918,21 @@ def _apy_default_getattr(h, a):
             # compared by cell, not by name -- means the rule.
             if name == "__class__" and found is _object_class_entry(h):
                 return h._value(obj.cls)
+            # `x.__dict__` AND `x.__weakref__` ARE THE STORAGE, not the
+            # stand-in. A class now carries a `getset_descriptor` under each
+            # name -- that is what `C.__dict__` shows and what `dir(C)`
+            # counts -- and finding one HERE, on an instance read, means the
+            # slot it stands for: the instance's own dict, and None for a
+            # weak reference nothing holds. Without this, `type(x.__dict__)`
+            # read `getset_descriptor` where CPython says `dict`.
+            if (isinstance(found, Instance)
+                    and found.cls.name == "getset_descriptor"):
+                if name == "__dict__":
+                    if not _slot_allows(obj.cls, "__dict__"):
+                        return h._no_attr(obj, name)
+                    return h._new(obj.dict)
+                if name == "__weakref__":
+                    return h._none
             # A NON-DATA descriptor is asked HERE, after the instance dict
             # has missed -- `staticmethod`, `classmethod`, or a user class
             # with only `__get__`.
