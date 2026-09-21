@@ -47,9 +47,11 @@ def apy_d_cap_offset() -> i64:
     return 32
 
 
+# `ro` -- the flag that makes a dict a `mappingproxy`. See the C's `struct
+# apy_obj` for why it is a flag rather than a kind of its own. A COMMENT AND
+# NOT A DOCSTRING, because `test_ported_int` scrapes these offsets as
+# one-line constants and a docstring hides the number from it.
 def apy_d_ro_offset() -> i64:
-    """`ro` -- the flag that makes a dict a `mappingproxy`. See the C's
-    `struct apy_obj` for why it is a flag rather than a kind."""
     return 40
 
 
