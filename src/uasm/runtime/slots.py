@@ -1377,6 +1377,26 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     # `apy_type_for` interns per kind, so `x.__class__ is type(x)` holds.
     if apy_name_is(want, rodata(b"__class__\0")):
         return apy_type_for(obj)
+    # A mappingproxy HAS NO MUTATORS AT ALL. `p.update` is an AttributeError
+    # in CPython rather than a method that then refuses, and the eight names
+    # are exactly `dir(dict) - dir(mappingproxy)` -- read off CPython,
+    # because "the ones that write" would also have taken `__ior__`, which
+    # neither has.
+    if is_dict:
+        if load(i32, offset(obj, apy_d_ro_offset())):
+            if (apy_name_is(want, rodata(b"__setitem__\0"))
+                    or apy_name_is(want, rodata(b"__delitem__\0"))
+                    or apy_name_is(want, rodata(b"clear\0"))
+                    or apy_name_is(want, rodata(b"fromkeys\0"))
+                    or apy_name_is(want, rodata(b"pop\0"))
+                    or apy_name_is(want, rodata(b"popitem\0"))
+                    or apy_name_is(want, rodata(b"setdefault\0"))
+                    or apy_name_is(want, rodata(b"update\0"))):
+                return apy_raise_fmt(
+                    rodata(b"AttributeError\0"),
+                    rodata(b"'mappingproxy' object has no attribute "
+                           b"'%s'%s\0"),
+                    want, rodata(b"\0"))
     # `object` GIVES THESE TO EVERYTHING, which is why they are gated on no
     # kind at all: `hasattr(x, "__eq__")` is True for every object there is,
     # and a structural test written against `collections.abc` -- or

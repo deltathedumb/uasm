@@ -242,6 +242,14 @@ APY_API apy_value apy_type_new(apy_value name, apy_value base) {
     o->v.t.name = name;
     o->v.t.base = (base && O(base)->kind == APY_TYPE_K) ? base : 0;
     o->v.t.dict = apy_dict_new(4);
+    /* A CLASS DICT IS A mappingproxy TO A PROGRAM and an ordinary dict to
+       the runtime that fills it. Flagged HERE, once, so `C.__dict__` can
+       hand out the class's own dict rather than a copy -- which is what
+       makes it LIVE, as CPython's is: `p = C.__dict__; C.x = 1` puts `x`
+       in `p`. Only `apy_setitem`, `apy_delitem`, the kind name, the repr
+       and `isinstance` read the flag; `apy_dict_set` does not, which is
+       why the runtime's own writes still land. */
+    O(o->v.t.dict)->v.d.ro = 1;
     o->v.t.meta = 0;
     /* NOT INHERITED FROM THE UNION. A stale pointer here would give a fresh
        class somebody else's linearisation, which is a wrong answer that looks

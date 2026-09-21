@@ -47,6 +47,12 @@ def apy_d_cap_offset() -> i64:
     return 32
 
 
+def apy_d_ro_offset() -> i64:
+    """`ro` -- the flag that makes a dict a `mappingproxy`. See the C's
+    `struct apy_obj` for why it is a flag rather than a kind."""
+    return 40
+
+
 def apy_set_new(cap: i64) -> ptr:
     """An empty set with room for `cap`."""
     return apy_seq_alloc(apy_set_kind(), cap)
@@ -101,6 +107,14 @@ def apy_clear(v: ptr) -> ptr:
     are named one at a time rather than tested with `v.q`: all four share the
     arm, and immutability is the only thing telling them apart.
     """
+    # A mappingproxy HAS NO MUTATORS AT ALL: CPython's answer is an
+    # AttributeError about the name, not a refusal from inside it.
+    if i64(load(i32, offset(v, 0))) == apy_dict_kind():
+        if load(i32, offset(v, apy_d_ro_offset())):
+            return apy_raise_fmt(
+                rodata(b"AttributeError\0"),
+                rodata(b"'%s' object has no attribute 'clear'%s\0"),
+                apy_kind_name_of(v), rodata(b"\0"))
     k: i64 = i64(load(i32, offset(v, 0)))
     if k == apy_dict_kind():
         store(i64, 0, offset(v, apy_d_n_offset()))
@@ -247,6 +261,14 @@ def apy_dict_popitem(d: ptr) -> ptr:
     THE COUNT DROPS AND THE SLOTS STAY, as everywhere else in this runtime:
     nothing reads past `n`.
     """
+    # A mappingproxy HAS NO MUTATORS AT ALL: CPython's answer is an
+    # AttributeError about the name, not a refusal from inside it.
+    if i64(load(i32, offset(d, 0))) == apy_dict_kind():
+        if load(i32, offset(d, apy_d_ro_offset())):
+            return apy_raise_fmt(
+                rodata(b"AttributeError\0"),
+                rodata(b"'%s' object has no attribute 'popitem'%s\0"),
+                apy_kind_name_of(d), rodata(b"\0"))
     if i64(load(i32, offset(d, 0))) != apy_dict_kind():
         return apy_raise_fmt(
             rodata(b"AttributeError\0"),
@@ -651,6 +673,14 @@ def apy_setdefault(d: ptr, key: ptr, fallback: ptr) -> ptr:
     there -- which is the whole point: `d.setdefault(k, []).append(x)` has to
     append to the list already in the dict.
     """
+    # A mappingproxy HAS NO MUTATORS AT ALL: CPython's answer is an
+    # AttributeError about the name, not a refusal from inside it.
+    if i64(load(i32, offset(d, 0))) == apy_dict_kind():
+        if load(i32, offset(d, apy_d_ro_offset())):
+            return apy_raise_fmt(
+                rodata(b"AttributeError\0"),
+                rodata(b"'%s' object has no attribute 'setdefault'%s\0"),
+                apy_kind_name_of(d), rodata(b"\0"))
     if i64(load(i32, offset(d, 0))) != apy_dict_kind():
         return apy_raise_fmt(
             rodata(b"AttributeError\0"),
@@ -1838,13 +1868,14 @@ def apy_vars(obj: ptr) -> ptr:
     A CLASS HAS ONE TOO, holding the names its body bound: methods and class
     attributes, which is what `"x" in vars(C)` asks about.
 
-    A COPY RATHER THAN THE DICT ITSELF, so writing through the result cannot
-    reach into the object -- CPython answers a mappingproxy for a class for
-    the same reason, and a copy is the closest thing here.
+    THE CLASS'S OWN DICT AND NOT A COPY: `vars(C)` IS `C.__dict__` in
+    CPython, mappingproxy and all, and a class dict is flagged read-only --
+    so handing it out is both live and unwritable, which a copy was neither.
+    An INSTANCE's is still copied.
     """
     k: i64 = i64(load(i32, offset(obj, 0)))
     if k == apy_type_kind():
-        return apy_copy(ptr(load(u64, offset(obj, apy_t_dict_offset()))))
+        return ptr(load(u64, offset(obj, apy_t_dict_offset())))
     if k != apy_inst_kind():
         return apy_raise_fmt(
             rodata(b"TypeError\0"),
@@ -2123,6 +2154,14 @@ def apy_update(target: ptr, src: ptr) -> ptr:
     A SET UPDATES THROUGH ITS OWN INSERT, so duplicates collapse and an
     unhashable element refuses the whole operation rather than being skipped.
     """
+    # A mappingproxy HAS NO MUTATORS AT ALL: CPython's answer is an
+    # AttributeError about the name, not a refusal from inside it.
+    if i64(load(i32, offset(target, 0))) == apy_dict_kind():
+        if load(i32, offset(target, apy_d_ro_offset())):
+            return apy_raise_fmt(
+                rodata(b"AttributeError\0"),
+                rodata(b"'%s' object has no attribute 'update'%s\0"),
+                apy_kind_name_of(target), rodata(b"\0"))
     if i64(load(i32, offset(target, 0))) == apy_dict_kind():
         # A dict SUBCLASS UPDATES FROM ITS MAPPING, not from its keys.
         # Iterating a dict yields keys, so the pair walk below read

@@ -20,7 +20,13 @@ C = r"""/* --- list, dict and set methods --------------------------------------
    the two-argument form exists at all. */
 static apy_value apy_dict_pop(apy_value d, apy_value key, apy_value fallback,
                               int64_t has_default) {
-    int64_t at = apy_dict_find(d, key);
+    int64_t at;
+    /* A mappingproxy HAS NO MUTATORS AT ALL -- see `apy_clear` beside it. */
+    if (O(d)->kind == APY_DICT_K && O(d)->v.d.ro)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'pop'%s",
+                         apy_kind_name(d), "");
+    at = apy_dict_find(d, key);
     if (at < 0) {
         apy_value shown;
         char buf[200];
@@ -60,6 +66,14 @@ APY_API apy_value apy_pop_or(apy_value d, apy_value key, apy_value fallback) {
 APY_API apy_value apy_dict_popitem(apy_value d) {
     apy_value out;
     int64_t n;
+    /* A mappingproxy HAS NO MUTATORS AT ALL: CPython's answer is an
+       AttributeError about the name, not a refusal from inside it. Written
+       out at each one rather than in `apy_dict_set` because THAT is how the
+       runtime fills a class dict. */
+    if (O(d)->kind == APY_DICT_K && O(d)->v.d.ro)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'popitem'%s",
+                         apy_kind_name(d), "");
     if (O(d)->kind != APY_DICT_K)
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'popitem'%s",
@@ -391,6 +405,14 @@ APY_API apy_value apy_dict_get_or(apy_value d, apy_value key, apy_value fallback
    pairs). One symbol for the same reason `pop` is one symbol. */
 APY_API apy_value apy_update(apy_value target, apy_value src) {
     int64_t n, i;
+    /* A mappingproxy HAS NO MUTATORS AT ALL: CPython's answer is an
+       AttributeError about the name, not a refusal from inside it. Written
+       out at each one rather than in `apy_dict_set` because THAT is how the
+       runtime fills a class dict. */
+    if (O(target)->kind == APY_DICT_K && O(target)->v.d.ro)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'update'%s",
+                         apy_kind_name(target), "");
     if (O(target)->kind == APY_DICT_K) {
         /* A dict SUBCLASS UPDATES FROM ITS MAPPING, not from its keys.
            Iterating a dict yields keys, so the pair walk below read
@@ -462,6 +484,14 @@ APY_API apy_value apy_update(apy_value target, apy_value src) {
 /* `.clear()` -- empties in place and answers None. Setting the count to zero
    rather than freeing: nothing here frees, and the items array is reused. */
 APY_API apy_value apy_clear(apy_value v) {
+    /* A mappingproxy HAS NO MUTATORS AT ALL: CPython's answer is an
+       AttributeError about the name, not a refusal from inside it. Written
+       out at each one rather than in `apy_dict_set` because THAT is how the
+       runtime fills a class dict. */
+    if (O(v)->kind == APY_DICT_K && O(v)->v.d.ro)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'clear'%s",
+                         apy_kind_name(v), "");
     if (O(v)->kind == APY_DICT_K) { O(v)->v.d.n = 0; return apy_none(); }
     if (O(v)->kind == APY_LIST_K || O(v)->kind == APY_SET_K) {
         O(v)->v.q.n = 0;
@@ -754,6 +784,14 @@ APY_API apy_value apy_list_reverse(apy_value seq) {
 APY_API apy_value apy_setdefault(apy_value d, apy_value key,
                                  apy_value fallback) {
     int64_t at;
+    /* A mappingproxy HAS NO MUTATORS AT ALL: CPython's answer is an
+       AttributeError about the name, not a refusal from inside it. Written
+       out at each one rather than in `apy_dict_set` because THAT is how the
+       runtime fills a class dict. */
+    if (O(d)->kind == APY_DICT_K && O(d)->v.d.ro)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'setdefault'%s",
+                         apy_kind_name(d), "");
     if (O(d)->kind != APY_DICT_K)
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'setdefault'%s",

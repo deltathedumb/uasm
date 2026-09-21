@@ -533,7 +533,14 @@ def apy_type_new(name: ptr, base: ptr) -> ptr:
     if base:
         if i64(load(i32, offset(base, 0))) == apy_type_kind():
             store(u64, u64(base), offset(o, apy_t_base_offset()))
-    store(u64, u64(apy_dict_new(4)), offset(o, apy_t_dict_offset()))
+    d: ptr = apy_dict_new(4)
+    # A CLASS DICT IS A mappingproxy TO A PROGRAM and an ordinary dict to the
+    # runtime that fills it. Flagged here, once, so `C.__dict__` can hand out
+    # the class's own dict rather than a copy -- which is what makes it LIVE,
+    # as CPython's is. Only the writes, the kind name and the repr read the
+    # flag; `apy_dict_set` does not.
+    store(i32, i32(1), offset(d, apy_d_ro_offset()))
+    store(u64, u64(d), offset(o, apy_t_dict_offset()))
     return o
 
 

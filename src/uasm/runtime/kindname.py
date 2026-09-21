@@ -260,6 +260,11 @@ def apy_kind_name_of(v: ptr) -> ptr:
     if k == apy_frozen_kind():
         return rodata(b"frozenset\0")
     if k == apy_dict_kind():
+        # A READ-ONLY DICT IS A `mappingproxy`, which is what `C.__dict__`
+        # answers and what `type()` of it says. See the C's `struct apy_obj`
+        # for why it is a flag on the dict rather than a kind of its own.
+        if load(i32, offset(v, apy_d_ro_offset())):
+            return rodata(b"mappingproxy\0")
         return rodata(b"dict\0")
     if k == apy_inst_kind():
         return apy_str_data(ptr(load(u64, offset(

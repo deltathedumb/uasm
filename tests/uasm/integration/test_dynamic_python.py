@@ -4819,6 +4819,85 @@ PROGRAMS = {
         w("runtime sub", lambda: list(type("R", (Plain,), {}).__dict__))
         w("exception works", lambda: isinstance(E("x"), Exception))
     """,
+    # `C.__dict__` IS A mappingproxy: readable every way and writable no
+    # way. A FLAG ON THE DICT and not a wrapper around one, for two reasons
+    # that pull the same way. CPython's proxy is LIVE over the mapping it
+    # wraps -- `p = C.__dict__; C.x = 1` puts `x` in `p` -- so the class's
+    # own dict is what has to be handed out rather than a copy; and
+    # everything that READS a dict has to go on working unchanged, which a
+    # separate kind would have meant teaching `len`, `in`, iteration, the
+    # subscript, `dict()` and the method table one at a time.
+    #
+    # THE WRITES ARE WHAT SPLIT. The runtime fills a class dict through
+    # `apy_dict_set`, which ignores the flag; a program reaches the same
+    # storage through `apy_setitem`, `apy_delitem` and the five named
+    # mutators, which read it. CPython words the two syntactic spellings as
+    # TypeErrors about item assignment and deletion, and every mutator
+    # reached by NAME as an AttributeError about the name -- `p.update` does
+    # not exist rather than existing and refusing.
+    "a_class_dict_is_a_mappingproxy": """
+        class C:
+            x = 1
+
+            def m(self):
+                return 1
+
+        def w(label, f):
+            try:
+                print(f"{label:20} {f()!r}")
+            except Exception as e:
+                print(f"{label:20} !{type(e).__name__}: {e}")
+
+        p = C.__dict__
+        w("type name", lambda: type(p).__name__)
+        w("len", lambda: len(p))
+        w("in", lambda: "x" in p)
+        w("subscript", lambda: p["x"])
+        w("get", lambda: p.get("x"))
+        w("get default", lambda: p.get("zz", 9))
+        w("iter", lambda: sorted(p))
+        w("keys", lambda: sorted(p.keys()))
+        w("values", lambda: len(list(p.values())))
+        w("items", lambda: len(list(p.items())))
+        w("copy is a dict", lambda: type(p.copy()).__name__)
+        w("dict() of it", lambda: type(dict(p)).__name__)
+        w("equal to a dict", lambda: p == dict(p))
+        w("not a dict", lambda: isinstance(p, dict))
+        w("vars is the same", lambda: type(vars(C)).__name__)
+        w("repr", lambda: repr(p)[:13])
+        # EVERY WAY A PROGRAM MIGHT WRITE, and each refused in its own words.
+        w("setitem", lambda: p.__setitem__("z", 1))
+        w("delitem", lambda: p.__delitem__("x"))
+        w("update", lambda: p.update({}))
+        w("pop", lambda: p.pop("x"))
+        w("pop default", lambda: p.pop("zz", 1))
+        w("popitem", lambda: p.popitem())
+        w("clear", lambda: p.clear())
+        w("setdefault", lambda: p.setdefault("q", 1))
+        w("fromkeys", lambda: p.fromkeys([1]))
+
+        def store():
+            p["z"] = 1
+            return "stored"
+
+        def drop():
+            del p["x"]
+            return "deleted"
+
+        w("subscript store", store)
+        w("subscript delete", drop)
+        # LIVE OVER THE CLASS, which a copy would not be.
+        C.later = 5
+        w("live", lambda: "later" in p)
+        w("live read", lambda: p["later"])
+        # AND AN ORDINARY DICT IS UNTOUCHED BY ANY OF IT.
+        d = {"a": 1}
+        w("plain type", lambda: type(d).__name__)
+        w("plain repr", lambda: repr(d))
+        w("plain store", lambda: d.__setitem__("b", 2))
+        w("plain after", lambda: sorted(d))
+        w("plain isinstance", lambda: isinstance(d, dict))
+    """,
     # PEP 3155: A CLASS QUALIFIES THROUGH WHATEVER IT WAS WRITTEN INSIDE.
     # `mk.<locals>.D` for a class written in a function, `C.Inner` for one
     # written in another class -- and the bare name at module level, which

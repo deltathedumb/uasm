@@ -1309,6 +1309,23 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
        itself, which is why it answers before `apy_kind_method` is reached;
        `apy_type_for` interns per kind, so `x.__class__ is type(x)` holds. */
     if (strcmp(want, "__class__") == 0) return apy_type_of(obj);
+    /* A mappingproxy HAS NO MUTATORS AT ALL. `p.update` is an
+       AttributeError in CPython rather than a method that then refuses, and
+       the eight names below are exactly `dir(dict) - dir(mappingproxy)` --
+       read off CPython, because "the ones that write" would also have taken
+       `__ior__`, which neither has. */
+    if (dict && O(obj)->v.d.ro
+            && (strcmp(want, "__setitem__") == 0
+                || strcmp(want, "__delitem__") == 0
+                || strcmp(want, "clear") == 0
+                || strcmp(want, "fromkeys") == 0
+                || strcmp(want, "pop") == 0
+                || strcmp(want, "popitem") == 0
+                || strcmp(want, "setdefault") == 0
+                || strcmp(want, "update") == 0))
+        return apy_fail2("AttributeError",
+                         "'mappingproxy' object has no attribute '%s'%s",
+                         want, "");
     /* `object` GIVES THESE TO EVERYTHING, which is why they are gated on no
        kind at all: `hasattr(x, "__eq__")` is True for every value in Python,
        a list and an int and a function alike. Comparison is the part

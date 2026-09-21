@@ -322,7 +322,14 @@ struct apy_obj {
            equal elements -- and in how they print, and in nothing else; two
            layouts would mean two copies of indexing, repr and equality. */
         struct { apy_value *items; int64_t n, cap; } q;
-        struct { apy_value *keys, *vals; int64_t n, cap; } d;
+        /* `ro` MARKS A mappingproxy -- a dict a program may read and not
+           write, which is what `C.__dict__` answers. A FLAG ON THE DICT
+           rather than a kind of its own: CPython's proxy is LIVE over the
+           mapping it wraps (`p = C.__dict__; C.x = 1` puts `x` in `p`), so
+           the class's own dict is what has to be handed out, and everything
+           that READS a dict must go on working unchanged. Only the writes,
+           the kind name and the repr read this. */
+        struct { apy_value *keys, *vals; int64_t n, cap; int ro; } d;
         /* An exception: the type's NAME (a static string from the
            hierarchy table, so comparing types is comparing text) and
            the single argument `str(e)` returns. */

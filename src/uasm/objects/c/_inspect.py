@@ -324,7 +324,9 @@ static const char *apy_kind_name(apy_value v) {
     case APY_BOOL_K:  return "bool";
     case APY_INT_K:   return "int";
     case APY_FLOAT_K: return "float";
-    case APY_DICT_K:  return "dict";
+    /* A READ-ONLY DICT IS A `mappingproxy`, which is what `C.__dict__`
+       answers and what `type()` of it says. See the `ro` flag. */
+    case APY_DICT_K:  return O(v)->v.d.ro ? "mappingproxy" : "dict";
     case APY_EXC_K:   return apy_exc_shown(O(v)->v.e.name);
     case APY_LIST_K:  return "list";
     case APY_TUPLE_K: return "tuple";
@@ -803,7 +805,22 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
     case APY_FLOAT_K:
         py_repr_double(buf, sizeof buf, O(v)->v.f);
         return apy_str_copy(buf, (int64_t)strlen(buf));
-    case APY_DICT_K:  return apy_dict_text(v);
+    case APY_DICT_K: {
+        /* A READ-ONLY DICT WEARS ITS NAME. `repr(C.__dict__)` is
+           `mappingproxy({...})` in CPython -- the mapping's own repr inside
+           the wrapper's, which is what the wrapper is. */
+        apy_value inner = apy_dict_text(v);
+        if (!O(v)->v.d.ro || !inner) return inner;
+        {
+            int64_t n = O(inner)->v.s.n;
+            char *out = (char *)malloc((size_t)n + 16);
+            memcpy(out, "mappingproxy(", 13);
+            memcpy(out + 13, O(inner)->v.s.p, (size_t)n);
+            out[13 + n] = ')';
+            out[14 + n] = 0;
+            return apy_str_take(out, n + 14);
+        }
+    }
     case APY_RANGE_K: {
         /* `range(0, 10, 2)` -- and `range(0, 3)` when the step is 1, which
            is how CPython prints one. */
@@ -1359,7 +1376,14 @@ APY_API apy_value apy_delitem(apy_value seq, apy_value key) {
         if (apy_inst_held(seq)) return apy_delitem(apy_inst_held(seq), key);
     }
     if (O(seq)->kind == APY_DICT_K) {
-        const char *bad = apy_unhashable(key);
+        /* A mappingproxy IS READ-ONLY TO A PROGRAM -- and CPython words
+           this one differently from the assignment it refuses beside it. */
+        const char *bad;
+        if (O(seq)->v.d.ro)
+            return apy_fail2("TypeError",
+                             "'%s' object does not support item deletion%s",
+                             apy_kind_name(seq), "");
+        bad = apy_unhashable(key);
         if (bad) return apy_fail2("TypeError", "unhashable type: '%s'%s",
                                   bad, "");
         i = apy_dict_find(seq, key);

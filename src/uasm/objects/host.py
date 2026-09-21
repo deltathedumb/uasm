@@ -1173,6 +1173,11 @@ class ObjectHost:
             return {Iterator.MAP: "map", Iterator.FILTER: "filter",
                     Iterator.ENUMERATE: "enumerate",
                     Iterator.ZIP: "zip"}.get(v.mode, v.named)
+        # A CLASS DICT IS A `mappingproxy`, which is what `type()` of it
+        # says -- and this file's own class name is not a name a program
+        # should ever read. The C twin is the `ro` arm of `apy_kind_name`.
+        if isinstance(v, _Proxy):
+            return "mappingproxy"
         return type(v).__name__
 
     # ── text ────────────────────────────────────────────────────────────────
@@ -1366,9 +1371,14 @@ class ObjectHost:
             self._rendering.add(here)
             try:
                 if isinstance(v, dict):
-                    return "{" + ", ".join(
+                    shown = "{" + ", ".join(
                         f"{self._text(k, True)}: {self._text(x, True)}"
                         for k, x in v.items()) + "}"
+                    # A READ-ONLY DICT WEARS ITS NAME: `repr(C.__dict__)` is
+                    # `mappingproxy({...})` -- the mapping's own repr inside
+                    # the wrapper's, which is what the wrapper is.
+                    return (f"mappingproxy({shown})"
+                            if isinstance(v, _Proxy) else shown)
                 body = ", ".join(self._text(x, True) for x in v)
                 if isinstance(v, tuple):
                     # The TRAILING COMMA in a one-element tuple, which is what
@@ -4241,6 +4251,13 @@ def _apy_setitem(h, a):
             return h._none
         return _user(h, store)
     if isinstance(seq, dict):
+        # A mappingproxy IS READ-ONLY TO A PROGRAM and writable by the
+        # runtime, which is why the refusal is HERE and not in `_dict_set`:
+        # that is how a class dict gets filled. See `_Proxy`.
+        if isinstance(seq, _Proxy):
+            return h._fail("TypeError",
+                           f"'{h.kind_name(seq)}' object does not support "
+                           f"item assignment")
         return _dict_set(h, seq, index, item)
     if isinstance(index, slice) and isinstance(seq, list):
         # THE SPAN IS REPLACED, and the replacement need not be the same
@@ -4377,6 +4394,9 @@ def _attr_store(h, d: dict, name: str, value) -> None:
 
 def _apy_clear(h, a):
     """`.clear()` -- empties in place and answers None."""
+    refused = _proxy_lacks(h, h._get(a[0], "apy_clear"), "clear")
+    if refused is not None:
+        return refused
     v = h._get(a[0], "apy_clear")
     if isinstance(v, bytearray):
         v.clear()
@@ -4593,6 +4613,9 @@ def _apy_list_reverse(h, a):
 def _apy_setdefault(h, a):
     """Read, and INSERT when missing -- one lookup's worth of difference from
     `d.get(k, v)`, and the difference is the whole point."""
+    refused = _proxy_lacks(h, h._get(a[0], "apy_setdefault"), "setdefault")
+    if refused is not None:
+        return refused
     d = h._get(a[0], "apy_setdefault")
     if not isinstance(d, dict):
         return h._fail("AttributeError", f"'{h.kind_name(d)}' object has no "
@@ -6379,6 +6402,9 @@ def _apy_update(h, a):
     of two-element iterables -- which is why a list of two-character strings
     works and a list of characters does not.
     """
+    refused = _proxy_lacks(h, h._get(a[0], "apy_update"), "update")
+    if refused is not None:
+        return refused
     target = h._get(a[0], "apy_update")
     src = h._get(a[1], "apy_update")
     if not isinstance(target, dict):
@@ -8045,6 +8071,42 @@ class _UserFailed(Exception):
     """
 
 
+class _Proxy(dict):
+    """A class dict, which a program may read and not write.
+
+    A DICT SUBCLASS AND NOT A WRAPPER, which is the host's spelling of the
+    C's `ro` flag and is there for the same two reasons. CPython's
+    `mappingproxy` is LIVE over the mapping it wraps (`p = C.__dict__;
+    C.x = 1` puts `x` in `p`), so the class's own dict has to be what is
+    handed out; and everything that READS a dict -- `len`, `in`, iteration,
+    a subscript, `dict(...)` -- must go on working unchanged, which for this
+    file means every `isinstance(x, dict)` it already contains.
+
+    IT DOES NOT REFUSE ITS OWN WRITES. The runtime fills a class dict
+    through ordinary item assignment and must go on doing so; what refuses
+    is `_apy_setitem` and `_apy_delitem`, the routes a PROGRAM's `p[k] = v`
+    and `del p[k]` take. The C makes the same split for the same reason --
+    `apy_dict_set` ignores the flag and `apy_setitem` reads it.
+    """
+
+    __slots__ = ()
+
+
+def _proxy_lacks(h, d, shown: str):
+    """A mappingproxy HAS NO MUTATORS AT ALL, so the five that would write
+    answer as CPython does: an AttributeError about the NAME, not a refusal
+    from inside the method. Answers None when there is nothing to refuse.
+
+    Written at each entry point rather than in `_dict_set`, because that is
+    how the runtime fills a class dict. The C makes the same split.
+    """
+    if isinstance(d, _Proxy):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(d)}' object has no attribute "
+                       f"'{shown}'")
+    return None
+
+
 def _class_module(cls) -> str | None:
     """The module a class was written in, for the two reprs that qualify a
     name: `<class '__main__.C'>` and `<__main__.C object at 0x...>`.
@@ -8149,7 +8211,10 @@ class Class:
         #: a nested class and only its reprs carry the qualified spelling.
         self.qual = None
         self.base = base
-        self.dict: dict = {}
+        #: A `mappingproxy` TO A PROGRAM and an ordinary dict to the runtime
+        #: that fills it -- see `_Proxy`, and `apy_type_new` for the C's
+        #: spelling of the same split.
+        self.dict: dict = _Proxy()
         #: The METACLASS that made this class, or None for an ordinary
         #: `class`, which reads as `type`. `type(C)` answers it, and a
         #: metaclass's `__instancecheck__` is reached through it.
@@ -9411,6 +9476,15 @@ def _kind_attr(h, obj, want: str):
     text = isinstance(obj, (str, bytes, bytearray))
     dict_ = isinstance(obj, dict)
     set_ = isinstance(obj, (set, frozenset))
+    # A mappingproxy HAS NO MUTATORS AT ALL. `p.update` is an AttributeError
+    # in CPython rather than a method that then refuses, and the eight names
+    # are exactly `dir(dict) - dir(mappingproxy)` -- read off CPython,
+    # because "the ones that write" would also have taken `__ior__`, which
+    # neither has. Answering None here is what makes the caller word it.
+    if isinstance(obj, _Proxy) and want in (
+            "__setitem__", "__delitem__", "clear", "fromkeys", "pop",
+            "popitem", "setdefault", "update"):
+        return None
     walks = seq or text or dict_ or set_ or rng         or isinstance(obj, _VIEW_TYPES)
     mutable = isinstance(obj, (list, dict, set, bytearray))
 
@@ -11050,10 +11124,13 @@ def _apy_default_getattr(h, a):
         if name == "__name__":
             return h._new(_bare_name(obj.name))
         # What the class BODY bound, not what it inherited -- the difference
-        # `"x" in vars(C)` asks about. A copy: a type's dict is a mapping
-        # proxy in CPython and is not writable.
+        # `"x" in vars(C)` asks about. A PROXY OVER THE REAL DICT and not a
+        # copy: CPython's is live (`p = C.__dict__; C.x = 1` puts `x` in
+        # `p`), and Python's own `MappingProxyType` is exactly that -- and
+        # refuses a write in CPython's own words, which is where the
+        # compiled runtimes' `ro` flag had to reproduce them by hand.
         if name == "__dict__":
-            return h._new(dict(obj.dict))
+            return h._new(obj.dict)
         # A SLOT NAME reached through the class is a DESCRIPTOR, not a
         # missing attribute: `__slots__` declares storage, and the class dict
         # holds nothing for it.
@@ -12869,8 +12946,11 @@ def _apy_vars(h, a):
     obj = h._get(a[0], "apy_vars")
     # A CLASS has a `__dict__` too, holding the names its body bound, and
     # `"x" in vars(C)` is how a program asks whether the class defines one.
+    # THE CLASS'S OWN DICT AND NOT A COPY: `vars(C)` IS `C.__dict__` in
+    # CPython, mappingproxy and all, so a copy answered a writable dict
+    # where CPython answers one that refuses.
     if isinstance(obj, Class):
-        return h._new(dict(obj.dict))
+        return h._new(obj.dict)
     if not isinstance(obj, Instance):
         return h._fail("TypeError",
                        "vars() argument must have __dict__ attribute")
@@ -13980,6 +14060,12 @@ def _apy_slice(h, a):
 def _dict_pop(h, d, key, fallback, has_default):
     """`d.pop(k)` and `d.pop(k, default)`. A MISSING KEY WITH NO DEFAULT IS A
     KeyError, which is the whole difference from `d.get(k)`."""
+    # BOTH SPELLINGS REACH HERE, which is why the proxy is refused here as
+    # well as at `_apy_pop_or`: `p.pop(k)` and `p.pop(k, d)` are two entry
+    # points and one method.
+    refused = _proxy_lacks(h, d, "pop")
+    if refused is not None:
+        return refused
     if key not in d:
         if has_default:
             return fallback
@@ -14035,6 +14121,9 @@ def _apy_pop_or(h, a):
     """`d.pop(k, default)`. Its own entry point because the method table is
     keyed by ARGUMENT COUNT, and at two arguments `xs.pop(i)` cannot be
     meant."""
+    refused = _proxy_lacks(h, h._get(a[0], "apy_pop_or"), "pop")
+    if refused is not None:
+        return refused
     d = h._get(a[0], "apy_pop_or")
     if not isinstance(d, dict):
         return h._fail("TypeError",
@@ -14047,6 +14136,9 @@ def _apy_dict_popitem(h, a):
     """`d.popitem()` -- the LAST pair, and removed. Last rather than
     arbitrary: CPython has taken it from the end since dicts became ordered,
     so a loop that pops a dict empty sees the reverse of insertion order."""
+    refused = _proxy_lacks(h, h._get(a[0], "apy_dict_popitem"), "popitem")
+    if refused is not None:
+        return refused
     d = h._get(a[0], "apy_dict_popitem")
     if not isinstance(d, dict):
         return h._fail("AttributeError",
@@ -15443,6 +15535,12 @@ def _apy_delitem(h, a):
     """
     seq = h._get(a[0], "apy_delitem")
     key = h._get(a[1], "apy_delitem")
+    # A mappingproxy IS READ-ONLY TO A PROGRAM, and CPython words this one
+    # differently from the assignment it refuses beside it.
+    if isinstance(seq, _Proxy):
+        return h._fail("TypeError",
+                       f"'{h.kind_name(seq)}' object does not support "
+                       f"item deletion")
     if isinstance(seq, Instance):
         # `del obj[k]` IS `obj.__delitem__(k)`. Never dispatched before, so a
         # class that wrote one had it ignored and the delete was reported as

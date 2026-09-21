@@ -537,7 +537,29 @@ def apy_text_of(v: ptr, quoted: i64) -> ptr:
     if k == apy_list_kind() or k == apy_tuple_kind():
         return apy_seq_text_of(v)
     if k == apy_dict_kind():
-        return apy_dict_text_of(v)
+        inner: ptr = apy_dict_text_of(v)
+        if not load(i32, offset(v, apy_d_ro_offset())):
+            return inner
+        if not inner:
+            return inner
+        # A READ-ONLY DICT WEARS ITS NAME: `repr(C.__dict__)` is
+        # `mappingproxy({...})` -- the mapping's own repr inside the
+        # wrapper's, which is what the wrapper is.
+        room: i64 = load(i64, offset(inner, apy_str_len_offset())) + 16
+        buf: ptr = apy_alloc_bytes(room)
+        if not buf:
+            return buf
+        out: i64 = apy_cstr_into(buf, 0, room, rodata(b"mappingproxy(\0"))
+        # THROUGH `apy_cstr_into` AND NOT A BYTE COPY: a str cell's bytes are
+        # NUL-terminated, and a repr never holds a raw NUL -- a string with
+        # one in it renders the ESCAPE, which is four ordinary characters.
+        out = apy_cstr_into(buf, out, room,
+                            ptr(load(u64, offset(inner,
+                                                 apy_str_ptr_offset()))))
+        store(u8, u8(41), offset(buf, out))
+        out = out + 1
+        store(u8, u8(0), offset(buf, out))
+        return apy_from_bytes(buf, out)
     if k == apy_set_kind() or k == apy_frozen_kind():
         return apy_set_text_of(v)
     if k == apy_exc_kind():

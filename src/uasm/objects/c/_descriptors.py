@@ -573,7 +573,11 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
         /* `C.__dict__` is what the class body bound, not what it inherited --
            which is the difference `"x" in vars(C)` asks about. A copy, because
            a type's dict is a mapping proxy in CPython and is not writable. */
-        if (strcmp(want, "__dict__") == 0) return apy_copy(O(obj)->v.t.dict);
+        /* THE CLASS'S OWN DICT AND NOT A COPY, which is what makes it live
+           the way CPython's mappingproxy is: `p = C.__dict__; C.x = 1` puts
+           `x` in `p`. It is flagged read-only at `apy_type_new`, so a
+           program cannot write through it and the runtime still can. */
+        if (strcmp(want, "__dict__") == 0) return O(obj)->v.t.dict;
         /* A SLOT NAME reached through the class is a descriptor, not a
            missing attribute: `__slots__` declares storage, and the class dict
            holds nothing for it. */

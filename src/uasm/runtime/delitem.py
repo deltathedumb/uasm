@@ -36,6 +36,13 @@ def apy_delitem(seq: ptr, key: ptr) -> ptr:
         if held:
             return apy_delitem(held, key)
     if i64(load(i32, offset(seq, 0))) == apy_dict_kind():
+        # A mappingproxy IS READ-ONLY TO A PROGRAM, and CPython words this
+        # one differently from the assignment it refuses beside it.
+        if load(i32, offset(seq, apy_d_ro_offset())):
+            return apy_raise_fmt(
+                rodata(b"TypeError\0"),
+                rodata(b"'%s' object does not support item deletion%s\0"),
+                apy_kind_name_of(seq), rodata(b"\0"))
         bad: ptr = apy_unhashable_of(key)
         if bad:
             return apy_raise_fmt(rodata(b"TypeError\0"),

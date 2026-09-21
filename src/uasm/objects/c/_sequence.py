@@ -1109,7 +1109,18 @@ APY_API apy_value apy_setitem(apy_value seq, apy_value index, apy_value item) {
         if (apy_inst_held(seq))
             return apy_setitem(apy_inst_held(seq), index, item);
     }
-    if (O(seq)->kind == APY_DICT_K) return apy_dict_set(seq, index, item);
+    if (O(seq)->kind == APY_DICT_K) {
+        /* A mappingproxy IS READ-ONLY TO A PROGRAM and writable by the
+           runtime, which is the whole point of the flag living on the dict
+           rather than on a wrapper: `apy_dict_set` is how the runtime fills
+           a class dict and must go on working, while THIS is the route a
+           program's `p[k] = v` takes. */
+        if (O(seq)->v.d.ro)
+            return apy_fail2("TypeError",
+                             "'%s' object does not support item "
+                             "assignment%s", apy_kind_name(seq), "");
+        return apy_dict_set(seq, index, item);
+    }
     if (index && O(index)->kind == APY_SLICE_K && O(seq)->kind == APY_LIST_K) {
         /* THE SPAN IS REPLACED, and the replacement need not be the same
            length -- `xs[1:3] = [9]` shortens the list. So this is a rebuild

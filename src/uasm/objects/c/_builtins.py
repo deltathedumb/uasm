@@ -1981,7 +1981,10 @@ APY_API apy_value apy_vars(apy_value obj) {
     /* A CLASS has a `__dict__` too, holding the names its body bound --
        methods and class attributes -- and `"x" in vars(C)` is how a program
        asks whether the class itself defines one. */
-    if (O(obj)->kind == APY_TYPE_K) return apy_copy(O(obj)->v.t.dict);
+    /* THE CLASS'S OWN DICT AND NOT A COPY: `vars(C)` IS `C.__dict__` in
+       CPython, mappingproxy and all, so a copy answered a writable dict
+       where CPython answers one that refuses. */
+    if (O(obj)->kind == APY_TYPE_K) return O(obj)->v.t.dict;
     if (O(obj)->kind != APY_INST_K)
         return apy_fail2("TypeError",
                          "vars() argument must have __dict__ attribute%s%s",
