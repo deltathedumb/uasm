@@ -4499,6 +4499,80 @@ PROGRAMS = {
         # fell through to the held str and answered str's whole text.
         w("S('a').__doc__", lambda: S("a").__doc__)
     """,
+    # A CALL THROUGH A VALUE CARRIES ALL ITS ARGUMENTS, and past three it
+    # carried the program into a heap address instead. The x86-64 emitter
+    # read an indirect call's TARGET after placing the arguments, out of
+    # whichever register the allocator had given it -- and the argument
+    # shuffle writes those registers:
+    #
+    #     mov %r10, %rdi    the callee, as allocated
+    #     mov %rcx, %rdi    argument 0 -- the callee is gone
+    #     mov %rdx, %r11    the shuffle breaking a cycle, through r11
+    #     mov %rsi, %rdx
+    #     mov %r11, %rsi
+    #     mov %rdi, %r11    read the target back: argument 0
+    #     call *%r11        jump to whatever argument 0 held
+    #
+    # THREE ARGUMENTS LEFT A REGISTER FREE and the callee happened to survive
+    # in it, which is why this went unseen: every shape below with three or
+    # fewer worked, and every shape with four segfaulted -- silently, exit
+    # 139, with no output at all because the crash came before the first
+    # `print` could flush.
+    #
+    # IT IS ONE BUG UNDER MANY FACES. `apy_invoke` in the C runtime and
+    # `apy_call` in the IR one both reach a function pointer this way, so
+    # `g(1, 2, 3, 4)`, `f(*(1, 2, 3, 4))`, `C(1, 2, 3, 4)` and a metaclass's
+    # `super().__new__(mcls, name, bases, ns)` were all the same crash --
+    # which is why no `TypedDict`, `enum` or `ABCMeta` could be compiled.
+    "calls_through_a_value_carry_every_argument": """
+        def w(label, f):
+            try:
+                print(f"{label:34} {f()!r}")
+            except Exception as e:
+                print(f"{label:34} !{type(e).__name__}: {e}")
+
+        def f1(a):
+            return a
+
+        def f4(a, b, c, d):
+            return a + b + c + d
+
+        def f6(a, b, c, d, e, g):
+            return a + b + c + d + e + g
+
+        class Four:
+            def __init__(self, a, b, c, d):
+                self.v = a + b + c + d
+
+            def m(self, a, b, c, d):
+                return self.v + a + b + c + d
+
+        # THE METACLASS IS THE SHAPE THAT FOUND IT. `super().__new__` takes
+        # four arguments, so every metaclass with a `__new__` crashed.
+        class Meta(type):
+            def __new__(mcls, name, bases, ns):
+                cls = super().__new__(mcls, name, bases, ns)
+                cls.made = True
+                return cls
+
+        class WithMeta(metaclass=Meta):
+            pass
+
+        w("direct 4", lambda: f4(1, 2, 3, 4))
+        g4 = f4
+        w("value 4", lambda: g4(1, 2, 3, 4))
+        w("splat 4", lambda: f4(*(1, 2, 3, 4)))
+        g6 = f6
+        w("value 6", lambda: g6(1, 2, 3, 4, 5, 6))
+        w("splat 6", lambda: f6(*(1, 2, 3, 4, 5, 6)))
+        w("value 1", lambda: f1(9))
+        w("ctor 4", lambda: Four(1, 2, 3, 4).v)
+        o = Four(1, 2, 3, 4)
+        w("bound 4", lambda: o.m(1, 2, 3, 4))
+        bm = o.m
+        w("bound value 4", lambda: bm(1, 2, 3, 4))
+        w("metaclass new", lambda: (WithMeta.made, type(WithMeta).__name__))
+    """,
     # A CLASS REACHED AS A TYPE INHERITS, and did not. `P.__eq__`,
     # `P.__init__`, `P.__repr__` and eight more were every one an
     # AttributeError about an attribute Python guarantees; `S.upper` for a

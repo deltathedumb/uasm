@@ -505,6 +505,9 @@ class _Emitter:
     alloc: Allocation
     lines: list[str] = field(default_factory=list)
     frame: int = 0
+    #: Byte offset from rbp of the word an indirect call parks its target in,
+    #: or 0 for a function that makes none. See `Op.CALL_PTR`.
+    call_slot: int = 0
 
     # ── register/slot access ────────────────────────────────────────────────
     def loc(self, reg: Register) -> str:
@@ -674,6 +677,16 @@ class X86_64Backend(Backend):
         # The frame holds spill slots plus the saved registers, kept to a
         # 16-byte multiple so the stack is aligned at any call we make.
         frame = alloc.frame_size + 8 * len(saved)
+        # AND ONE WORD MORE FOR AN INDIRECT CALL'S TARGET. The address has to
+        # survive the argument shuffle, and NO REGISTER CAN HOLD IT: an
+        # allocated one is a destination the shuffle may write, and the two
+        # reserved ones are the shuffle's own scratch. A frame slot is the
+        # only place it cannot be reached from. Reserved only where there is
+        # such a call, so no other frame grows. See `Op.CALL_PTR`.
+        if any(ins.op is Op.CALL_PTR
+               for block in fn.blocks for ins in block.instructions):
+            frame += 8
+            e.call_slot = frame
         frame = (frame + 15) & ~15
         e.frame = frame
 
@@ -1134,17 +1147,41 @@ class X86_64Backend(Backend):
                 e.store_from("r10", ins.dst)
 
             case Op.CALL | Op.CALL_PTR:
+                if op is Op.CALL_PTR:
+                    # THE TARGET IS PARKED BEFORE THE ARGUMENTS MOVE, and read
+                    # back after. It used to be read AFTER the shuffle, out of
+                    # wherever the allocator had put it -- and the shuffle
+                    # writes the argument registers, so a callee living in one
+                    # of them was overwritten by an argument and the program
+                    # jumped to whatever that argument held:
+                    #
+                    #     mov %r10, %rdi    the callee, as allocated
+                    #     mov %rcx, %rdi    argument 0 -- the callee is gone
+                    #     ...
+                    #     mov %rdi, %r11    read back: argument 0
+                    #     call *%r11        jump into a heap address
+                    #
+                    # measured on `g = f4; g(1, 2, 3, 4)`, which is every
+                    # four-argument call through a value: `apy_invoke` and the
+                    # IR's `apy_call` both reach a function pointer this way.
+                    # Three arguments left a register free and it happened to
+                    # survive, which is why this went so long unseen.
+                    #
+                    # A SLOT AND NOT A REGISTER, because there is no register
+                    # that survives: an allocated one may be written as an
+                    # argument, and r10 and r11 are the shuffle's own scratch
+                    # -- r11 is what it breaks a cycle through, which is what
+                    # the comment that stood here had backwards.
+                    held = e.into_scratch(ins.args[0], "r10")
+                    if held != "%r10":
+                        e.emit(f"movq {held}, %r10")
+                    e.emit(f"movq %r10, -{e.call_slot}(%rbp)")
                 adjust = self._place_arguments(e, ins, abi,
                                                skip_first=op is Op.CALL_PTR)
                 if op is Op.CALL:
                     e.emit(f"call {self.symbol(ins.sym, dialect)}")
                 else:
-                    # The callee address is an ordinary value. Loaded into r11
-                    # -- reserved, so the allocator never put an argument
-                    # there, and it survives the argument moves above.
-                    target = e.into_scratch(ins.args[0], "r11")
-                    if target != "%r11":
-                        e.emit(f"movq {target}, %r11")
+                    e.emit(f"movq -{e.call_slot}(%rbp), %r11")
                     e.emit("call *%r11")
                 if adjust:
                     e.emit(f"addq ${adjust}, %rsp")
