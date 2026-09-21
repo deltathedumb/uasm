@@ -1872,6 +1872,64 @@ def apy_cursor_proto_of(mode: i64, named: i64) -> ptr:
     return it
 
 
+def apy_kind_static_of(owner: ptr, name: ptr) -> i64:
+    """Is this builtin method a STATIC or CLASS method, taking no receiver?
+
+    `dict.keys` is an unbound INSTANCE method: `dict.keys(d)` writes the
+    receiver out. `str.maketrans` is a staticmethod and `dict.fromkeys` a
+    classmethod, and neither takes one -- so reading either off the type and
+    calling it ate the first argument. Every row was read off CPython: it is
+    every name in a builtin type's `__dict__` whose value is a `staticmethod`
+    or a `classmethod_descriptor`. `__class_getitem__` is tested separately
+    by the caller, because it binds the TYPE where these bind the prototype.
+
+    THE C's `apy_kind_static` IS THIS LIST and the two must agree.
+    """
+    if apy_cstr_eq(name, rodata(b"maketrans\0")):
+        if apy_cstr_eq(owner, rodata(b"str\0")):
+            return 1
+        if apy_cstr_eq(owner, rodata(b"bytes\0")):
+            return 1
+        if apy_cstr_eq(owner, rodata(b"bytearray\0")):
+            return 1
+        return 0
+    if apy_cstr_eq(name, rodata(b"fromhex\0")):
+        if apy_cstr_eq(owner, rodata(b"bytes\0")):
+            return 1
+        if apy_cstr_eq(owner, rodata(b"bytearray\0")):
+            return 1
+        if apy_cstr_eq(owner, rodata(b"float\0")):
+            return 1
+        return 0
+    if apy_cstr_eq(name, rodata(b"from_number\0")):
+        if apy_cstr_eq(owner, rodata(b"float\0")):
+            return 1
+        if apy_cstr_eq(owner, rodata(b"complex\0")):
+            return 1
+        return 0
+    if apy_cstr_eq(name, rodata(b"fromkeys\0")):
+        if apy_cstr_eq(owner, rodata(b"dict\0")):
+            return 1
+        return 0
+    if apy_cstr_eq(name, rodata(b"from_bytes\0")):
+        if apy_cstr_eq(owner, rodata(b"int\0")):
+            return 1
+        return 0
+    if apy_cstr_eq(name, rodata(b"__getformat__\0")):
+        if apy_cstr_eq(owner, rodata(b"float\0")):
+            return 1
+        return 0
+    if apy_cstr_eq(name, rodata(b"_from_flags\0")):
+        if apy_cstr_eq(owner, rodata(b"memoryview\0")):
+            return 1
+        return 0
+    if apy_cstr_eq(name, rodata(b"__prepare__\0")):
+        if apy_cstr_eq(owner, rodata(b"type\0")):
+            return 1
+        return 0
+    return 0
+
+
 def apy_no_attribute(obj: ptr, name: ptr) -> ptr:
     """The last thing attribute lookup tries, and the error if it fails.
 
@@ -1899,7 +1957,20 @@ def apy_no_attribute(obj: ptr, name: ptr) -> ptr:
                 bindit: i64 = 0
                 if apy_cstr_eq(want, rodata(b"__class_getitem__\0")):
                     bindit = 1
+                # AND THE STATIC AND CLASS METHODS BIND THE PROTOTYPE, which
+                # is what carries the KIND: a classmethod needs it --
+                # `bytes.fromhex` and `bytearray.fromhex` differ only in what
+                # they build -- and a staticmethod ignores the receiver, so
+                # one rule serves both. See `apy_kind_static_of`.
+                staticit: i64 = apy_kind_static_of(
+                    ptr(load(u64, offset(
+                        ptr(load(u64, offset(obj, apy_fn_name_offset()))),
+                        apy_str_ptr_offset()))),
+                    want)
                 found = apy_kind_attr_of(proto, want, 0)
+                if found:
+                    if staticit:
+                        return apy_bind_of(found, proto)
                 if found:
                     if bindit:
                         # BOUND TO THE TYPE ITSELF and not to the prototype,

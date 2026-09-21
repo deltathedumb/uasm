@@ -25,6 +25,49 @@ from __future__ import annotations
 #: A method missing from here is reported by analysis with its name. A method
 #: present here whose symbol the runtime does not define is a link error, which
 #: is why `_check_methods_exist` asserts the two agree at import.
+#: THE BUILTIN METHODS THAT TAKE NO RECEIVER, by kind and by name.
+#:
+#: `dict.keys` is an unbound INSTANCE method: `dict.keys(d)` writes the
+#: receiver out, and `str.upper(x)` is the same shape. `str.maketrans` is a
+#: STATICMETHOD and `dict.fromkeys` a CLASSMETHOD, and neither takes one --
+#: so both the written call and the read-as-a-value form ate the first
+#: argument:
+#:
+#:     m = str.maketrans; m("ab", "xy")
+#:     TypeError: if you give only one argument to maketrans it must be a dict
+#:
+#: with `"ab"` swallowed as a receiver that is not there.
+#:
+#: EVERY ROW READ OFF CPYTHON rather than guessed: it is every name in a
+#: builtin type's `__dict__` whose value is a `staticmethod` or a
+#: `classmethod_descriptor`. `__class_getitem__` is on almost all of them and
+#: is tested separately by each reader, because it belongs to no particular
+#: kind and because it binds the TYPE where these bind the prototype.
+#:
+#: KEYED BY THE PAIR AND NOT BY THE NAME, because a name alone does not say:
+#: `fromhex` is a classmethod on bytes and another on float, and nothing
+#: stops a later kind from having an instance method of that name.
+#:
+#: HERE BECAUSE THREE READERS NEED IT -- the lowering, to know not to move
+#: the first argument into the receiver slot; the interpreter, to bind the
+#: prototype rather than the first argument; and the same question again in
+#: the two compiled runtimes, where it is written out in C
+#: (`apy_kind_static`) and in the machine subset (`apy_kind_static_of`)
+#: because neither can read this. Those two must agree with this one.
+KIND_STATIC = frozenset({
+    ("str", "maketrans"),
+    ("bytes", "maketrans"), ("bytes", "fromhex"),
+    ("bytearray", "maketrans"), ("bytearray", "fromhex"),
+    ("dict", "fromkeys"),
+    ("int", "from_bytes"),
+    ("float", "from_number"), ("float", "fromhex"),
+    ("float", "__getformat__"),
+    ("complex", "from_number"),
+    ("memoryview", "_from_flags"),
+    ("type", "__prepare__"),
+})
+
+
 DYN_METHOD_TABLE = {
     # sequences
     "append":       [None, "apy_seq_push"],

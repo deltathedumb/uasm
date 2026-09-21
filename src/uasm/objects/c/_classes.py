@@ -712,6 +712,51 @@ APY_API apy_value apy_kind_prototype(apy_value type_name);
    TWO CALLERS AND ONE BODY: a builtin type reached as a VALUE is a FUNC
    wearing `is_type`, and `type(iter([]))` is a TYPE cell `apy_type_for`
    minted from the kind's name. Both are asking what a kind carries. */
+/* THE BUILTIN METHODS THAT TAKE NO RECEIVER, by kind and by name.
+
+   `dict.keys` is an unbound INSTANCE method: `dict.keys(d)` writes the
+   receiver out, which is what the stamp below is for. `str.maketrans` is a
+   STATICMETHOD and `dict.fromkeys` a CLASSMETHOD, and neither takes one --
+   so reading either off the type and calling it ate the first argument:
+   `bm = bytes.maketrans; bm(b"ab", b"xy")` was `maketrans expected 3
+   arguments, got 2`, the third being a receiver that is not there.
+
+   EVERY ROW READ OFF CPYTHON rather than guessed: it is every name in a
+   builtin type's `__dict__` whose value is a `staticmethod` or a
+   `classmethod_descriptor`. `__class_getitem__` is on almost all of them and
+   is tested separately, because it belongs to no particular kind and because
+   it binds the TYPE where these bind the prototype.
+
+   KEYED BY THE PAIR AND NOT BY THE NAME, because a name alone does not say:
+   `fromhex` is a classmethod on bytes and another on float, and nothing
+   stops a later kind from having an instance method of that name.
+
+   BOUND TO THE PROTOTYPE, which is what carries the KIND. A classmethod
+   needs it -- `bytes.fromhex` and `bytearray.fromhex` differ only in what
+   they build -- and a staticmethod ignores the receiver, so one rule serves
+   both. The interpreter's `_KIND_STATIC` is this list, and the two must
+   agree. */
+static int apy_kind_static(const char *owner, const char *name) {
+    static const struct { const char *kind, *method; } rows[] = {
+        {"str", "maketrans"},
+        {"bytes", "maketrans"}, {"bytes", "fromhex"},
+        {"bytearray", "maketrans"}, {"bytearray", "fromhex"},
+        {"dict", "fromkeys"},
+        {"int", "from_bytes"},
+        {"float", "from_number"}, {"float", "fromhex"},
+        {"float", "__getformat__"},
+        {"complex", "from_number"},
+        {"memoryview", "_from_flags"},
+        {"type", "__prepare__"},
+    };
+    size_t i;
+    for (i = 0; i < sizeof rows / sizeof rows[0]; i++)
+        if (strcmp(owner, rows[i].kind) == 0
+                && strcmp(name, rows[i].method) == 0)
+            return 1;
+    return 0;
+}
+
 /* STATIC, and declared in an earlier part so the descriptor path can reach
    it: the interpreter has its own `_kind_prototype` and does not need a
    binding for this one. */
@@ -736,6 +781,11 @@ static apy_value apy_type_kind_attr(apy_value type_obj, apy_value ownerv,
     bound = strcmp(APY_CSTR(name), "__class_getitem__") == 0;
     found = apy_kind_attr_of(proto, (apy_value)(uintptr_t)APY_CSTR(name), 0);
     if (found && bound) return apy_bind(found, type_obj);
+    /* AND THE STATIC AND CLASS METHODS BIND THE PROTOTYPE -- see
+       `apy_kind_static`, which says which they are and why the prototype and
+       not the type. */
+    if (found && apy_kind_static(owner, APY_CSTR(name)))
+        return apy_bind(found, proto);
     if (found && O(found)->kind == APY_FUNC_K) {
         char qual[128];
         snprintf(qual, sizeof qual, "%s.%s", owner, APY_CSTR(name));

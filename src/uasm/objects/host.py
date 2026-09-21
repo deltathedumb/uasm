@@ -1547,7 +1547,8 @@ class ObjectHost:
                 # and why a bound one is a `builtin_function_or_method`
                 # rather than the `method_descriptor` the stamp below would
                 # make it.
-                if name == "__class_getitem__":
+                if name == "__class_getitem__" \
+                        or (obj.name, name) in _KIND_STATIC:
                     # THE TYPE IS ITS OWNER, which is the receiver CPython
                     # names: `<built-in method __class_getitem__ of type
                     # object at ...>`. The OWNER and not `bound`, because
@@ -8817,8 +8818,8 @@ def _rich_compare(h, want: str, obj, other):
 #: so the two spellings cannot drift into two implementations. The generated
 #: C half reads the same table; see `objects/c/_gen_kindmeth.py`.
 from uasm.frontends.python.methods import (  # noqa: E402
-    DYN_METHOD_TABLE, METHOD_PARAMS, REQUIRED, KeywordError, _suggest,
-    fold_ctor_keywords, method_symbol)
+    DYN_METHOD_TABLE, KIND_STATIC as _KIND_STATIC, METHOD_PARAMS, REQUIRED,
+    KeywordError, _suggest, fold_ctor_keywords, method_symbol)
 from uasm.objects.c.kindmeth_table import (  # noqa: E402
     KINDMETH_WORDS, KIND_DIR, KIND_DOC, CURSOR_SAMPLES,
     # THE TWO SAMPLES THAT ARE NOT EXPRESSIONS. The table names them

@@ -4658,6 +4658,72 @@ PROGRAMS = {
         w("1 == 1", lambda: 1 == 1)
         w("[1] != [1]", lambda: [1] != [1])
     """,
+    # A STATICMETHOD OR CLASSMETHOD ON A BUILTIN TYPE HAS NO RECEIVER, and
+    # both spellings ate the first argument as if it had one:
+    #
+    #     m = str.maketrans; m("ab", "xy")
+    #     TypeError: if you give only one argument to maketrans it must be a
+    #                dict
+    #     list.__class_getitem__(int)
+    #     TypeError: descriptor '__class_getitem__' for 'list' objects
+    #                doesn't apply
+    #
+    # with `"ab"` and `int` each swallowed as a receiver that is not there.
+    # `dict.keys(d)` and `str.upper(x)` DO mean exactly that, which is why
+    # the rule is a table and not a guess: every row was read off CPython as
+    # the names in a builtin type's `__dict__` whose value is a
+    # `staticmethod` or a `classmethod_descriptor`.
+    #
+    # THE PROTOTYPE IS WHAT GETS BOUND, because it carries the KIND: a
+    # classmethod needs it -- `bytes.fromhex` and `bytearray.fromhex` differ
+    # only in what they build, which the last row measures -- and a
+    # staticmethod ignores its receiver, so one rule serves both.
+    # `__class_getitem__` is the exception that binds the TYPE, because its
+    # body reads it as the alias's origin.
+    "builtin_static_and_class_methods_take_no_receiver": """
+        def w(label, f):
+            try:
+                print(f"{label:30} {f()!r}")
+            except Exception as e:
+                print(f"{label:30} !{type(e).__name__}: {e}")
+
+        # WRITTEN OUT, then read as a value: one rule has to serve both.
+        w("maketrans written", lambda: str.maketrans("ab", "xy"))
+        m = str.maketrans
+        w("maketrans value", lambda: m("ab", "xy"))
+        w("maketrans three", lambda: m("ab", "xy", "z"))
+        w("fromkeys written", lambda: dict.fromkeys([1, 2], 0))
+        fk = dict.fromkeys
+        w("fromkeys value", lambda: fk([1, 2], 0))
+        w("from_bytes written", lambda: int.from_bytes(b"\x01\x02", "big"))
+        ib = int.from_bytes
+        w("from_bytes value", lambda: ib(b"\x01\x02", "big"))
+        w("fromhex written", lambda: bytes.fromhex("41 42"))
+        fh = bytes.fromhex
+        w("fromhex value", lambda: fh("41 42"))
+        w("float.fromhex written", lambda: float.fromhex("0x1.8p+1"))
+        ff = float.fromhex
+        w("float.fromhex value", lambda: ff("0x1.8p+1"))
+        w("class_getitem written", lambda: list.__class_getitem__(int))
+        cg = list.__class_getitem__
+        w("class_getitem value", lambda: cg(int))
+        w("dict class_getitem", lambda: dict.__class_getitem__((int, str)))
+        # AND THE UNBOUND INSTANCE METHODS ARE UNTOUCHED, which is the other
+        # half: for these the first argument IS the receiver.
+        w("dict.keys unbound", lambda: list(dict.keys({"a": 1})))
+        k = dict.keys
+        w("dict.keys value", lambda: list(k({"a": 1})))
+        w("str.upper unbound", lambda: str.upper("ab"))
+        u = str.upper
+        w("str.upper value", lambda: u("ab"))
+        w("str.replace unbound", lambda: str.replace("aba", "a", "z"))
+        w("str.join unbound", lambda: str.join("-", ["a", "b"]))
+        w("bytes.hex unbound", lambda: bytes.hex(b"AB"))
+        # THE KIND THE CLASSMETHOD WAS REACHED OFF DECIDES WHAT IT BUILDS,
+        # which is why the prototype and not the type is bound.
+        w("kinds differ", lambda: (type(bytes.fromhex("41")).__name__,
+                                   type(bytearray.fromhex("41")).__name__))
+    """,
     # A CLASS REACHED AS A TYPE INHERITS, and did not. `P.__eq__`,
     # `P.__init__`, `P.__repr__` and eight more were every one an
     # AttributeError about an attribute Python guarantees; `S.upper` for a

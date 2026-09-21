@@ -35,6 +35,7 @@ from .analysis import (
 )
 from .bundled import module_of as _bundled_module_of
 from .methods import (
+    KIND_STATIC as _KIND_STATIC,
     CTOR_ANY_KEYWORD, CTOR_PARAMS, DICT_PARTS, DYN_METHOD_TABLE,
     METHOD_ARITY_GUARD, METHOD_KW_SYMBOL, METHOD_PARAMS, REQUIRED, KeywordError,
     fold_ctor_keywords, fold_keywords, method_symbol,
@@ -2558,6 +2559,33 @@ class DynamicLowering:
             # count and fell through to `apy_getattr`, which finds the
             # descriptor on the type's prototype and applies it.
             base = node.func.value.id
+            if node.func.attr == "__class_getitem__" \
+                    or (base, node.func.attr) in _KIND_STATIC:
+                # A STATICMETHOD OR CLASSMETHOD HAS NO RECEIVER TO MOVE, so
+                # the rewrite below is wrong for it: that one takes the first
+                # argument out and makes it the receiver, which is what
+                # `dict.get(d, 1)` means and what `dict.fromkeys([1], 0)`
+                # does NOT -- there the list is the first ARGUMENT and the
+                # receiver is the class. Written out, it read as a receiver
+                # of the wrong type: `list.__class_getitem__(int)` was
+                # `descriptor '__class_getitem__' for 'list' objects doesn't
+                # apply`, about an argument that was never meant to be one.
+                #
+                # THROUGH THE VALUE FORM, which already knows the rule: the
+                # attribute read binds the prototype (or, for
+                # `__class_getitem__`, the type) and the call hands over
+                # every argument written. One implementation for both
+                # spellings, which is the same reason the receiver-first
+                # rewrite below exists.
+                #
+                # AHEAD OF THE NO-ARGUMENT CHECK, because that one reports
+                # `unbound method str.maketrans() needs an argument` -- true
+                # of an unbound method and not of a staticmethod, which has
+                # no receiver to be missing.
+                return self._dyn_indirect(
+                    self._dyn_expr(node.func),
+                    [self._dyn_expr(one) for one in node.args],
+                    node.keywords)
             if not node.args:
                 # NO RECEIVER TO APPLY IT TO. CPython refuses the CALL rather
                 # than the attribute, and names the method: `unbound method
