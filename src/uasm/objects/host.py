@@ -1210,9 +1210,13 @@ class ObjectHost:
                     got = self._invoke(hook, [v])
                     if self.err is None and isinstance(got, str):
                         return got
+            # THE QUALNAME AND NOT THE NAME: `repr` of a class written
+            # inside a function is `<class '__main__.mk.<locals>.D'>` in
+            # CPython, which is the one place the nesting shows.
             where = _class_module(v)
-            return (f"<class '{where}.{v.name}'>" if where
-                    else f"<class '{v.name}'>")
+            what = _class_qualname(v)
+            return (f"<class '{where}.{what}'>" if where
+                    else f"<class '{what}'>")
         if isinstance(v, Alias):
             return _alias_text(v)
         if isinstance(v, Func):
@@ -1648,7 +1652,16 @@ class ObjectHost:
         # case in the same commit. Two runtimes disagreeing about whether a
         # class is callable is exactly the drift docs/INERT-RUNTIME.md exists
         # to end.
-        if isinstance(f, Class) and id(f) in self.exc_types and not f.dict:
+        # NO `__init__` AND NO `__new__`, which is the C's `apy_type_is_exc`
+        # word for word -- a builtin exception name carrying either is a
+        # class the program wrote over the top of one and means itself.
+        # THE TEST USED TO BE AN EMPTY DICT, which was the same answer for
+        # every program that could reach here and stopped being one the
+        # moment an empty-bodied `class MyError(ValueError)` was given its
+        # `__module__`: a dict with one string in it is not a body.
+        if (isinstance(f, Class) and id(f) in self.exc_types
+                and f.lookup("__init__") is _ABSENT
+                and f.lookup("__new__") is _ABSENT):
             name = self.exc_types[id(f)]
             if (args and name == "OSError"
                     and isinstance(args[0], int)
@@ -7998,6 +8011,20 @@ def _class_module(cls) -> str | None:
     return where
 
 
+def _class_qualname(cls) -> str:
+    """PEP 3155: the class's `__qualname__`, for the two reprs that carry it.
+
+    THE FIELD WHEN THERE IS ONE, and the name otherwise -- a class at module
+    level qualifies as itself, so the frontend records nothing for it. The
+    ERROR MESSAGES deliberately do not read this: CPython's say `'D' object`
+    for a class written inside a function and reserve `mk.<locals>.D` for its
+    reprs. The C twin is `apy_type_qualname`.
+    """
+    if not isinstance(cls, Class):
+        return ""
+    return cls.qual if cls.qual is not None else cls.name
+
+
 def _inst_repr(v) -> str:
     """`<__main__.C object at 0x...>` -- the repr an instance gets when its
     class wrote none.
@@ -8008,9 +8035,10 @@ def _inst_repr(v) -> str:
     class inherits, and `apy_default_repr` reached by name.
     """
     where = _class_module(v.cls)
+    what = _class_qualname(v.cls)
     at = f"0x{id(v):x}"
-    return (f"<{where}.{v.cls.name} object at {at}>" if where
-            else f"<{v.cls.name} object at {at}>")
+    return (f"<{where}.{what} object at {at}>" if where
+            else f"<{what} object at {at}>")
 
 
 class Cell:
@@ -8057,10 +8085,18 @@ class Class:
     base or none, where the chain and the order are the same walk.
     """
 
-    __slots__ = ("name", "base", "dict", "meta", "bases", "mro", "builtin")
+    __slots__ = ("name", "base", "dict", "meta", "bases", "mro", "builtin",
+                 "qual")
 
     def __init__(self, name: str, base=None, bases=None) -> None:
         self.name = name
+        #: PEP 3155's `__qualname__` -- `mk.<locals>.D` for a class written
+        #: inside a function, `C.Inner` for one written inside another class
+        #: -- or None for a class that qualifies as its own name, which is
+        #: every class written at module level. A FIELD OF ITS OWN and not
+        #: the name with dots in it: CPython's messages say `'D' object` for
+        #: a nested class and only its reprs carry the qualified spelling.
+        self.qual = None
         self.base = base
         self.dict: dict = {}
         #: The METACLASS that made this class, or None for an ordinary
@@ -10319,9 +10355,14 @@ def _apy_init_subclass(h, a):
         # this restores is the one that stood before.
         left = h._get(a[1], "apy_init_subclass") if len(a) > 1 else {}
         if left and cls.meta is None:
+            # THE QUALNAME AND NOT THE NAME, which is this message and not
+            # the runtime's others: CPython words it
+            # `mk.<locals>.D.__init_subclass__()` for a class written inside
+            # a function while every refusal ABOUT an instance of one says
+            # plainly `'D' object`.
             return h._fail("TypeError",
-                           f"{cls.name}.__init_subclass__() takes no "
-                           f"keyword arguments")
+                           f"{_class_qualname(cls)}.__init_subclass__() "
+                           f"takes no keyword arguments")
         return h._none
     # THE CLASS KEYWORDS TRAVEL WITH IT: `class A(Base, tag="a")` is how a
     # program configures the hook, and dropping them left every subclass
@@ -10407,6 +10448,21 @@ def _apy_type_builtin(h, a):
     """`class D(dict)` -- which builtin kind this class extends."""
     cls = h._get(a[0], "apy_type_builtin")
     cls.builtin = _BUILTIN_KINDS.get(int(a[1]))
+    return a[0]
+
+
+def _apy_type_qual(h, a):
+    """PEP 3155: the qualified name a NESTED `class` statement gives its class.
+
+    WRITTEN BY THE FRONTEND, once, just after the class exists, and only when
+    the qualname differs from the name -- which is to say only for a class
+    inside a function or inside another class. `mk.<locals>.D` cannot be
+    derived here: nothing the runtime holds says where the statement was
+    written, and the `<locals>` marker is a fact about the source.
+    """
+    cls = h._get(a[0], "apy_type_qual")
+    if isinstance(cls, Class):
+        cls.qual = h._get(a[1], "apy_type_qual")
     return a[0]
 
 
@@ -10947,11 +11003,13 @@ def _apy_default_getattr(h, a):
         # of every chain even though no class links to it, so a class with no
         # written base still has one base and only `object` itself has none.
         # Answering the empty tuple there said the chain stopped at the class.
-        # PEP 3155. A class nested in another would qualify differently;
-        # only the top-level spelling is recorded, which is the same limit the
-        # frontend's own keys have for classes.
+        # PEP 3155. A class nested in a function qualifies as
+        # `mk.<locals>.D` and one nested in a class as `C.Inner` -- a fact
+        # about where the `class` statement was WRITTEN, so the frontend
+        # records it on the class and this reads it. A class at module level
+        # qualifies as its own name and has nothing recorded.
         if name == "__qualname__":
-            return h._new(obj.name)
+            return h._new(obj.qual if obj.qual is not None else obj.name)
         # A TYPE OBJECT REACHED THROUGH `type(x)` IS A CLASS CELL, not the
         # thunk the program's own `bytes` names -- `apy_type_for` mints one
         # keyed by the kind's name for anything the canonical table has no
@@ -11867,8 +11925,27 @@ def _apy_default_setattr(h, a):
         # appeared to succeed and changed nothing.
         if name == "__name__":
             was = obj.name
+            # THE QUALNAME DOES NOT FOLLOW THE NAME. CPython keeps the two
+            # apart -- `D.__name__ = "Z"` leaves `D.__qualname__` reading
+            # `mk.<locals>.D` -- and a class with no qualname of its own was
+            # deriving one from the name, so renaming it renamed both.
+            if obj.qual is None:
+                obj.qual = was
             obj.name = str(value)
             _rename_exception(h, was, obj.name, obj)
+            return h._none
+        # `C.__qualname__ = ...` IS A FIELD TOO, for the same reason: the
+        # read answers from the field, so a write into the dict changed
+        # nothing a program could see. A BUNDLED class is how this shows --
+        # the splice restores both dunders after renaming the statement, and
+        # only one of the two was landing anywhere.
+        if name == "__qualname__":
+            if not isinstance(value, str):
+                return h._fail("TypeError",
+                               f"can only assign string to "
+                               f"{obj.name}.__qualname__, not "
+                               f"'{h.kind_name(value)}'")
+            obj.qual = value
             return h._none
         _attr_store(h, obj.dict, name, value)
         return h._none
@@ -14800,6 +14877,7 @@ _TABLE.update({
     "apy_method1_of": _apy_method1_of,
     "apy_type_new": _apy_type_new,
     "apy_type_set": _apy_type_set,
+    "apy_type_qual": _apy_type_qual,
     "apy_instance_new": _apy_instance_new,
     "apy_exc_class_slot": _apy_exc_class_slot,
     "apy_exc_class_named_of": _apy_exc_class_named_of,

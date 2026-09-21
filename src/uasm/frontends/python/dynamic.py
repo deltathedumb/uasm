@@ -30,7 +30,7 @@ from .analysis import (
     BOOL, CELL, ENTRY_NAME, FLOAT, FREE, INT, MODULE_DUNDERS, NONE, OBJ,
     OBJECT_DEFAULTS,
     SemType, TO_IR,
-    _EXC_NAMES, _handler_names, _target_names, int_literal,
+    _EXC_NAMES, _handler_names, _target_names, _written_qual, int_literal,
     sem_type, span_of,
 )
 from .bundled import module_of as _bundled_module_of
@@ -5467,10 +5467,26 @@ class DynamicLowering:
                 # binding nothing made every such use a NameError for a class
                 # the program plainly defines. Interned by name, so this is
                 # the same object the `except` clause finds.
-                self._dyn_store(node.name,
-                                self.b.call(T.PTR, "apy_exc_type",
-                                            [self._dyn_str_literal(info.name)]))
+                made = self.b.call(T.PTR, "apy_exc_type",
+                                   [self._dyn_str_literal(info.name)])
                 self._dyn_check()
+                # AND THE TWO NAMES A CLASS STATEMENT GIVES IT. The body
+                # path below writes both and this did not, so an empty-bodied
+                # exception class printed as `<class 'MyError'>` where one
+                # with a single attribute in it printed
+                # `<class '__main__.MyError'>` -- the same statement reading
+                # two ways depending on whether its body was `pass`.
+                self.b.call(T.PTR, "apy_type_set",
+                            [made, self._dyn_str_literal("__module__"),
+                             self._dyn_str_literal(
+                                 _bundled_module_of(info.name) or "__main__")])
+                self._dyn_check()
+                qual = _written_qual(info.qualname)
+                if qual != info.name:
+                    self.b.call(T.PTR, "apy_type_qual",
+                                [made, self._dyn_str_literal(qual)])
+                    self._dyn_check()
+                self._dyn_store(node.name, made)
                 return
             # A BODY, so the class is built like any other and the rest of
             # this method does it. `apy_exc_class_bind` below is what ties the
@@ -5651,6 +5667,19 @@ class DynamicLowering:
                         [cls, self.b.const(T.I64,
                                            _BUILTIN_BASE_KIND[
                                                info.builtin_base])])
+        # PEP 3155: a class written INSIDE something qualifies through it --
+        # `mk.<locals>.D` for one inside a function, `C.Inner` for one inside
+        # another class. Recorded here because only the frontend knows where
+        # the `class` statement was written; the runtime derives a qualname
+        # from the name for everything that has none, which is every class at
+        # module level. The MANGLING COMES OFF FIRST: a spliced definition is
+        # spliced under `_asmpy_bundled_9_fractions_Fraction` and a program
+        # reading `__qualname__` must not see that.
+        qual = _written_qual(info.qualname)
+        if qual != info.name:
+            self.b.call(T.PTR, "apy_type_qual",
+                        [cls, self._dyn_str_literal(qual)])
+            self._dyn_check()
         if info.base_exprs:
             # PEP 560: what the `class` statement ACTUALLY SAID, before
             # `__mro_entries__` had its say.

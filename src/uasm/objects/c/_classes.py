@@ -249,7 +249,24 @@ APY_API apy_value apy_type_new(apy_value name, apy_value base) {
     o->v.t.bases = 0;
     o->v.t.mro = 0;
     o->v.t.builtin = 0;
+    /* NO QUALNAME UNTIL ONE IS GIVEN. A class qualifies as its own name
+       unless a `class` statement nested it, and only the frontend knows
+       that -- see `apy_type_qual`. */
+    o->v.t.qual = 0;
     return V(o);
+}
+
+/* PEP 3155: the qualified name a NESTED `class` statement gives its class.
+
+   WRITTEN BY THE FRONTEND, once, just after the class exists, and only when
+   the qualname differs from the name -- which is to say only for a class
+   inside a function or inside another class. `mk.<locals>.D` cannot be
+   derived here: nothing the runtime holds says where the statement was
+   written, and the `<locals>` marker is a fact about the source. */
+APY_API apy_value apy_type_qual(apy_value cls, apy_value qual) {
+    if (cls && O(cls)->kind == APY_TYPE_K)
+        O(cls)->v.t.qual = qual;
+    return cls;
 }
 
 /* `class D(dict)` -- which builtin kind this class extends. Set after the
@@ -539,8 +556,13 @@ APY_API apy_value apy_init_subclass(apy_value cls, apy_value kwd) {
         if (kwd && O(kwd)->kind == APY_DICT_K && O(kwd)->v.d.n
                 && !O(cls)->v.t.meta) {
             char b[128];
+            /* THE QUALNAME AND NOT THE NAME, which is this message and not
+               the runtime's others: CPython words it
+               `mk.<locals>.D.__init_subclass__()` for a class written
+               inside a function while every refusal ABOUT an instance of
+               one says plainly `'D' object`. */
             snprintf(b, sizeof b, "%s.__init_subclass__() takes no keyword "
-                     "arguments", APY_CSTR(O(cls)->v.t.name));
+                     "arguments", APY_CSTR(apy_type_qualname(cls)));
             return apy_fail("TypeError", b);
         }
         return apy_none();

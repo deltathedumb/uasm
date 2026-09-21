@@ -4724,6 +4724,147 @@ PROGRAMS = {
         w("kinds differ", lambda: (type(bytes.fromhex("41")).__name__,
                                    type(bytearray.fromhex("41")).__name__))
     """,
+    # PEP 3155: A CLASS QUALIFIES THROUGH WHATEVER IT WAS WRITTEN INSIDE.
+    # `mk.<locals>.D` for a class written in a function, `C.Inner` for one
+    # written in another class -- and the bare name at module level, which
+    # is why a program that never nests a class sees nothing of this.
+    #
+    # THE NAME AND THE QUALNAME ARE SEPARATE, which is the whole shape of
+    # the fix: CPython's REFUSALS say `'D' object has no attribute` for a
+    # nested class and only its REPRS carry the dotted spelling. So the
+    # class cell grew a field rather than having the dots put into the name
+    # it already had -- see `apy_type_qualname` -- and the frontend writes
+    # it, because where a `class` statement was written is a fact about the
+    # source and nothing the runtime holds could recover it.
+    "a_nested_class_qualifies_through_what_it_was_written_in": """
+        class Plain:
+            def m(self):
+                return 1
+
+            class Inner:
+                def q(self):
+                    return 2
+
+        def mk():
+            class D(Plain):
+                def n(self):
+                    return 3
+            return D
+
+        def twice():
+            def inner():
+                class Buried:
+                    pass
+                return Buried
+            return inner()
+
+        class Named:
+            pass
+
+        def w(label, f):
+            try:
+                print(f"{label:26} {f()!r}")
+            except Exception as e:
+                print(f"{label:26} !{type(e).__name__}: {e}")
+
+        D = mk()
+        w("module class", lambda: Plain.__qualname__)
+        w("method", lambda: Plain.m.__qualname__)
+        w("class in class", lambda: Plain.Inner.__qualname__)
+        w("its method", lambda: Plain.Inner.q.__qualname__)
+        w("class in function", lambda: D.__qualname__)
+        w("its name", lambda: D.__name__)
+        w("its method", lambda: D.n.__qualname__)
+        w("two deep", lambda: twice().__qualname__)
+        w("class repr", lambda: repr(D))
+        w("inner repr", lambda: repr(Plain.Inner))
+        w("instance repr", lambda: repr(D())[:21])
+        w("type of instance", lambda: str(type(D())))
+        # THE REFUSALS NAME THE CLASS PLAINLY, which is CPython's rule and
+        # the reason the qualname is a field of its own.
+        w("attribute miss", lambda: D().zz)
+        w("type attribute miss", lambda: D.zz)
+        w("no len", lambda: len(D()))
+        # RENAMING MOVES ONE AND NOT THE OTHER.
+        w("rename", lambda: (setattr(Named, "__name__", "Renamed"),
+                             Named.__qualname__, Named.__name__)[1:])
+        w("assign qualname", lambda: (setattr(Plain.Inner, "__qualname__",
+                                              "Elsewhere"),
+                                      Plain.Inner.__qualname__)[1])
+        w("assign an int", lambda: setattr(Plain, "__qualname__", 1))
+        # A CLASS BUILT AT RUN TIME QUALIFIES AS ITS NAME: there is no
+        # statement behind it to have been written inside anything.
+        w("built at run time", lambda: type("Runtime", (), {}).__qualname__)
+        # THE ONE REFUSAL THAT DOES QUALIFY. CPython words
+        # `object.__init_subclass__`'s complaint with the qualname while
+        # every refusal about an INSTANCE says plainly `'D' object`, so the
+        # two spellings are measured side by side.
+        def kw_nested():
+            class K(Plain, extra=1):
+                pass
+            return K
+
+        w("nested keyword", lambda: kw_nested())
+        try:
+            class TopKeyword(Plain, extra=1):
+                pass
+        except Exception as e:
+            print("top keyword", type(e).__name__, e)
+    """,
+    # AN EMPTY-BODIED EXCEPTION CLASS GOT NEITHER OF THE TWO NAMES. Its
+    # `class` statement builds nothing -- there is nothing in the body to
+    # build -- so the lowering binds an interned cell by name and returned,
+    # skipping the `__module__` every other class statement writes: the same
+    # statement printed `<class 'MyError'>` with `pass` in it and
+    # `<class '__main__.MyError'>` with one attribute in it.
+    #
+    # THE TEST FOR "THIS CELL IS A BARE EXCEPTION TYPE" HAD TO MOVE WITH IT.
+    # The interpreter asked whether the class dict was EMPTY, which was the
+    # same answer for every program that could reach it until the dict
+    # gained a `__module__`; the C asks whether the class has an `__init__`
+    # or a `__new__`, which is what actually distinguishes a class the
+    # program wrote over the top of a builtin exception name. The two now
+    # ask the same question.
+    "an_empty_bodied_exception_class_is_named_like_every_other": """
+        class TopEmpty(ValueError):
+            pass
+
+        class TopBody(ValueError):
+            tag = 1
+
+        def mk():
+            class InEmpty(ValueError):
+                pass
+
+            class InBody(ValueError):
+                tag = 2
+            return InEmpty, InBody
+
+        def w(label, f):
+            try:
+                print(f"{label:24} {f()!r}")
+            except Exception as e:
+                print(f"{label:24} !{type(e).__name__}: {e}")
+
+        A, B = mk()
+        for label, cls in (("top empty", TopEmpty), ("top body", TopBody),
+                           ("nested empty", A), ("nested body", B)):
+            w(label, lambda cls=cls: (cls.__name__, cls.__qualname__,
+                                      repr(cls)))
+        # AND IT IS STILL AN EXCEPTION, which is what the class the lowering
+        # binds is for: constructible, catchable, and carrying its argument.
+        w("construct", lambda: str(A("boom")))
+        w("isinstance", lambda: isinstance(A("boom"), ValueError))
+        w("args", lambda: A("boom").args)
+        try:
+            raise A("thrown")
+        except ValueError as e:
+            print("caught by base", type(e).__name__, type(e).__qualname__)
+        try:
+            raise TopEmpty("flat")
+        except TopEmpty as e:
+            print("caught by name", str(e), repr(type(e)))
+    """,
     # A CLASS REACHED AS A TYPE INHERITS, and did not. `P.__eq__`,
     # `P.__init__`, `P.__repr__` and eight more were every one an
     # AttributeError about an attribute Python guarantees; `S.upper` for a

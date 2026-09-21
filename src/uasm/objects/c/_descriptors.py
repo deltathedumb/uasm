@@ -507,11 +507,13 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            the last component of it. See `apy_bare_name`. */
         if (strcmp(want, "__name__") == 0)
             return apy_bare_name(O(obj)->v.t.name);
-        /* PEP 3155. A class nested in another would qualify differently; only
-           the top-level spelling is recorded, which is the same limit the
-           frontend's own keys have for classes. */
+        /* PEP 3155. A class nested in a function qualifies as
+           `mk.<locals>.D` and one nested in a class as `C.Inner` -- which is
+           a fact about where the `class` statement was WRITTEN, so the
+           frontend records it on the class and this reads it. A class at
+           module level qualifies as its own name and has none recorded. */
         if (strcmp(want, "__qualname__") == 0)
-            return apy_bare_name(O(obj)->v.t.name);
+            return apy_type_qualname(obj);
         /* `C.__class__` IS THE METACLASS, which is `type` unless the class
            named one. Every other kind answers this and a class did not, so
            `C.__class__` was an AttributeError about a class that plainly has
@@ -2023,6 +2025,13 @@ APY_API apy_value apy_setattr(apy_value obj, apy_value name, apy_value value) {
         const char *was = APY_CSTR(O(obj)->v.t.name);
         const char *parent = apy_exc_parent(was);
         apy_value found = apy_exc_class_named(was);
+        /* THE QUALNAME DOES NOT FOLLOW THE NAME. CPython keeps the two
+           apart -- `D.__name__ = "Z"` leaves `D.__qualname__` reading
+           `mk.<locals>.D` -- and a class that had no qualname of its own was
+           deriving one from the name, so renaming it renamed both. Pinning
+           what the qualname WAS is what keeps them separate from here on. */
+        if (!O(obj)->v.t.qual)
+            O(obj)->v.t.qual = apy_bare_name(O(obj)->v.t.name);
         O(obj)->v.t.name = value;
         if (parent && strcmp(was, APY_CSTR(value)) != 0) {
             apy_value pname = apy_lit(parent);
@@ -2040,6 +2049,23 @@ APY_API apy_value apy_setattr(apy_value obj, apy_value name, apy_value value) {
                 apy_exc_class_bind(apy_lit(was), obj);
             }
         }
+        return apy_none();
+    }
+    /* `C.__qualname__ = ...` IS A FIELD TOO, for the same reason `__name__`
+       is: the read below answers from the field, so a write that went into
+       the dict changed nothing a program could see. A BUNDLED class is how
+       this shows -- the splice restores both dunders after renaming the
+       statement, and only one of the two was landing anywhere. */
+    if (O(obj)->kind == APY_TYPE_K && O(name)->kind == APY_STR_K
+            && strcmp(APY_CSTR(name), "__qualname__") == 0) {
+        if (O(value)->kind != APY_STR_K) {
+            char said[128];
+            snprintf(said, sizeof said, "can only assign string to "
+                     "%s.__qualname__, not '%%s'%%s",
+                     APY_CSTR(apy_bare_name(O(obj)->v.t.name)));
+            return apy_fail2("TypeError", said, apy_kind_name(value), "");
+        }
+        O(obj)->v.t.qual = value;
         return apy_none();
     }
     if (O(obj)->kind == APY_INST_K) {

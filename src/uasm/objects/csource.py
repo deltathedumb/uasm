@@ -130,7 +130,7 @@ OBJECT_NAMES = (
     "apy_func_kwdefaults",
     "apy_call",
     "apy_type_new", "apy_type_set", "apy_instance_new",
-    "apy_type_builtin",
+    "apy_type_builtin", "apy_type_qual",
     "apy_getattr", "apy_getattr_default", "apy_setattr",
     "apy_super", "apy_type_object", "apy_type_class",
     "apy_prepare", "apy_type_make", "apy_object_class",

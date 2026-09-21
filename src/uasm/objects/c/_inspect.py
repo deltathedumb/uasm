@@ -479,6 +479,21 @@ static apy_value apy_bare_name(apy_value name) {
     return name;
 }
 
+/* PEP 3155: the class's `__qualname__`, which is its name unless a `class`
+   statement was written inside a function or another class.
+
+   THE FIELD WHEN THERE IS ONE, and the bare name otherwise -- a class at
+   module level qualifies as itself, so the frontend records nothing for it
+   and there is nothing to store. Read by the two reprs that qualify a name
+   and by the `__qualname__` arm of `apy_default_getattr`; the ERROR
+   MESSAGES deliberately do not read it, because CPython's say `'D' object`
+   for a nested class and reserve the qualified spelling for its reprs. */
+static apy_value apy_type_qualname(apy_value cls) {
+    if (!cls || O(cls)->kind != APY_TYPE_K) return 0;
+    if (O(cls)->v.t.qual) return O(cls)->v.t.qual;
+    return apy_bare_name(O(cls)->v.t.name);
+}
+
 APY_API apy_value apy_type_name(apy_value v) {
     /* The class's own name value, not a fresh copy: `type(a).__name__ is
        type(b).__name__` for two instances of one class, as in CPython. */
@@ -972,13 +987,16 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
            printed anyway rather than omitted, because a program that prints
            one is telling the reader it did not define one. */
         {
+            /* THE CLASS'S QUALNAME, for the same reason the class's own
+               repr uses it: `<__main__.mk.<locals>.D object at 0x...>`. */
             const char *where = apy_class_module(O(v)->v.o.cls);
+            const char *what = APY_CSTR(apy_type_qualname(O(v)->v.o.cls));
             if (where)
                 snprintf(buf, sizeof buf, "<%s.%s object at 0x%llx>", where,
-                         apy_kind_name(v), (unsigned long long)v);
+                         what, (unsigned long long)v);
             else
                 snprintf(buf, sizeof buf, "<%s object at 0x%llx>",
-                         apy_kind_name(v), (unsigned long long)v);
+                         what, (unsigned long long)v);
         }
         return apy_str_copy(buf, (int64_t)strlen(buf));
     }
@@ -995,13 +1013,15 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
                 return apy_call_n(apy_bind(hook, v), NULL, 0);
         }
         {
+            /* THE QUALNAME AND NOT THE NAME: `repr` of a class written
+               inside a function is `<class '__main__.mk.<locals>.D'>` in
+               CPython, which is the one place the nesting shows. */
             const char *where = apy_class_module(v);
+            const char *what = APY_CSTR(apy_type_qualname(v));
             if (where)
-                snprintf(buf, sizeof buf, "<class '%s.%s'>", where,
-                         APY_CSTR(O(v)->v.t.name));
+                snprintf(buf, sizeof buf, "<class '%s.%s'>", where, what);
             else
-                snprintf(buf, sizeof buf, "<class '%s'>",
-                         APY_CSTR(O(v)->v.t.name));
+                snprintf(buf, sizeof buf, "<class '%s'>", what);
         }
         return apy_str_copy(buf, (int64_t)strlen(buf));
     case APY_FUNC_K:

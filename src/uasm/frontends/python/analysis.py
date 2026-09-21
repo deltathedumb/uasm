@@ -967,6 +967,10 @@ class ClassInfo:
 
     node: ast.ClassDef
     name: str
+    #: PEP 3155's `__qualname__`, as the SOURCE spells it: `mk.<locals>.D`
+    #: for a class written inside a function, `C.Inner` for one written
+    #: inside another class, and the bare name at module level. Not the key
+    #: -- see `_register_class` for the three ways the two differ.
     qualname: str
     #: The FIRST base's name as written, or None. Everything that asks a
     #: single question -- `__base__`, a walk up one chain -- reads this.
@@ -1888,6 +1892,21 @@ class Analyzer:
         while key in self.classes:
             n += 1
             key = f"{qualname}#{n}"
+        # PEP 3155, BUILT FROM THE ENCLOSING SCOPE'S OWN QUALNAME and not
+        # from the key, for the three reasons `_register_nested` sets out at
+        # length: the key carries a `<module>` prefix a qualname never does,
+        # a `#2` suffix telling two statements of one name apart, and the
+        # mangling a spliced definition is spliced under. A class written
+        # inside a FUNCTION qualifies through `<locals>` and one written
+        # inside another class does not -- which is the whole difference
+        # between `mk.<locals>.D` and `C.Inner`.
+        outer = self._scope_qual(scope)
+        if scope.kind == "module" or not outer:
+            shown = node.name
+        elif scope.kind == "class":
+            shown = f"{outer}.{node.name}"
+        else:
+            shown = f"{outer}.<locals>.{node.name}"
         base = None
         bases: list = []
         base_exprs: list = []
@@ -1955,7 +1974,7 @@ class Analyzer:
                 # `__init_subclass__` -- which is the whole of what a class
                 # keyword does.
                 class_keywords.append(kw.arg)
-        info = ClassInfo(node, node.name, qualname, base, bases=bases,
+        info = ClassInfo(node, node.name, shown, base, bases=bases,
                          base_exprs=base_exprs, builtin_base=builtin_base,
                          scope=scope.key, is_meta=is_meta,
                          metaclass=metaclass,

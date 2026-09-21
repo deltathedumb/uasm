@@ -457,6 +457,26 @@ def apy_setattr(obj: ptr, name: ptr, value: ptr) -> ptr:
                     ptr(load(u64, offset(name, apy_str_ptr_offset()))),
                     rodata(b"__name__\0")):
                 return apy_rename_class(obj, value)
+            # `C.__qualname__ = ...` IS A FIELD TOO, for the same reason
+            # `__name__` is: the read answers from the field, so a write into
+            # the dict changed nothing a program could see. A BUNDLED class
+            # is how this shows -- the splice restores both dunders after
+            # renaming the statement.
+            if apy_cstr_eq(
+                    ptr(load(u64, offset(name, apy_str_ptr_offset()))),
+                    rodata(b"__qualname__\0")):
+                if i64(load(i32, offset(value, 0))) != apy_str_kind():
+                    return apy_raise_fmt(
+                        rodata(b"TypeError\0"),
+                        rodata(b"can only assign string to "
+                               b"%s.__qualname__, not '%s'\0"),
+                        ptr(load(u64, offset(
+                            apy_bare_name_of(ptr(load(u64, offset(
+                                obj, apy_t_name_offset())))),
+                            apy_str_ptr_offset()))),
+                        apy_kind_name_of(value))
+                store(u64, u64(value), offset(obj, apy_t_qual_offset()))
+                return apy_none()
     if i64(load(i32, offset(obj, 0))) == apy_inst_kind():
         hook: ptr = apy_class_find_of(
             ptr(load(u64, offset(obj, apy_o_cls_offset()))),
@@ -467,6 +487,29 @@ def apy_setattr(obj: ptr, name: ptr, value: ptr) -> ptr:
             store(u64, u64(value), offset(argv, apy_value_size()))
             return apy_call(apy_bind_of(hook, obj), argv, 2)
     return apy_default_setattr(obj, name, value)
+
+
+def apy_bare_name_of(name: ptr) -> ptr:
+    """The last dotted component of a class's stored name.
+
+    A BUILTIN KIND IS STORED UNDER THE DOTTED SPELLING CPython puts in a
+    message and in `<class '...'>` -- `types.GenericAlias` -- and `__name__`
+    is the tail of it. THE SAME CELL COMES BACK when there is no dot, which
+    is what keeps `type(a).__name__ is type(b).__name__` true for two
+    instances of one class, and is the case for every class a program writes.
+
+    AN IR-ONLY HELPER: the C's `apy_bare_name` is `static` and so invisible
+    to the subset. The two must agree, which is what the differential suite
+    is for.
+    """
+    i: i64 = load(i64, offset(name, apy_str_len_offset())) - 1
+    p: ptr = ptr(load(u64, offset(name, apy_str_ptr_offset())))
+    while i >= 0:
+        if load(u8, offset(p, i)) == u8(46):
+            return apy_str_slice_of(
+                name, i + 1, load(i64, offset(name, apy_str_len_offset())))
+        i = i - 1
+    return name
 
 
 def apy_rename_class(obj: ptr, value: ptr) -> ptr:
@@ -484,6 +527,13 @@ def apy_rename_class(obj: ptr, value: ptr) -> ptr:
         apy_str_ptr_offset())))
     parent: ptr = apy_exc_parent_of(was)
     found: ptr = apy_exc_class_named_of(was)
+    # THE QUALNAME DOES NOT FOLLOW THE NAME. CPython keeps the two apart --
+    # `D.__name__ = "Z"` leaves `D.__qualname__` reading `mk.<locals>.D` --
+    # and a class with no qualname of its own was deriving one from the name,
+    # so renaming it renamed both.
+    if not load(u64, offset(obj, apy_t_qual_offset())):
+        store(u64, u64(apy_bare_name_of(ptr(load(u64, offset(
+            obj, apy_t_name_offset()))))), offset(obj, apy_t_qual_offset()))
     store(u64, u64(value), offset(obj, apy_t_name_offset()))
     if parent:
         now: ptr = ptr(load(u64, offset(value, apy_str_ptr_offset())))

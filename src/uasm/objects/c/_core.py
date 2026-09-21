@@ -535,8 +535,16 @@ struct apy_obj {
         /* `builtin` is the KIND a class extends -- `class D(dict)` --
            or 0. Recorded rather than derived, because the base chain holds
            only classes and a builtin is not one. */
+        /* `qual` is PEP 3155's `__qualname__` -- `mk.<locals>.D` for a
+           class written inside a function, `C.Inner` for one written inside
+           another class -- or 0 for a class whose qualname IS its name,
+           which is every class written at module level. A FIELD OF ITS OWN
+           and not the name with dots in it: CPython's error messages say
+           `'D' object has no attribute` for a nested class and only its
+           reprs say `mk.<locals>.D`, so the two spellings have to be
+           separable. See `apy_type_qualname`. */
         struct { apy_value name, base, dict, meta, bases, mro;
-                 int builtin; } t;
+                 int builtin; apy_value qual; } t;
         /* An INSTANCE: what class made it, and its own attribute dict. */
         /* `held` is the BUILTIN VALUE an instance of a builtin-extending
            class carries -- a real list, dict or tuple. 0 for an ordinary

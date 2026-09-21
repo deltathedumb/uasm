@@ -390,6 +390,10 @@ def apy_t_dict_offset() -> i64:
     return 24
 
 
+def apy_t_qual_offset() -> i64:
+    return 64
+
+
 # ── four more cells, and what each refuses ─────────────────────────────────
 
 
@@ -511,7 +515,8 @@ def apy_type_new(name: ptr, base: ptr) -> ptr:
     THE DICT IS MADE HERE AND THE REST IS LEFT ZERO. `bases`, `mro` and
     `meta` are filled in by whatever builds a more complicated class than
     this; `builtin` marks the ones this runtime provides, and a class a
-    program wrote is not one.
+    program wrote is not one; and `qual` is PEP 3155's `__qualname__`, which
+    only a NESTED `class` statement has and only the frontend can supply.
     """
     if base:
         k: i64 = i64(load(i32, offset(base, 0)))
