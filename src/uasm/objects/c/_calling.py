@@ -2059,6 +2059,65 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
            name would be twenty enum members that differ only in which. */
         const char *w = APY_CSTR(O(f)->v.fn.name);
         if (n < 1) return apy_fail("TypeError", "unbound builtin method");
+        /* THE RECEIVER IS CHECKED AGAINST THE TYPE THE DESCRIPTOR CAME
+           OFF. `str.strip(5)` is `descriptor 'strip' for 'str' objects
+           doesn't apply to a 'int' object` in CPython, which is the
+           DESCRIPTOR complaining; the dispatch below went straight through
+           as `(5).strip()` and reported a missing attribute -- true of the
+           int and not what the program got wrong. The written spelling has
+           had this check since it was written; see `apy_descr_applies`,
+           which this is the value form of.
+
+           THE OWNER OUT OF THE QUALNAME -- `str` from `str.strip` -- which
+           is where a descriptor keeps it; see `apy_descr_owner`, which reads
+           the same head for the same reason. */
+        if (O(f)->v.fn.descr && !O(f)->v.fn.bound && O(f)->v.fn.qualname) {
+            const char *q = APY_CSTR(O(f)->v.fn.qualname);
+            const char *dot = strchr(q, '.');
+            char owner[64];
+            size_t olen = dot ? (size_t)(dot - q) : 0;
+            if (olen && olen < sizeof owner) {
+                memcpy(owner, q, olen);
+                owner[olen] = 0;
+                /* COPIED AND NOT `apy_lit`. That one POINTS AT the bytes
+                   it is given -- see `apy_from_bytes`, which says so -- and
+                   `owner` is a buffer on this frame, so the cell would
+                   outlive what it reads. */
+                if (!apy_descr_applies(
+                        a[0], apy_str_copy(owner, (int64_t)olen),
+                        O(f)->v.fn.name))
+                    return 0;
+            }
+        }
+        /* AND A SUBCLASS'S INSTANCE IS ITS BUILTIN HERE. `S.upper` for a
+           `class S(str)` is str's own descriptor -- the class wrote no
+           `upper`, or the attribute lookup would have answered that instead
+           -- and CPython runs it on the text the instance holds. The entry
+           points below take a str or a bytes by shape and read `v.s`
+           straight off it, so handing one an instance read the wrong union
+           member: `S.upper(S("a"))` was a BUS ERROR rather than an answer.
+           `apy_str_self` already ADMITS an instance (see its comment, which
+           names this spelling) -- what was missing is the unwrap behind the
+           admission.
+
+           A COPY OF THE ARGUMENTS rather than a write into `a`, because the
+           array belongs to the caller and a call site may reuse it. Eight
+           slots covers every builtin method there is -- the widest takes
+           three besides its receiver -- and anything wider is left exactly
+           as it was rather than silently truncated.
+
+           UNCONDITIONALLY, because the name was reached off the BUILTIN's
+           descriptor: `str.upper(s)` runs str's `upper` whatever `S`
+           defines. `apy_as_builtin`, which substitutes only where the class
+           is silent, answers the other question -- the one a bound
+           `s.upper()` asks. The interpreter's twin is `_unbound_kind`. */
+        apy_value unwrapped[8];
+        if (n <= 8 && O(a[0])->kind == APY_INST_K && O(a[0])->v.o.held) {
+            int64_t i;
+            for (i = 0; i < n; i++) unwrapped[i] = a[i];
+            unwrapped[0] = O(a[0])->v.o.held;
+            a = unwrapped;
+        }
         /* THE SIX SET METHODS THAT TAKE ANY NUMBER OF OTHERS, above the
            generated table, which knows these names and would hand the whole
            `*rest` tuple to a two-argument symbol. See `apy_set_fold`. */
@@ -2717,6 +2776,21 @@ static apy_value apy_arity_error(apy_value f, int64_t got) {
             int64_t packed = apy_kind_meth_words(w, apy_kind_bit(recv));
             if (packed)
                 return apy_meth_arity_words(recv, w, packed, got);
+        }
+        /* AN UNBOUND METHOD DESCRIPTOR CALLED WITH NOTHING is a MISSING
+           RECEIVER rather than a missing parameter, and CPython words it
+           that way: `unbound method str.strip() needs an argument`, naming
+           the descriptor's qualname. This runtime said `strip expected at
+           least 1 argument, got 0`, which counts the receiver among the
+           parameters and so describes a different call. The frontend
+           already reports these words for the spelling it can see -- see
+           `_dyn_call` -- and this is the same sentence for the one reached
+           through a value. */
+        if (O(f)->v.fn.descr && !O(f)->v.fn.bound && got == 0
+                && O(f)->v.fn.qualname) {
+            snprintf(buf, sizeof buf, "unbound method %s() needs an argument",
+                     APY_CSTR(O(f)->v.fn.qualname));
+            return apy_fail("TypeError", buf);
         }
         /* A DUNDER WITH A FIXED ARITY IS A BOUND SLOT, and CPython leaves a
            slot anonymous in this message. One with a RANGE is a method
@@ -3930,36 +4004,63 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
     if (kwn && O(f)->kind == APY_FUNC_K
             && O(f)->v.fn.native == APY_NAT_KIND
             && !O(f)->v.fn.vararg) {
-        apy_value names[4], defs[4], slot[4];
+        apy_value names[4], defs[4], slot[4], full[5];
         char taken[4];
         const char *meth = APY_CSTR(O(f)->v.fn.name);
         apy_value self = O(f)->v.fn.bound;
         int64_t np = apy_kind_meth_sign(meth, names, defs);
         int64_t at, k2, i2, top = 0;
+        /* THE UNBOUND SPELLING WRITES ITS RECEIVER OUT. `str.split(s, ",",
+           maxsplit=1)` -- and `S.split(s, ",", maxsplit=1)` for a `class
+           S(str)`, which reaches the same descriptor -- hands the receiver
+           as the FIRST POSITIONAL, where a bound method carries it on the
+           callable instead. Everything below matched `raw[0]` against the
+           method's first PARAMETER, so the receiver landed in `sep` and the
+           count was one too many: `str.split() takes at most 2 arguments (3
+           given)` for a call CPython answers. One offset says which
+           spelling this is, and the receiver is put back in front at the
+           end.
+
+           `descr` IS WHAT SAYS SO, not the absence of a receiver: the six
+           names `object` hands down are unbound `APY_NAT_KIND` cells too
+           (see `apy_object_default`) and carry no descriptor of a kind, so
+           reading a receiver out of their arguments would shift a call that
+           has none. */
+        int64_t base = (!self && O(f)->v.fn.descr) ? 1 : 0;
+        int64_t pos = argc - base;
         char b[200];
+        if (pos < 0)
+            return apy_fail2("TypeError", "unbound method %s() needs an "
+                             "argument%s", meth, "");
         /* `d.update(a=1)` -- THE KEYWORDS ARE THE VALUE, and no signature
            can say that: any name at all becomes a key. So the dict the
            caller built IS the argument, applied after a positional mapping
            if there was one. A SET'S `update` really does take no keyword,
            which is why this is the dict's alone. */
-        if (strcmp(meth, "update") == 0 && self
-                && O(self)->kind == APY_DICT_K) {
-            if (argc && !apy_update(self, raw[0])) return 0;
-            return apy_update(self, kwd);
+        {
+            /* THE RECEIVER EITHER WAY, for the same reason: `dict.update(d,
+               a=1)` is the unbound spelling of `d.update(a=1)` and means
+               the same thing. */
+            apy_value recv = self ? self : (argc ? raw[0] : 0);
+            if (strcmp(meth, "update") == 0 && recv
+                    && O(recv)->kind == APY_DICT_K) {
+                if (pos && !apy_update(recv, raw[base])) return 0;
+                return apy_update(recv, kwd);
+            }
         }
         if (!np || np != O(f)->v.fn.arity - 1)
             return apy_kw_owner(self ? self : (argc ? raw[0] : apy_none()),
                                 O(f)->v.fn.name);
         for (i2 = 0; i2 < np; i2++) { slot[i2] = 0; taken[i2] = 0; }
-        for (i2 = 0; i2 < argc && i2 < np; i2++) {
-            slot[i2] = raw[i2];
+        for (i2 = 0; i2 < pos && i2 < np; i2++) {
+            slot[i2] = raw[i2 + base];
             taken[i2] = 1;
         }
         /* TOO MANY BEATS EVERY OTHER COMPLAINT, counting the keywords in. */
-        if (argc + kwn > np) {
+        if (pos + kwn > np) {
             snprintf(b, sizeof b, "%s() takes at most %lld argument%s "
                      "(%lld given)", meth, (long long)np, np == 1 ? "" : "s",
-                     (long long)(argc + kwn));
+                     (long long)(pos + kwn));
             return apy_fail("TypeError", b);
         }
         for (k2 = 0; k2 < kwn; k2++) {
@@ -3991,7 +4092,7 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
                     snprintf(b, sizeof b, "%s() takes at least %lld "
                              "positional argument%s (%lld given)", meth,
                              (long long)(i2 + 1), i2 ? "s" : "",
-                             (long long)argc);
+                             (long long)pos);
                     return apy_fail("TypeError", b);
                 }
                 slot[i2] = defs[i2];
@@ -4006,7 +4107,13 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
            filled those slots by name: `(5).to_bytes(length=4)` arrives three
            slots wide and wrote no positional at all. See
            `apy_meth_positional`. */
-        return apy_call_nk(f, slot, np, 0, 1);
+        if (self) return apy_call_nk(f, slot, np, 0, 1);
+        /* AND THE RECEIVER BACK IN FRONT, which is where the unbound
+           spelling's body reads it: the slots above are the PARAMETERS and
+           `a[0]` is the receiver for every one of these entry points. */
+        full[0] = raw[0];
+        for (i2 = 0; i2 < np; i2++) full[i2 + 1] = slot[i2];
+        return apy_call_nk(f, full, np + 1, 0, 1);
     }
     declared = O(target)->v.fn.arity - (O(target)->v.fn.vararg ? 1 : 0)
                                      - (O(target)->v.fn.kwarg ? 1 : 0);

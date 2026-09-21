@@ -289,12 +289,6 @@ def _is_type_call(node) -> bool:
 #: `ascii` IS `repr` here: the two differ only for non-ASCII text, which this
 #: runtime does not represent, and a second entry point would be the same code
 #: under another name.
-#: Builtin TYPE names whose methods can be taken unbound -- `str.lower`.
-#: Only the kinds with methods in the table; `int.bit_length` and the like
-#: would need the same entry and are not reachable yet.
-_BUILTIN_TYPES = frozenset({"str", "bytes", "list", "dict", "set",
-                            "frozenset", "tuple"})
-
 _DIRECT_BUILTINS = {
     "ord": "apy_ord", "chr": "apy_chr", "id": "apy_id",
     "__import__": "apy_import",
@@ -1052,16 +1046,6 @@ class DynamicLowering:
                   | ast.Subscript()) if (
                       (made := self._const_of(node)) is not _NOT_CONST):
                 return self._dyn_const_value(made)
-            case ast.Attribute(value=ast.Name(id=base), attr=attr) if (
-                    base in _BUILTIN_TYPES and base not in self.info.locals
-                    and base not in self.infos
-                    and base not in self.class_names
-                    and method_symbol(attr, 0) is not None):
-                # `str.lower` -- an UNBOUND method of a builtin type, which is
-                # a value: `sorted(xs, key=str.lower)`. The thunk calls the
-                # method on its argument, so `str.lower(x)` is `x.lower()`,
-                # which is what an unbound method means.
-                return self._dyn_unbound_method(base, attr)
             case ast.Lambda():
                 # A lambda is a nested function written inline, and analysis
                 # registered it as one. So this is the same function VALUE a
@@ -1505,42 +1489,6 @@ class DynamicLowering:
                                 sym=self.default_symbol(info, index)))
         return self.b.load(T.PTR, addr)
 
-    def _dyn_unbound_method(self, base: str, attr: str) -> int:
-        """`str.lower` and friends, as a one-argument callable value.
-
-        The same synthesised thunk a builtin gets, with a method call for a
-        body. The receiver is the thunk's argument, which is exactly the
-        unbound-method rule -- `str.lower(x)` is `x.lower()` -- so nothing has
-        to know that a type object was involved. There are no type objects
-        here yet, which is why this is a shape rather than an attribute
-        lookup.
-        """
-        key = f"{base}.{attr}"
-        symbol = self._builtin_thunks.get(key)
-        if symbol is None:
-            symbol = f"pybm_{base}_{attr}"
-            self._builtin_thunks[key] = symbol
-            self._pending_thunks.append((key, symbol))
-        code = self.b.reg(T.PTR)
-        self.b.emit(Instruction(Op.FUNC_ADDR, T.PTR, dst=code, sym=symbol))
-        # THE BARE NAME AND THE QUALIFIED ONE, as CPython keeps them:
-        # `str.upper.__name__` is `upper` and its `__qualname__` is
-        # `str.upper`. The thunk used to carry the dotted key as its plain
-        # name, so both read `str.upper`.
-        made = self.b.call(T.PTR, "apy_func_new",
-                           [code, self.b.const(T.I64, 1),
-                            self._dyn_str_literal(attr),
-                            self.b.const(T.I64, 0),
-                            self.b.const(T.I64, 0),
-                            self.b.const(T.I64, 0)])
-        self.b.call(T.PTR, "apy_func_qualname",
-                    [made, self._dyn_str_literal(key)])
-        # REACHED OFF THE TYPE MAKES IT A DESCRIPTOR. `type(str.upper)` is
-        # `method_descriptor` in CPython, not `function`, and it prints as
-        # `<method 'upper' of 'str' objects>`; see `apy_func_descr`.
-        self.b.call(T.PTR, "apy_func_descr", [made])
-        return made
-
     def _dyn_annotate_thunk(self, key: str, info) -> int | None:
         """PEP 649: the zero-argument function that BUILDS `__annotations__`.
 
@@ -1849,19 +1797,11 @@ class DynamicLowering:
                 self.b, self.info = saved_b, saved_info
                 self.handlers, self.finallys = saved_handlers, saved_finallys
                 continue
-            if "." in name:
-                # An unbound method: the thunk's argument is the RECEIVER.
-                _, attr = name.split(".", 1)
-                call = _ast.Call(
-                    func=_ast.Attribute(value=_Given(arg), attr=attr,
-                                        ctx=_ast.Load()),
-                    args=[], keywords=[])
-            else:
-                call = _ast.Call(
-                    func=_ast.Name(id=name, ctx=_ast.Load()),
-                    args=[_Given(arg)],
-                    keywords=([_ast.keyword(arg=None, value=_Given(kwbag))]
-                              if kwbag is not None else []))
+            call = _ast.Call(
+                func=_ast.Name(id=name, ctx=_ast.Load()),
+                args=[_Given(arg)],
+                keywords=([_ast.keyword(arg=None, value=_Given(kwbag))]
+                          if kwbag is not None else []))
             for node in _ast.walk(call):
                 node.lineno = node.end_lineno = 1
                 node.col_offset = node.end_col_offset = 0
@@ -5829,6 +5769,18 @@ class DynamicLowering:
         """Names that are TYPE OBJECTS. An exception class is not one."""
         return {c.name for c in self.classes.values() if not c.is_exception}
 
+    @property
+    def _every_class_name(self) -> set:
+        """Every name a `class` statement in this module binds.
+
+        `class_names` above LEAVES THE EXCEPTIONS OUT, because the question
+        it answers is which names are type objects to instantiate. The
+        unbound-method question is a different one: `E.with_traceback(e, tb)`
+        reaches a descriptor off the class exactly as `S.strip(s)` does, and
+        an exception class is no less a class for being raised.
+        """
+        return {c.name for c in self.classes.values()}
+
     def _dyn_load(self, name: str) -> int:
         """Read a name, through whichever storage analysis gave it."""
         if self._class_binds is not None and name in self._class_binds[2]:
@@ -6642,6 +6594,50 @@ class DynamicLowering:
                                       node.keywords)
         receiver = (recv if recv is not None
                     else self._dyn_expr(node.func.value))
+        if recv is None and isinstance(node.func.value, ast.Name) \
+                and node.func.value.id in self._every_class_name:
+            # `S.strip(s)` FOR A CLASS OF THIS MODULE -- AN UNBOUND METHOD
+            # CALLED WITH ITS RECEIVER FIRST, exactly as `str.strip(s)` is,
+            # and the same bug the builtin-type branch in `_dyn_call` was
+            # written to close. That one stops at `_BUILTIN_TYPE_VALUES` and
+            # says so; a class extending a builtin INHERITS the same
+            # descriptors and reached none of them.
+            #
+            # WITHOUT IT THE RECEIVER WAS THE TYPE. The dispatch below picks
+            # its symbol by NAME AND ARGUMENT COUNT, and the count it saw
+            # included the receiver -- so `S.strip(" a ")` matched the
+            # two-argument `strip` row and handed the runtime the CLASS,
+            # which reported `'type' object has no attribute 'strip'`. The
+            # names that worked -- `upper`, `lower`, `isdigit` -- did so only
+            # because they have no row at the shifted count and fell through
+            # to the attribute lookup this now takes for all of them.
+            #
+            # THROUGH THE ATTRIBUTE rather than rewritten to the bound
+            # spelling. The builtin branch can check the receiver against the
+            # type it was reached off because it knows which type that is; a
+            # user class may have written `strip` itself, and which of the
+            # two a name means is the attribute lookup's answer and not one
+            # this can make.
+            #
+            # AND WITH NO SHADOWING TEST, unlike the builtin branch. That one
+            # asks `not in self.info.locals` because `str` is a BUILTIN and a
+            # module binding of that name means something else entirely; a
+            # class of this module IS a local of the scope its statement runs
+            # in, so the same test switched the rewrite off at module level
+            # and inside a class body -- `x = S.strip(S(" a "))` written at
+            # the top of a file was still `'type' object has no attribute
+            # 'strip'` while the same line inside a function worked. Nothing
+            # is lost by dropping it: the attribute lookup is what the
+            # spelling MEANS, so it is right for whatever the name holds. A
+            # parameter named `S` carrying a plain str reads `S.strip(" a ")`
+            # as the bound call it is, which is the same answer the dispatch
+            # below would have given.
+            attribute = self.b.call(T.PTR, "apy_getattr",
+                                    [receiver, self._dyn_str_literal(attr)])
+            self._dyn_check()
+            return self._dyn_indirect(attribute,
+                                      self._dyn_operands(node.args),
+                                      node.keywords)
         if attr == "format" and not any(isinstance(a, ast.Starred)
                                         for a in node.args):
             # `"{} {k}".format(a, k=v)`. The positional arguments travel as a

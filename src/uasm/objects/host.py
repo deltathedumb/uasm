@@ -1576,7 +1576,9 @@ class ObjectHost:
                 # `dict.keys(d)` is how it is called -- binding it to the
                 # prototype would answer for an empty dict, and a mutating
                 # method would write into the prototype itself.
-                return self._new(Native(name, _unbound_kind(self, name),
+                return self._new(Native(name,
+                                        _unbound_kind(self, name,
+                                                      obj.name),
                                         descr=obj.name))
         # A TYPE IS NAMED, NOT DESCRIBED. CPython says `type object 'list'
         # has no attribute 'nope'` where a VALUE gets `'int' object has no
@@ -8865,7 +8867,8 @@ def _kind_method_of(h, cls, kind_name: str, name: str):
     # UNBOUND, as it is off a builtin type: `type(it).__next__` takes the
     # cursor as its argument, which is what `type(it).__next__(it)` means --
     # and `S.upper("abc")` is the same sentence.
-    return h._new(Native(name, _unbound_kind(h, name), descr=kind_name))
+    return h._new(Native(name, _unbound_kind(h, name, kind_name),
+                         descr=kind_name))
 
 
 def _kind_prototype(name: str):
@@ -8898,12 +8901,52 @@ def _kind_prototype(name: str):
     return it
 
 
-def _unbound_kind(h, want: str):
-    """`dict.keys` as a value: the receiver is its first argument."""
-    def body(recv, *rest):
+def _unbound_kind(h, want: str, owner: str = ""):
+    """`dict.keys` as a value: the receiver is its first argument.
+
+    A SUBCLASS'S INSTANCE IS ITS BUILTIN HERE. `S.upper` for a `class
+    S(str)` is str's own descriptor -- the class wrote no `upper`, or
+    `_kind_method_of` would never have been asked -- and CPython runs it
+    on the text the instance holds. `_kind_attr` asks `isinstance(obj, str)`
+    and an `Instance` is not one, so the answer was None and this reported
+    `descriptor 'upper' needs an argument` for a call that had given it one.
+    The compiled twin is `apy_native_call`'s `APY_NAT_KIND`, which unwraps
+    its receiver for the same reason.
+
+    UNCONDITIONALLY, unlike `_as_builtin`: that one substitutes only where
+    the class is silent, because there the NAME was reached through the
+    instance and the class's own would have answered. Here the name was
+    reached off the BUILTIN's descriptor, which is what the program asked
+    for -- `str.upper(s)` runs str's `upper` whatever `S` defines.
+    """
+    def body(*given):
+        # NO RECEIVER AT ALL is a MISSING ONE, and CPython words it as the
+        # descriptor's: `unbound method str.strip() needs an argument`. This
+        # was Python's own "missing 1 required positional argument", about a
+        # parameter list a program never saw, or a count that included the
+        # receiver among the method's own arguments. `*given` rather than a
+        # declared `recv` because that message has to be THIS one's.
+        if not given:
+            h._fail("TypeError",
+                    f"unbound method {owner}.{want}() needs an argument"
+                    if owner else f"descriptor '{want}' needs an argument")
+            raise _UserFailed
+        recv, rest = given[0], given[1:]
+        if isinstance(recv, Instance) and recv.held is not None:
+            recv = recv.held
         found = _kind_attr(h, recv, want)
         if found is None:
-            h._fail("TypeError", f"descriptor '{want}' needs an argument")
+            # THE WRONG KIND, worded as the DESCRIPTOR rather than as the
+            # receiver: `descriptor 'strip' for 'str' objects doesn't apply
+            # to a 'int' object`. The receiver NAMED IS THE ONE WRITTEN, not
+            # the value unwrapped above -- `str.strip(L([1]))` is about the
+            # `L`, which is what the program handed over. See
+            # `apy_descr_applies`, which is the compiled twin and which the
+            # written spelling has always gone through.
+            h._fail("TypeError",
+                    f"descriptor '{want}' for '{owner}' objects doesn't "
+                    f"apply to a '{h.kind_name(given[0])}' object"
+                    if owner else f"descriptor '{want}' needs an argument")
             raise _UserFailed
         return h._get(found, want).body(*rest)
     return body
@@ -10204,7 +10247,7 @@ def _object_default(h, name: str):
         # as it binds the ones above. `_OBJECT_ARITY` is the table of which
         # names those are, and is the same list `apy_object_arity` holds for
         # the compiled halves.
-        body = _unbound_kind(h, name)
+        body = _unbound_kind(h, name, "object")
     else:
         return None
     # `__init_subclass__` TAKES ITS OWN KEYWORDS, which is the only way its
@@ -12211,6 +12254,16 @@ def _native_kwargs(h, f, args, kwargs):
     # hands them straight over.
     if f.variadic:
         return h._value(f.body(*args, **kwargs))
+    # THE UNBOUND SPELLING WRITES ITS RECEIVER OUT. `str.split(s, ",",
+    # maxsplit=1)` -- and `S.split(s, ",", maxsplit=1)` for a `class S(str)`,
+    # which reaches the same descriptor -- hands the receiver as the FIRST
+    # POSITIONAL, where a bound method carries it on the callable. Everything
+    # below matched `args[0]` against the method's first PARAMETER, so the
+    # receiver landed in `sep` and the count was one too many: `split() takes
+    # at most 2 arguments (3 given)` for a call CPython answers. `descr` is
+    # what says which spelling this is -- it holds the type the descriptor
+    # came off, and only an unbound one has it.
+    base = 1 if f.bound is None and f.descr else 0
     params = METHOD_PARAMS.get(f.name) if f.name in _TABLE_METHODS else None
     if params is None:
         # A METHOD WITH NO KEYWORD SIGNATURE AT ALL names its owner, which is
@@ -12222,7 +12275,7 @@ def _native_kwargs(h, f, args, kwargs):
         # no signature can say that -- any name at all becomes a key. A SET'S
         # `update` really does take no keyword, so this is the dict's alone.
         if f.name == "update" and isinstance(who, dict):
-            for one in args:
+            for one in args[base:]:
                 if not isinstance(one, (dict, _VIEW_TYPES)):
                     return h._fail("TypeError",
                                    f"'{h.kind_name(one)}' object is not a "
@@ -12232,15 +12285,19 @@ def _native_kwargs(h, f, args, kwargs):
             return h._none
         return h._fail("TypeError", f"{h.kind_name(who)}.{f.name}() takes no "
                                     f"keyword arguments")
+    if base and not args:
+        return h._fail("TypeError", f"unbound method {f.descr}.{f.name}() "
+                                    f"needs an argument")
+    given = args[base:]
     named = [p for p, _ in params]
-    slots = list(args[:len(params)])
+    slots = list(given[:len(params)])
     taken = [True] * len(slots) + [False] * (len(params) - len(slots))
     slots += [None] * (len(params) - len(slots))
-    if len(args) + len(kwargs) > len(params):
+    if len(given) + len(kwargs) > len(params):
         plural = "" if len(params) == 1 else "s"
         return h._fail("TypeError",
                        f"{f.name}() takes at most {len(params)} "
-                       f"argument{plural} ({len(args) + len(kwargs)} given)")
+                       f"argument{plural} ({len(given) + len(kwargs)} given)")
     for name, value in kwargs.items():
         at = named.index(name) if name in named and name is not None else -1
         if at < 0:
@@ -12261,7 +12318,7 @@ def _native_kwargs(h, f, args, kwargs):
                 return h._fail("TypeError",
                                f"{f.name}() takes at least {i + 1} positional "
                                f"argument{'' if i == 0 else 's'} "
-                               f"({len(args)} given)")
+                               f"({len(given)} given)")
             default = None
         # PADDED TO THE FULL ARITY, which is what the frontend's own fold does
         # for the written spelling: the entry point takes every parameter and
@@ -12271,7 +12328,10 @@ def _native_kwargs(h, f, args, kwargs):
         # `bound` SAYS THE NAMES ARE ALREADY IN THEIR SLOTS, which is what
         # keeps the positional bound from being re-applied to a call that
         # filled those slots by name. See `_meth_positional`.
-        return h._value(h._invoke(f, slots, bound=True))
+        #
+        # AND THE RECEIVER BACK IN FRONT for the unbound spelling, which is
+        # where its body reads one: the slots above are the PARAMETERS.
+        return h._value(h._invoke(f, list(args[:base]) + slots, bound=True))
     except _UserFailed:
         return 0
 

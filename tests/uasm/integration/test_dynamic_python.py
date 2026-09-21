@@ -12387,6 +12387,120 @@ PROGRAMS = {
         w("Mapping is Mutable", lambda: issubclass(Mapping, MutableMapping))
         w("Mutable is Mapping", lambda: issubclass(MutableMapping, Mapping))
     """,
+    # AN INHERITED BUILTIN METHOD REACHED OFF THE SUBCLASS -- 199.
+    #
+    # `S.strip(s)` for a `class S(str)` was `'type' object has no attribute
+    # 'strip'`, and `S.upper(S("a"))` a BUS ERROR on both compiled paths.
+    # Three separate things were wrong and each hid the next.
+    #
+    # THE FRONTEND PICKED ITS SYMBOL BY NAME AND ARGUMENT COUNT, and the
+    # count it saw included the receiver -- so `S.strip(" a ")` matched the
+    # two-argument `strip` row and handed the runtime the CLASS. The names
+    # that worked -- `upper`, `isdigit` -- did so only because they have no
+    # row at the shifted count and fell through to the attribute lookup that
+    # all of them now take.
+    #
+    # THE DESCRIPTOR DID NOT UNWRAP ITS RECEIVER. `str.upper(S("a"))` runs
+    # str's `upper` on the text the instance holds, and the entry points take
+    # a str by shape -- so an instance read the wrong union member.
+    #
+    # AND THE TWO SPELLINGS WERE TWO OBJECTS: `str.strip` was a synthesised
+    # one-argument thunk and `S.strip` the runtime descriptor, so each
+    # answered a keyword, a wrong receiver and a missing receiver
+    # differently. One object now, which is why the last three rows here can
+    # be written once.
+    "an_inherited_builtin_method_is_callable_off_the_subclass": """
+        class S(str):
+            pass
+
+        class L(list):
+            pass
+
+        class D(dict):
+            pass
+
+        class Own(str):
+            def strip(self, *a):
+                return "own"
+
+            @classmethod
+            def cm(cls, x):
+                return (cls.__name__, x)
+
+            @staticmethod
+            def sm(x):
+                return ("sm", x)
+
+        def w(label, f):
+            try:
+                print(f"{label:24} {f()!r}")
+            except Exception as e:
+                print(f"{label:24} !{type(e).__name__}: {e}")
+
+        def updated():
+            d = D({"a": 1})
+            dict.update(d, b=2)
+            return d
+
+        def held():
+            # THROUGH A VARIABLE, so the frontend cannot lower the call at
+            # its site and the descriptor itself has to answer.
+            return str.split
+
+        def held2():
+            return S.strip
+
+        # AT MODULE LEVEL AND IN A CLASS BODY, which is where the first
+        # shape of this fix did NOT reach: it asked `not in
+        # self.info.locals`, copied from the branch that serves `str`, and a
+        # class of this module IS a local of the scope its statement runs
+        # in. So `x = S.strip(...)` written at the top of a file stayed
+        # broken while the same line inside a function worked. Written OUT
+        # here rather than inside a lambda for exactly that reason.
+        top = S.strip(S(" top "))
+
+        class Body:
+            trimmed = S.strip(S(" body "))
+            parts = S.split(S("a,b"), ",")
+
+        # THE ROWS THE ARGUMENT COUNT USED TO DECIDE.
+        w("module level", lambda: top)
+        w("class body", lambda: Body.trimmed)
+        w("class body split", lambda: Body.parts)
+        w("strip", lambda: S.strip(S(" a ")))
+        w("strip chars", lambda: S.strip(S("xax"), "x"))
+        w("split", lambda: S.split(S("a b")))
+        w("split sep", lambda: S.split(S("a,b"), ","))
+        w("replace", lambda: S.replace(S("aa"), "a", "b"))
+        w("startswith", lambda: S.startswith(S("ab"), "a"))
+        w("count", lambda: S.count(S("aa"), "a"))
+        w("encode", lambda: S.encode(S("a")))
+        w("upper", lambda: S.upper(S("a")))
+        w("split maxsplit", lambda: S.split(S("a,b,c"), ",", maxsplit=1))
+        w("splat", lambda: S.strip(*[S("xax"), "x"]))
+        # MUTABLE KINDS, where the receiver is written THROUGH.
+        w("D.get", lambda: D.get(D({"a": 1}), "a"))
+        w("D.get default", lambda: D.get(D({}), "a", 9))
+        w("L.pop", lambda: L.pop(L([1, 2])))
+        w("dict.update unbound", lambda: updated())
+        # A CLASS THAT WRITES ITS OWN WINS, as the attribute lookup says.
+        w("own strip", lambda: Own.strip(Own(" a ")))
+        w("own classmethod", lambda: Own.cm(1))
+        w("own staticmethod", lambda: Own.sm(1))
+        # AND THE BASE SPELLING IS THE SAME DESCRIPTOR, so these three are
+        # one answer rather than two.
+        w("base kw", lambda: str.split("a,b,c", ",", maxsplit=1))
+        w("value kw", lambda: held()("a,b,c", ",", maxsplit=1))
+        w("wrong receiver", lambda: S.strip(5))
+        w("no receiver", lambda: S.strip())
+        w("value wrong recv", lambda: held2()(5))
+        w("value no recv", lambda: held2()())
+        w("plain receiver", lambda: S.strip(" a "))
+        w("descriptor", lambda: type(S.strip).__name__)
+        w("repr", lambda: S.strip)
+        w("qualname", lambda: S.strip.__qualname__)
+        w("objclass", lambda: S.strip.__objclass__)
+    """,
     "percent_formatting_asks_str_and_a_subclass_is_not_an_exact_one": """
         class S(str):
             pass
