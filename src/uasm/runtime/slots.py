@@ -1849,6 +1849,14 @@ def apy_kind_prototype(type_name: ptr) -> ptr:
         return apy_from_cstr(rodata(b"\0"))
     if apy_name_is(type_name, rodata(b"bytes\0")):
         return apy_bytes_literal(rodata(b"\0"), 0)
+    # A BYTEARRAY PROTOTYPE IS A FRESH CELL AND NEVER THE SHARED EMPTY:
+    # `apy_bytes_literal` answers the interned empty bytes at length 0, and
+    # setting the mutable flag on THAT would make every empty bytes in the
+    # program writable. `apy_bytes_cell` takes `mut` as a parameter for
+    # exactly this reason. Missing until now, so `bytearray` had no
+    # prototype -- and a kind with no prototype answers nothing.
+    if apy_name_is(type_name, rodata(b"bytearray\0")):
+        return apy_bytes_cell(rodata(b"\0"), 0, 1)
     if apy_name_is(type_name, rodata(b"int\0")):
         return apy_from_int(0)
     if apy_name_is(type_name, rodata(b"bool\0")):

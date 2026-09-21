@@ -8748,8 +8748,18 @@ class Native:
 #: An EMPTY VALUE of the kind a builtin type names, so `_kind_attr` can
 #: answer for the type without a second copy of it. Nothing is done with the
 #: prototype but ask its kind.
+#: The empty value each kind answers its attributes FROM. `bytearray` was
+#: missing, and a kind with no prototype answers nothing -- which is why
+#: `bytearray.fromhex` read off the TYPE was an AttributeError while
+#: `bytes.fromhex` beside it worked.
+#:
+#: SHARED AND NOT COPIED, the mutable one included. A prototype is only ever
+#: asked WHICH METHODS its kind has and is then dropped; nothing writes to
+#: one, and the two compiled runtimes mint a fresh cell per lookup only
+#: because minting is what they have.
 _KIND_PROTOTYPES = {"list": [], "tuple": (), "dict": {}, "set": set(),
                     "frozenset": frozenset(), "str": "", "bytes": b"",
+                    "bytearray": bytearray(),
                     "int": 0, "bool": False, "float": 0.0}
 
 

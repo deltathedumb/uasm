@@ -897,6 +897,16 @@ APY_API apy_value apy_kind_prototype(apy_value type_namev) {
     if (strcmp(type_name, "frozenset") == 0) return apy_frozenset_new(1);
     if (strcmp(type_name, "str") == 0)   return apy_lit("");
     if (strcmp(type_name, "bytes") == 0) return apy_bytes_copy("", 0);
+    /* A BYTEARRAY PROTOTYPE IS A FRESH ONE AND NEVER THE SHARED EMPTY, which
+       is the whole reason `apy_bytearray_copy` exists beside
+       `apy_bytes_copy`: a bytearray is written into, and handing out the
+       interned empty bytes with the mutable flag set would make every empty
+       bytes in the program writable. Missing until now, so `bytearray` had
+       no prototype -- and a kind with no prototype answers nothing, which is
+       why `bytearray.fromhex` read off the TYPE was an AttributeError while
+       `bytes.fromhex` beside it worked. */
+    if (strcmp(type_name, "bytearray") == 0)
+        return apy_bytearray_copy("", 0);
     if (strcmp(type_name, "int") == 0 || strcmp(type_name, "bool") == 0)
         return apy_from_int(0);
     if (strcmp(type_name, "float") == 0) return apy_from_float(0.0);

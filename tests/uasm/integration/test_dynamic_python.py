@@ -4819,6 +4819,54 @@ PROGRAMS = {
         w("runtime sub", lambda: list(type("R", (Plain,), {}).__dict__))
         w("exception works", lambda: isinstance(E("x"), Exception))
     """,
+    # A KIND WITH NO PROTOTYPE ANSWERS NOTHING. A builtin type used as a
+    # VALUE has no instance to ask which methods it carries, so one is made
+    # -- empty, asked, thrown away -- and `bytearray` was the one kind with
+    # no row in that table. So `bytes.fromhex` read off the type worked and
+    # `bytearray.fromhex` beside it was an AttributeError about a name the
+    # type plainly has; the WRITTEN spelling worked either way, because the
+    # frontend lowers that one at the call site and never asks.
+    #
+    # AND THE PROTOTYPE HAS TO BE A FRESH CELL. The empty bytes is INTERNED,
+    # so tagging that one mutable would have made every empty bytes in the
+    # program writable -- which is why the compiled halves ask for `mut` at
+    # construction rather than setting it afterwards.
+    "a_builtin_type_answers_from_a_prototype_of_its_kind": """
+        def w(label, f):
+            try:
+                print(f"{label:24} {f()!r}")
+            except Exception as e:
+                print(f"{label:24} !{type(e).__name__}: {e}")
+
+        w("bytes written", lambda: bytes.fromhex("41 42"))
+        w("bytearray written", lambda: bytearray.fromhex("41 42"))
+        bf = bytes.fromhex
+        baf = bytearray.fromhex
+        w("bytes value", lambda: bf("41"))
+        w("bytearray value", lambda: baf("41"))
+        # THE KIND THE CLASSMETHOD WAS REACHED OFF DECIDES WHAT IT BUILDS.
+        w("bytes value kind", lambda: type(bf("41")).__name__)
+        w("bytearray value kind", lambda: type(baf("41")).__name__)
+        w("off an instance", lambda: b"".fromhex("41"))
+        w("off a bytearray", lambda: bytearray().fromhex("41"))
+        w("getattr bytes", lambda: getattr(bytes, "fromhex")("41"))
+        w("getattr bytearray", lambda: getattr(bytearray, "fromhex")("41"))
+        w("hasattr", lambda: (hasattr(bytes, "fromhex"),
+                              hasattr(bytearray, "fromhex")))
+        w("in dir", lambda: ("fromhex" in dir(bytes),
+                             "fromhex" in dir(bytearray)))
+        # AND THE ORDINARY BYTEARRAY METHODS STILL COME OFF THE TYPE, which
+        # is the half a missing prototype would have taken with it.
+        w("unbound hex", lambda: bytearray.hex(bytearray(b"AB")))
+        w("unbound upper", lambda: bytearray.upper(bytearray(b"ab")))
+        # AND THE SHARED EMPTY BYTES IS STILL IMMUTABLE, which is what the
+        # fresh-cell rule above is protecting: a prototype tagged mutable on
+        # the interned cell would have made this succeed.
+        empty = b""
+        w("empty is bytes", lambda: type(empty).__name__)
+        w("empty resists", lambda: empty.__setitem__(0, 65))
+        w("two bytearrays", lambda: bytearray() is bytearray())
+    """,
     # `C.__dict__` IS A mappingproxy: readable every way and writable no
     # way. A FLAG ON THE DICT and not a wrapper around one, for two reasons
     # that pull the same way. CPython's proxy is LIVE over the mapping it
