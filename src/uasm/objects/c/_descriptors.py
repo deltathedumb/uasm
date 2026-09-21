@@ -279,6 +279,71 @@ static apy_value apy_gen_frame(apy_value g) {
     return frame;
 }
 
+/* A VALUE'S `__doc__` IS ONE CELL, WHERE A TYPE'S IS A FRESH ONE.
+
+   The two reads are different mechanisms in CPython and answer differently.
+   `str.__doc__` goes through `type.__doc__`, a getset that builds a str from
+   `tp_doc` per read, so it is False against itself. `"".__doc__` is an
+   ordinary attribute lookup that finds `str.__dict__["__doc__"]` -- the one
+   str the type carries -- and hands it back, so `"".__doc__ is "".__doc__`
+   is True. Both measured. Here the value read went through `apy_lit`, which
+   builds a cell per call, and answered False for every builtin value; the
+   interpreter reads a table through `_value` and answered True, so the two
+   runtimes disagreed about one expression as well.
+
+   KEYED BY THE POINTER, which is what makes this a cache and not a copy of
+   the table: `apy_kind_doc` returns the address of a string literal in the
+   binary's read-only data, one per kind, and the same kind always hands back
+   the same address. The generated table has 41 kinds and 21 of them have
+   text, so the room below is never exhausted; `apy_lit` is the honest
+   fallback if a later kind pushes past it, at the cost of that kind alone
+   answering False to `is`. */
+static apy_value apy_kind_doc_cell(const char *doc) {
+    static const char *seen[64];
+    static apy_value made[64];
+    int i;
+    for (i = 0; i < 64; i++) {
+        if (!seen[i]) {
+            seen[i] = doc;
+            made[i] = apy_lit(doc);
+            return made[i];
+        }
+        if (seen[i] == doc) return made[i];
+    }
+    return apy_lit(doc);
+}
+
+/* OBJECT'S TWO ARE CLASSMETHODS, AND A CLASSMETHOD READ MINTS. In CPython
+   `__init_subclass__` and `__subclasshook__` sit in `object.__dict__` as
+   classmethod_descriptors, so reading either off a class binds that class
+   and hands back a NEW bound method: `object.__subclasshook__ is
+   object.__subclasshook__` is False there, exactly as `C.m is C.m` is False
+   for a written `@classmethod`. A written one reaches that answer through
+   `apy_descr_get`; these two never could, because what the dict holds is a
+   native and not a wrapper, so both reads landed on the one cell and
+   answered True.
+
+   A COPY AND NOT A SECOND `apy_object_default`, because that one interns per
+   selector -- `apy_native` hands back `made[sel]` for every selector but the
+   two whose name varies, so asking it again returned the same cell for
+   `__init_subclass__` and a fresh one for `__subclasshook__`, which is the
+   two names disagreeing about one rule. `apy_bind` with no receiver copies
+   the cell field for field and is the mint both need.
+
+   THE DICT ENTRY IS LEFT ALONE, which is the other half of the rule:
+   `object.__dict__["__subclasshook__"]` is the descriptor itself and IS one
+   cell, so reading it twice gives the same object in CPython too. Only the
+   ATTRIBUTE read mints. Answers 0 when the name is not one of the two, or
+   when the class wrote its own -- a plain `def` has no selector. */
+static apy_value apy_object_classmethod(const char *want, apy_value found) {
+    if (!found || O(found)->kind != APY_FUNC_K || !O(found)->v.fn.native)
+        return 0;
+    if (strcmp(want, "__subclasshook__") != 0
+            && strcmp(want, "__init_subclass__") != 0)
+        return 0;
+    return apy_bind(found, 0);
+}
+
 APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
     const char *want = APY_CSTR(name);
     /* PEP 257 FOR THE BUILTINS. `"".__doc__` IS `str.__doc__` -- the text
@@ -292,12 +357,30 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
             && O(obj)->kind != APY_TYPE_K && O(obj)->kind != APY_EXC_K) {
         const char *kn = apy_kind_name(obj);
         const char *doc = apy_kind_doc(kn);
-        if (doc) return apy_lit(doc);
+        if (doc) return apy_kind_doc_cell(doc);
         /* A KIND WE MODEL WHOSE TYPE HAS NO DOCSTRING ANSWERS None, which is
            what CPython does: `iter([]).__doc__` is None and `__doc__` is on
            the list `dir()` gives, so refusing it would be a list that lies.
            Told apart from a kind nothing knows by the dir table. */
         if (apy_kind_dir(kn)) return apy_none();
+    }
+    /* `object.__doc__` IS `type.__doc__`, WHICH IS A GETSET AND MINTS.
+       `object` is the one STATIC type this runtime models as a class with a
+       filled dict, so its text is found by the dict walk below and handed
+       back as the one cell it is. CPython's `type_get_doc` builds a fresh str
+       from `tp_doc` for a static type and hands a HEAP type its dict entry
+       straight back, which is why `C.__doc__ is C.__doc__` is True for a
+       written docstring and `object.__doc__ is object.__doc__` is False.
+       Every other builtin type reaches its text through `apy_kind_doc` just
+       below, where `apy_lit` already builds a cell per call.
+
+       THE DICT ENTRY IS LEFT ALONE: `object.__dict__["__doc__"]` is that one
+       cell twice over in CPython too, and only the ATTRIBUTE read mints. */
+    if (strcmp(want, "__doc__") == 0 && O(obj)->kind == APY_TYPE_K
+            && obj == apy_object_class() && O(obj)->v.t.dict) {
+        apy_value doc = apy_dict_get_or(O(obj)->v.t.dict, name, 0);
+        if (doc && O(doc)->kind == APY_STR_K)
+            return apy_str_fresh(O(doc)->v.s.p, O(doc)->v.s.n);
     }
     /* AND A TYPE OBJECT REACHED THROUGH `type(x)` IS A CELL, not the thunk
        the program's own `bytes` names -- `apy_type_for` mints one keyed by
@@ -546,6 +629,11 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
                 && apy_class_find(obj, apy_name("__eq__")))
             return apy_none();
         found = apy_class_find(obj, name);
+        {
+            /* Read off a class, object's two classmethods mint. */
+            apy_value fresh = apy_object_classmethod(want, found);
+            if (fresh) return fresh;
+        }
         /* Reached through the CLASS, a method is not bound: `C.m` is a plain
            function and `C.m(x)` passes x as self. */
         if (found) return found;
@@ -614,6 +702,14 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            and not object's for exactly that reason. */
         if (obj != apy_object_class()) {
             found = apy_class_find(apy_object_class(), name);
+            {
+                /* EXCEPT THE TWO CLASSMETHODS, reached here for a class that
+                   INHERITS them rather than for `object` itself:
+                   `C.__subclasshook__ is C.__subclasshook__` is False in
+                   CPython for every class, not only for the root. */
+                apy_value fresh = apy_object_classmethod(want, found);
+                if (fresh) return fresh;
+            }
             /* UNBOUND, as it is off a type: `P.__eq__(a, b)` is how it is
                written, and it is the same cell `object.__eq__` answers, so
                `P.__eq__ is object.__eq__` as in CPython. */

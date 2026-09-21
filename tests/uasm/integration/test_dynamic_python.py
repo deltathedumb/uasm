@@ -4327,6 +4327,83 @@ PROGRAMS = {
         w("isc(1, 2)", lambda: object.__init_subclass__(1, 2))
         w("isc(k=1)", lambda: object.__init_subclass__(k=1))
     """,
+    # A CLASSMETHOD READ MINTS, AND A STATIC TYPE'S `__doc__` MINTS TOO --
+    # two rules about WHERE an answer is built, which is what `is` measures.
+    #
+    # `__init_subclass__` AND `__subclasshook__` sit in `object.__dict__` as
+    # classmethod_descriptors in CPython, so every read binds the class and
+    # hands back a NEW bound method, exactly as `C.m is C.m` is False for a
+    # written `@classmethod`. Here the dict holds a native and not a wrapper,
+    # so the descriptor arm never saw them and both reads landed on the one
+    # cell. The DICT ENTRY is still one cell -- only the attribute read
+    # mints, and `object.__dict__["__subclasshook__"]` twice is one object in
+    # CPython too.
+    #
+    # `__doc__` IS `type.__doc__`, A GETSET, for a class: CPython's
+    # `type_get_doc` builds a fresh str from `tp_doc` for a STATIC type and
+    # hands a HEAP type its dict entry straight back. So `object.__doc__ is
+    # object.__doc__` and `str.__doc__ is str.__doc__` are both False while a
+    # written docstring read twice is True. A VALUE's is the opposite: it is
+    # an ordinary lookup that finds the one str the type carries, so
+    # `"".__doc__ is "".__doc__` is True -- and the interpreter and the
+    # compiled paths had the two halves exactly backwards from each other.
+    "objects_a_classmethod_and_a_static_types_doc_mint_per_read": """
+        def w(label, f):
+            try:
+                print(f"{label:30} {f()!r}")
+            except Exception as e:
+                print(f"{label:30} !{type(e).__name__}: {e}")
+
+        class Plain:
+            pass
+
+        class Written:
+            '''Its own text.'''
+
+        d = object.__dict__
+        # THE TWO CLASSMETHODS MINT PER READ, off the root and off a class.
+        w("hook is hook",
+          lambda: object.__subclasshook__ is object.__subclasshook__)
+        w("isc is isc",
+          lambda: object.__init_subclass__ is object.__init_subclass__)
+        w("P.hook is P.hook",
+          lambda: Plain.__subclasshook__ is Plain.__subclasshook__)
+        w("P.isc is P.isc",
+          lambda: Plain.__init_subclass__ is Plain.__init_subclass__)
+        # THE DICT ENTRY IS ONE CELL, which is the other half of the rule.
+        w("d[hook] is d[hook]",
+          lambda: d["__subclasshook__"] is d["__subclasshook__"])
+        w("d[isc] is d[isc]",
+          lambda: d["__init_subclass__"] is d["__init_subclass__"])
+        # AND THE REST OF object's NAMES ARE STILL ONE CELL EACH -- which
+        # `functools.total_ordering` reads, through
+        # `getattr(cls, op, None) is not getattr(object, op, None)`.
+        w("lt is lt", lambda: object.__lt__ is object.__lt__)
+        w("eq is eq", lambda: object.__eq__ is object.__eq__)
+        w("repr is repr", lambda: object.__repr__ is object.__repr__)
+        w("new is new", lambda: object.__new__ is object.__new__)
+        # THEY STILL ANSWER WHAT THEY ANSWERED.
+        w("hook(int)", lambda: object.__subclasshook__(int))
+        w("P.hook(int)", lambda: Plain.__subclasshook__(int))
+        w("isc()", lambda: object.__init_subclass__())
+        w("P.isc()", lambda: Plain.__init_subclass__())
+        # A TYPE'S `__doc__` MINTS; A VALUE'S IS ONE CELL; A WRITTEN ONE IS
+        # THE OBJECT THE BODY BOUND.
+        w("object doc", lambda: object.__doc__ is object.__doc__)
+        w("str doc", lambda: str.__doc__ is str.__doc__)
+        w("int doc", lambda: int.__doc__ is int.__doc__)
+        w("list doc", lambda: list.__doc__ is list.__doc__)
+        w("written doc", lambda: Written.__doc__ is Written.__doc__)
+        w("written text", lambda: Written.__doc__)
+        w("plain doc", lambda: Plain.__doc__)
+        w("value str doc", lambda: "".__doc__ is "".__doc__)
+        w("value int doc", lambda: (1).__doc__ is (1).__doc__)
+        w("value list doc", lambda: [].__doc__ is [].__doc__)
+        w("value doc == type", lambda: "".__doc__ == str.__doc__)
+        w("obj doc == dict", lambda: object.__doc__ == d["__doc__"])
+        w("obj doc is dict", lambda: object.__doc__ is d["__doc__"])
+        w("d[doc] is d[doc]", lambda: d["__doc__"] is d["__doc__"])
+    """,
     # A CLASS REACHED AS A TYPE INHERITS, and did not. `P.__eq__`,
     # `P.__init__`, `P.__repr__` and eight more were every one an
     # AttributeError about an attribute Python guarantees; `S.upper` for a

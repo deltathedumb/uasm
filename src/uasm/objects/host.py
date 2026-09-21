@@ -9721,6 +9721,28 @@ def _object_root(h):
     return h._get(_apy_object_class(h, []), "apy_object_class")
 
 
+def _type_doc(h, text):
+    """A TYPE's `__doc__`, which is a getset's answer and not a dict read.
+
+    `type.__doc__` is a getset descriptor, and for a STATIC type CPython's
+    `type_get_doc` builds a fresh str from `tp_doc` every time it is asked:
+    `str.__doc__ is str.__doc__` and `object.__doc__ is object.__doc__` are
+    both False there. A HEAP type -- every class a program writes -- gets its
+    dict entry handed back instead, so `C.__doc__ is C.__doc__` is True for a
+    written docstring. Only the static half comes through here.
+
+    `_new` AND NOT `_value`, which is the whole of it: `_value` interns a str
+    by `id`, so the one Python object behind the table answered one handle and
+    `is` said True. The compiled halves already mint -- `apy_lit` builds a
+    cell per call -- so this was also the interpreter and the compiled paths
+    disagreeing about one expression.
+
+    None PASSES THROUGH `_value`, because a kind whose type has no docstring
+    answers None and None is one cell in every Python there is.
+    """
+    return h._new(text) if isinstance(text, str) else h._value(text)
+
+
 def _object_default(h, name: str):
     """`object`'s own version of a dunder, as a callable value.
 
@@ -10773,7 +10795,7 @@ def _apy_default_getattr(h, a):
             # whose type has no docstring -- a cursor's. `in` and not `get`,
             # because None is an ANSWER here and not an absence.
             if obj.name in KIND_DOC:
-                return h._value(KIND_DOC[obj.name])
+                return _type_doc(h, KIND_DOC[obj.name])
         # `C.__class__` IS THE METACLASS, which is `type` unless the class
         # named one. Every other kind answers this and a class did not, so
         # `C.__class__` was an AttributeError about a class that plainly has
@@ -10860,7 +10882,39 @@ def _apy_default_getattr(h, a):
         klass_d = obj.find(name)
         if klass_d is not None and _is_descriptor(klass_d):
             return _descr_get(h, klass_d, None, obj)
+        # `object.__doc__` IS `type.__doc__`, WHICH IS A GETSET AND MINTS.
+        # `object` is the one STATIC type this runtime models as a class with
+        # a filled dict, and CPython's `type_get_doc` builds a fresh str from
+        # `tp_doc` for a static type while handing a HEAP type its dict entry
+        # straight back -- which is why `C.__doc__ is C.__doc__` is True for a
+        # written docstring and `object.__doc__ is object.__doc__` is False.
+        # Every other builtin type here reaches its text through `KIND_DOC`,
+        # where `_type_doc` says the same thing.
+        if name == "__doc__" and isinstance(obj.dict.get("__doc__"), str) \
+                and obj is h._get(_apy_object_class(h, []),
+                                  "apy_default_getattr"):
+            return _type_doc(h, obj.dict["__doc__"])
         found = obj.lookup(name)
+        # OBJECT'S TWO ARE CLASSMETHODS, AND A CLASSMETHOD READ MINTS. In
+        # CPython `__init_subclass__` and `__subclasshook__` sit in
+        # `object.__dict__` as classmethod_descriptors, so every read binds
+        # the class and hands back a NEW bound method --
+        # `object.__subclasshook__ is object.__subclasshook__` is False
+        # there, exactly as `C.m is C.m` is False for a written
+        # `@classmethod`. A written one reaches that answer through
+        # `_descr_get` above; these two never could, because what the dict
+        # holds is a Native and not a wrapper, so both reads landed on the
+        # one interned handle and answered True.
+        #
+        # `_new` AND NOT `_value`, which is the whole of the fix: the Native
+        # itself stays the single cell `_object_default` cached, so
+        # `object.__dict__["__subclasshook__"]` -- which goes through
+        # `_value` and its interning -- keeps answering the same handle
+        # twice, and True is right for THAT. Only the ATTRIBUTE read mints.
+        if (found is not _ABSENT and isinstance(found, Native)
+                and name in ("__subclasshook__", "__init_subclass__")
+                and found is h._defaults.get(name)):
+            return h._new(found)
         # Through the CLASS a method is UNBOUND: `C.m(x)` passes x as self.
         if found is not _ABSENT:
             return h._value(found)
@@ -10922,6 +10976,16 @@ def _apy_default_getattr(h, a):
         if root is not obj:
             m = root.lookup(name)
             if m is not _ABSENT:
+                # EXCEPT THE TWO CLASSMETHODS, which mint per read -- the
+                # same rule as the `obj.lookup` arm above, reached here for
+                # a class that inherits them rather than for `object`
+                # itself. `C.__subclasshook__ is C.__subclasshook__` is
+                # False in CPython for every class.
+                if (isinstance(m, Native)
+                        and name in ("__subclasshook__",
+                                     "__init_subclass__")
+                        and m is h._defaults.get(name)):
+                    return h._new(m)
                 # UNBOUND, as it is off a type: `P.__eq__(a, b)` is how it is
                 # written, and it is the SAME object `object.__eq__` answers,
                 # so `P.__eq__ is object.__eq__` as in CPython.
@@ -11308,7 +11372,7 @@ def _apy_default_getattr(h, a):
             # it through the name the type carries.
             if obj.doc is None and getattr(obj, "is_type", False):
                 if obj.name in KIND_DOC:
-                    return h._value(KIND_DOC[obj.name])
+                    return _type_doc(h, KIND_DOC[obj.name])
             return h._value(obj.doc)
         # PEP 649: `__annotations__` is BUILT ON ACCESS, by the thunk the
         # `def` recorded. Evaluating them at the `def` would make
