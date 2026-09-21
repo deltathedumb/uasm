@@ -1,8 +1,9 @@
 """Enumerations, as ordinary Python this compiler compiles.
 
-COVERAGE: `Enum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, `EnumMeta` (and its
-3.11 spelling `EnumType`), `auto`, `unique`, `__members__`, aliases, lookup by
-value and by name, iteration in definition order, and the 3.11+ reprs.
+COVERAGE: `Enum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, `EnumType` (and
+its pre-3.11 spelling `EnumMeta`), `auto`, `unique`, `__members__`, aliases,
+lookup by value and by name, iteration in definition order, and the 3.11+
+reprs.
 
 NOT COVERED: `ReprEnum` as a base to inherit from, `verify` and `EnumCheck`,
 `FlagBoundary` and `boundary=`, `global_enum`, `member`/`nonmember`,
@@ -65,7 +66,7 @@ def _kind(bases, marker):
     return False
 
 
-class EnumMeta(type):
+class EnumType(type):
     """What turns a class body full of constants into a class full of members."""
 
     def __new__(mcls, name, bases, namespace):
@@ -184,12 +185,15 @@ class EnumMeta(type):
         return "<enum %r>" % (cls.__name__,)
 
 
-#: The 3.11 spelling. The same object, because a program that writes one and a
-#: library that writes the other must agree about what a metaclass IS.
-EnumType = EnumMeta
+#: The PRE-3.11 spelling. The same object, because a program that writes one
+#: and a library that writes the other must agree about what a metaclass IS.
+#: THIS WAY ROUND and not the other, because the name is observable:
+#: `type(Colour).__name__` is what a class statement's metaclass is CALLED,
+#: and 3.11 renamed the class to `EnumType` and left `EnumMeta` behind it.
+EnumMeta = EnumType
 
 
-class Enum(metaclass=EnumMeta):
+class Enum(metaclass=EnumType):
     @property
     def name(self):
         return self._name_

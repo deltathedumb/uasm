@@ -13990,6 +13990,14 @@ def _apy_isinstance(h, a):
         # False for every such test: a wrong answer, not a refusal.
         if isinstance(v, Exc):
             return _apy_isinstance(h, [a[0], h._new(want.name)])
+        # A CLASS IS AN INSTANCE OF ITS METACLASS. `type(A)` already answers
+        # `Meta` for `class A(metaclass=Meta)` -- and for a subclass of A,
+        # since the metaclass is inherited -- so without this the two
+        # disagreed about one fact: `A.__class__ is Meta` was True and
+        # `isinstance(A, Meta)` False. Through `is_sub` rather than a
+        # comparison, so a metaclass's own base counts.
+        if isinstance(v, Class) and v.meta is not None:
+            return h._bool(v.meta.is_sub(want))
         return h._bool(isinstance(v, Instance) and v.cls.is_sub(want))
     # ANYTHING ELSE IS NOT A TYPE. A tuple, a union and a class are each
     # handled above, so what is left here is a builtin kind's NAME -- and if
@@ -14001,6 +14009,14 @@ def _apy_isinstance(h, a):
                        "isinstance() arg 2 must be a type, a tuple of "
                        "types, or a union")
     have = h.kind_name(v)
+    # A CLASS IS A `type` WHATEVER ITS METACLASS IS. `kind_name` answers the
+    # METACLASS's name for a class carrying one, which is what makes
+    # `type(A).__name__` say `Meta` -- and which made the comparison below
+    # miss the plain question `isinstance(A, type)`, where both compiled
+    # paths said True because their `apy_kind_name` says `type` and reads the
+    # metaclass from the field instead.
+    if isinstance(v, Class) and want == "type":
+        return h._bool(True)
     # An INSTANCE never matches a builtin name. Its kind_name is its class's
     # name, so without this a class called `int` would answer True.
     if isinstance(v, Instance):
@@ -17636,6 +17652,26 @@ def _apy_getiter(h, a):
         # Fixing only the eager one left the `for` reporting the alias as not
         # iterable, which is the same loop written twice.
         return _apy_getiter(h, [h._new((Alias(v.origin, v.args, True),))])
+    if isinstance(v, Class) and v.meta is not None:
+        # ITERATING A CLASS IS THE METACLASS'S BUSINESS: `for c in Color` is
+        # `type(Color).__iter__(Color)`, which is how an enum lists its
+        # members. Here as well as in `_apy_iterable` because this is the
+        # LAZY entry -- a `for` statement and a comprehension both come
+        # through here -- and patching only the eager one left
+        # `for m in Colour` reporting the metaclass as not iterable while
+        # `list(Colour)` walked it, which is the same loop written twice.
+        hook = v.meta.lookup("__iter__")
+        if hook is not _ABSENT:
+            got = h._invoke(hook, [v])
+            if h.err is not None:
+                return 0
+            # THE SAME RULE A CLASS'S OWN `__iter__` ANSWERS UNDER: a
+            # metaclass writing one is still writing `__iter__`.
+            if not _is_iterator(got):
+                return h._fail("TypeError",
+                               f"iter() returned non-iterator of type "
+                               f"'{h.kind_name(got)}'")
+            return h._new(got)
     if isinstance(v, Instance):
         try:
             got = v._send("__iter__")

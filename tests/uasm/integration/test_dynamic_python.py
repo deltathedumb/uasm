@@ -12159,6 +12159,95 @@ PROGRAMS = {
               b.removesuffix(b"z") is b, b.partition(b"z")[0] is b,
               b.rpartition(b"z")[2] is b)
     """,
+    # A CLASS IS AN INSTANCE OF ITS METACLASS, which is the same fact
+    # `type(A)` already answered and the two disagreed about: `A.__class__ is
+    # Meta` was True and `isinstance(A, Meta)` was False, on every path. The
+    # rule is the SUBCLASS walk and not a comparison, so a metaclass's own
+    # base counts -- a `Deeper` is a `Meta` -- while an unrelated metaclass
+    # still answers False.
+    #
+    # AND THE INTERPRETER HAD A SECOND HALF. Its `kind_name` answers the
+    # METACLASS's name for a class carrying one, which is what makes
+    # `type(A).__name__` say `Meta`; the plain `isinstance(A, type)` compared
+    # against that name and said False, where both compiled paths said True.
+    #
+    # THE METACLASS ALSO DECIDES HOW A CLASS IS WALKED, which is `for m in
+    # Colour` over an enum: the eager walk asked the metaclass for `__iter__`
+    # and the LAZY one -- the `for` statement and every comprehension -- did
+    # not, so the same loop written two ways gave two answers.
+    "a_class_is_an_instance_of_its_metaclass": """
+        class Meta(type):
+            def __iter__(cls):
+                return iter(cls.members)
+
+        class Deeper(Meta):
+            pass
+
+        class Other(type):
+            pass
+
+        class A(metaclass=Meta):
+            members = [1, 2]
+
+        class B(metaclass=Deeper):
+            members = [3]
+
+        class Sub(A):
+            pass
+
+        class Plain:
+            pass
+
+        print("A is type    :", isinstance(A, type))
+        print("A is Meta    :", isinstance(A, Meta))
+        print("B is Meta    :", isinstance(B, Meta))
+        print("B is Deeper  :", isinstance(B, Deeper))
+        # THE WALK IS UP, NOT DOWN: `Meta` is not a `Deeper`.
+        print("A is Deeper  :", isinstance(A, Deeper))
+        print("A is Other   :", isinstance(A, Other))
+        # THE METACLASS IS INHERITED, so a subclass carries it too.
+        print("Sub is Meta  :", isinstance(Sub, Meta))
+        print("Meta is type :", isinstance(Meta, type))
+        print("Plain is type:", isinstance(Plain, type))
+        print("tuple form   :", isinstance(A, (int, Meta)))
+        # AND THE ANSWER AGREES WITH `type()`, which is the whole point.
+        print("type(A)      :", type(A).__name__)
+        print("type(Sub)    :", type(Sub).__name__)
+        print("class of A   :", A.__class__.__name__)
+        # AN INSTANCE OF THE CLASS IS NOT AN INSTANCE OF THE METACLASS.
+        print("A() is Meta  :", isinstance(A(), Meta))
+        print("A() is A     :", isinstance(A(), A))
+        # THE METACLASS'S `__iter__` IS WHAT WALKS THE CLASS, both ways.
+        print("for          :", [m for m in A])
+        out = []
+        for m in B:
+            out.append(m)
+        print("statement    :", out)
+        print("eager        :", list(A), sorted(A), tuple(A))
+    """,
+    # AN ENUM'S METACLASS IS CALLED `EnumType`, which 3.11 renamed it to and
+    # left `EnumMeta` behind as an alias. The bundled shim had the two the
+    # other way round, and the name is OBSERVABLE: `type(Colour).__name__` is
+    # what a class statement's metaclass is CALLED.
+    "an_enums_metaclass_is_named_the_way_the_language_names_it": """
+        from enum import Enum, EnumType, EnumMeta
+
+        class Colour(Enum):
+            RED = 1
+            GREEN = 2
+
+        print("name    :", type(Colour).__name__)
+        print("alias   :", EnumType is EnumMeta)
+        print("is type :", isinstance(Colour, type))
+        print("is meta :", isinstance(Colour, EnumType))
+        print("walked  :", [m.name for m in Colour])
+        print("comp    :", [m.value for m in Colour])
+        members = []
+        for m in Colour:
+            members.append(m.name)
+        print("statement:", members)
+        print("eager   :", [m.name for m in list(Colour)])
+    """,
 }
 
 

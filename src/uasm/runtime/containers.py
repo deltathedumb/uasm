@@ -2307,6 +2307,11 @@ def apy_isinstance(v: ptr, type_name: ptr) -> ptr:
     would answer True to everything. It matches through what it HOLDS
     instead, which is what makes `class D(dict)` an instance of `dict`.
 
+    A CLASS IS AN INSTANCE OF ITS METACLASS, which is the same fact `type(A)`
+    already answers and the two disagreed about: `A.__class__ is Meta` held
+    and `isinstance(A, Meta)` did not. Asked through the SUBCLASS walk, so a
+    metaclass's own base counts.
+
     AN EXCEPTION IS AN INSTANCE OF EVERY BASE IN ITS CHAIN, walked by name:
     the hierarchy is a table of names and that is the only form it has.
     """
@@ -2358,6 +2363,11 @@ def apy_isinstance(v: ptr, type_name: ptr) -> ptr:
         if vk == apy_inst_kind():
             return apy_from_bool(apy_type_is_sub_of(
                 ptr(load(u64, offset(v, apy_o_cls_offset()))), type_name))
+        if vk == apy_type_kind():
+            vmeta: ptr = ptr(load(u64, offset(v, apy_t_meta_offset())))
+            if vmeta:
+                if apy_type_is_sub_of(vmeta, type_name):
+                    return apy_from_bool(1)
         return apy_isinstance(v, ptr(load(u64, offset(
             type_name, apy_t_name_offset()))))
     if k != apy_str_kind():

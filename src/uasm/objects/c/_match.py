@@ -708,6 +708,18 @@ APY_API apy_value apy_isinstance(apy_value v, apy_value type_name) {
             return apy_isinstance(v, O(type_name)->v.t.name);
         if (O(v)->kind == APY_INST_K)
             return apy_from_bool(apy_type_is_sub(O(v)->v.o.cls, type_name));
+        /* A CLASS IS AN INSTANCE OF ITS METACLASS. `type(A)` already answers
+           `Meta` for `class A(metaclass=Meta)` -- and for a subclass of A,
+           since the metaclass is inherited -- so without this the two
+           disagreed about one fact: `A.__class__ is Meta` was True and
+           `isinstance(A, Meta)` False. Through the SUBCLASS walk rather than
+           a comparison, so a metaclass's own base counts and
+           `isinstance(B, Meta)` holds for `class B(metaclass=Deeper)`.
+           FALLING THROUGH when it does not match, because the NAME form
+           below is what answers the plain `isinstance(A, type)`. */
+        if (O(v)->kind == APY_TYPE_K && O(v)->v.t.meta
+                && apy_type_is_sub(O(v)->v.t.meta, type_name))
+            return apy_from_bool(1);
         /* A TYPE OBJECT FOR A BUILTIN KIND -- which is what `type(2)` answers
            now that it is a value rather than a name. Asking by NAME reuses
            the whole builtin rule below, including bool being an int and
