@@ -157,6 +157,14 @@ class ABCMeta(type):
         # `ABCMeta`: a single shared list would make every ABC in the program
         # answer for every registration any of them accepted.
         cls._abc_registry = []
+        # AND ONE LIST OF ITS CHILDREN, for the same reason and kept by hand:
+        # `type.__subclasses__` is what CPython walks to inherit a
+        # registration DOWNWARD, and this compiler does not have it yet.
+        cls._abc_children = []
+        for base in bases:
+            children = getattr(base, "_abc_children", None)
+            if children is not None:
+                children.append(cls)
         return cls
 
     def register(cls, subclass):
@@ -196,12 +204,20 @@ class ABCMeta(type):
             for walk in getattr(subclass, "__mro__", ()):
                 if walk is entry:
                     return True
-        # AN ABC INHERITS ITS BASES' REGISTRATIONS. `MutableMapping` is a
-        # `Mapping`, so a class registered with `MutableMapping` has to answer
-        # True for `Mapping` too -- and the registry is per class, so the
-        # bases have to be asked explicitly.
-        for base in getattr(cls, "__mro__", ())[1:]:
-            if isinstance(base, ABCMeta) and base.__subclasscheck__(subclass):
+        # A REGISTRATION IS INHERITED DOWNWARD, so the classes to ask are
+        # `cls`'s CHILDREN and not its bases. `MutableMapping` is a
+        # `Mapping`, so a class registered with `MutableMapping` answers True
+        # for `Mapping` -- and the registry is per class, so `Mapping` has to
+        # ask the classes BELOW it. CPython walks `cls.__subclasses__()` here
+        # and this walks the list `__new__` keeps, which is the same set.
+        #
+        # THE OTHER DIRECTION IS WRONG AND WAS HERE, dead, until `isinstance`
+        # learned that a class is an instance of its metaclass: asking the
+        # BASES made `issubclass(float, Rational)` True, because `float` is
+        # registered with `Real` and `Real` is a base of `Rational`. That is
+        # the relation upside down -- a Real is not a Rational.
+        for child in cls._abc_children:
+            if child.__subclasscheck__(subclass):
                 return True
         return False
 

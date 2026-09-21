@@ -12336,6 +12336,57 @@ PROGRAMS = {
     # AND `b"%s"` INSERTS WHAT THE ARGUMENT HOLDS, for a bytes subclass as
     # for a bytes: the compiled halves fell through to the repr and printed
     # `b"b'ab'"`, which is a wrong answer rather than a refusal.
+    # A REGISTRATION IS INHERITED DOWNWARD, NOT UPWARD. Registering a class
+    # with `MutableMapping` makes it a `Mapping` too, because MutableMapping
+    # IS one -- so the class to ask about a registration is one BELOW the
+    # class in hand. The shim asked the classes ABOVE it, which is the
+    # relation upside down: it made `issubclass(float, Rational)` True,
+    # because `float` is registered with `Real` and `Real` is a base of
+    # `Rational`, and a Real is not a Rational.
+    #
+    # THAT ARM WAS DEAD UNTIL `isinstance` LEARNED about metaclasses. It is
+    # guarded by `isinstance(base, ABCMeta)`, which answered False for every
+    # class while a class was not an instance of its metaclass -- so the
+    # wrong walk never ran, and the right one was never there. Fixing one
+    # uncovered the other, which is what a rule that was never exercised
+    # does.
+    #
+    # CPython WALKS `cls.__subclasses__()` HERE and this compiler has no such
+    # method yet, so `ABCMeta.__new__` keeps the list itself.
+    "an_abc_registration_is_inherited_downward": """
+        from collections.abc import Mapping, MutableMapping
+        import numbers
+
+        class Reg:
+            pass
+
+        MutableMapping.register(Reg)
+
+        def w(label, f):
+            try:
+                print(f"{label:26} {f()!r}")
+            except Exception as e:
+                print(f"{label:26} !{type(e).__name__}: {e}")
+
+        # DOWNWARD: registered with MutableMapping, so also a Mapping.
+        w("registered", lambda: issubclass(Reg, MutableMapping))
+        w("and its base", lambda: issubclass(Reg, Mapping))
+        w("an instance too", lambda: isinstance(Reg(), Mapping))
+        # AND NOT UPWARD.
+        w("float is Real", lambda: issubclass(float, numbers.Real))
+        w("float is Rational", lambda: issubclass(float, numbers.Rational))
+        w("float is Integral", lambda: issubclass(float, numbers.Integral))
+        w("3.0 is Rational", lambda: isinstance(3.0, numbers.Rational))
+        w("3 is Integral", lambda: isinstance(3, numbers.Integral))
+        w("3 is Real", lambda: isinstance(3, numbers.Real))
+        # THE WRITTEN HIERARCHY IS UNTOUCHED by either rule.
+        w("Integral is Rational", lambda: issubclass(numbers.Integral,
+                                                     numbers.Rational))
+        w("Real is Rational", lambda: issubclass(numbers.Real,
+                                                 numbers.Rational))
+        w("Mapping is Mutable", lambda: issubclass(Mapping, MutableMapping))
+        w("Mutable is Mapping", lambda: issubclass(MutableMapping, Mapping))
+    """,
     "percent_formatting_asks_str_and_a_subclass_is_not_an_exact_one": """
         class S(str):
             pass
