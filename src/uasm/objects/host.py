@@ -7068,6 +7068,17 @@ def _binop(name, op, sym):
                     bx = _as_builtin(x, (direct,))
                     by = y.held if isinstance(y, Instance) \
                         and y.held is not None else y
+                    # EXCEPT UNDER `str %`, which is the one place a builtin
+                    # operator wants the INSTANCE rather than what it holds:
+                    # formatting asks `PyObject_Str`, and that COPIES a
+                    # non-exact str and calls a user `__str__`. Unwrapping
+                    # first lost both, so `"%s" % S(lit)` answered `lit`
+                    # ITSELF where CPython answers a second object, and a
+                    # subclass writing `__str__` had it ignored. The bytes
+                    # side is left alone, because `b"%s"` inserts what the
+                    # object HOLDS and not its text.
+                    if sym == "%" and isinstance(bx, str):
+                        by = y
                     if isinstance(bx, Instance):
                         continue
                     # `str % anything` IS NOT A KIND-DECLINE, and it is the
@@ -7272,7 +7283,19 @@ def _percent(h, fmt, right):
                 # `b"%s" % b"ab"` inserts THE BYTES, not their repr.
                 value = bytes(value).decode("latin-1")
             else:
+                # `PyObject_Str` COPIES A NON-EXACT str, and that copy is
+                # the whole of the difference a subclass makes here:
+                # `"%s" % s` hands `s` itself back for an exact str and a
+                # SECOND object for an `S(str)`. `_text` answers what the
+                # instance HOLDS -- the very literal it was built from --
+                # so without the copy `("%s" % S(lit)) is lit` was True
+                # here and False in CPython. Through `_inst_text_result`,
+                # which is `_PyUnicode_Copy` and so lands the empty string
+                # back in its shared cell rather than minting a second one.
+                was = value
                 value = h._text(value, False)
+                if isinstance(was, Instance) and value is was.held:
+                    value = _inst_text_result(was, value)
         elif conv == "r":
             value = h._text(value, True)
         elif conv == "a":
@@ -7285,10 +7308,28 @@ def _percent(h, fmt, right):
             # other length is refused BY ITS LENGTH, which is how CPython
             # words it -- `%c requires an int or a unicode character, not a
             # string of length 2`.
+            #
+            # AND A str SUBCLASS IS A str HERE. CPython's `formatchar` asks
+            # `PyUnicode_Check`, which a subclass passes, so `"%c" % S("a")`
+            # writes the character like any other one-character string --
+            # unlike `%s`, which is why the instance reaches this far.
+            # WHATEVER ITS LENGTH, so that a subclass of the wrong length is
+            # refused by that length as CPython words it rather than by its
+            # class name.
+            if isinstance(value, Instance) and isinstance(value.held, str):
+                value = value.held
             if _is_int_like(value):
                 value = chr(int(value))
             elif isinstance(value, str) and len(value) == 1:
-                pass
+                # CPython's `formatchar` WRITES THE CHARACTER into the
+                # buffer rather than handing the writer the object, so
+                # `("%c" % w) is w` is False -- unlike `("%s" % w)`, which
+                # is True for the same string. Invisible below 256, where
+                # the character comes out of the shared one-character cell
+                # either way, which is why `chr(ord(...))` is the rule
+                # exactly: Python's own `chr` answers that cell below 256
+                # and a fresh string above it.
+                value = chr(ord(value))
             else:
                 wanted = ("a string of length "
                           + str(len(value)) if isinstance(value, str)

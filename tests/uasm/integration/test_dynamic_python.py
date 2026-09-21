@@ -12229,6 +12229,81 @@ PROGRAMS = {
     # left `EnumMeta` behind as an alias. The bundled shim had the two the
     # other way round, and the name is OBSERVABLE: `type(Colour).__name__` is
     # what a class statement's metaclass is CALLED.
+    # `%` HANDS ITS ARGUMENT TO `PyObject_Str`, and that is where a subclass
+    # stops being the object it holds. An exact str comes back unchanged, so
+    # `"%s" % s` IS `s`; a non-exact one is COPIED, so `"%s" % S(lit)` is
+    # neither `S(lit)` nor `lit` -- and a subclass that writes `__str__` has
+    # it ASKED, which the interpreter was skipping because it unwrapped the
+    # instance to its held text before formatting ever began.
+    #
+    # `%c` IS THE CONVERSION THE HANDBACK DOES NOT HOLD FOR. It goes through
+    # `formatchar`, which writes a CHARACTER into the buffer rather than
+    # handing the writer an object, so `("%c" % w) is w` is False where
+    # `("%s" % w) is w` is True for the same string -- and True again below
+    # 256, by way of the shared one-character cell and not by way of the
+    # rule. A str subclass IS a str here, unlike at `%s`: `formatchar` asks
+    # `PyUnicode_Check`, which a subclass passes.
+    #
+    # AND `b"%s"` INSERTS WHAT THE ARGUMENT HOLDS, for a bytes subclass as
+    # for a bytes: the compiled halves fell through to the repr and printed
+    # `b"b'ab'"`, which is a wrong answer rather than a refusal.
+    "percent_formatting_asks_str_and_a_subclass_is_not_an_exact_one": """
+        class S(str):
+            pass
+
+        class Shown(str):
+            def __str__(self):
+                return "shown"
+
+        class B(bytes):
+            pass
+
+        def w(label, f):
+            try:
+                print(f"{label:18} {f()!r}")
+            except Exception as e:
+                print(f"{label:18} !{type(e).__name__}: {e}")
+
+        lit = "abc"
+        x = S(lit)
+        wide = "\u1234"
+        # NAMED AND NOT WRITTEN AS LITERALS, so that `is` here asks about
+        # objects rather than raising a SyntaxWarning about the spelling.
+        empty = ""
+        ay = "a"
+        # AN EXACT str COMES STRAIGHT BACK, which is the half that must not
+        # move: `format(s, "")` answers the receiver and the writer adopts it.
+        w("exact", lambda: ("%s" % lit) is lit)
+        w("exact named", lambda: ("%(a)s" % {"a": lit}) is lit)
+        w("exact precision", lambda: ("%.5s" % lit) is lit)
+        w("padded", lambda: ("%5s" % lit) is lit)
+        w("truncated", lambda: ("%.2s" % lit) is lit)
+        w("two", lambda: ("%s%s" % (lit, "")) is lit)
+        # A SUBCLASS IS COPIED, so it is neither itself nor what it holds.
+        w("subclass", lambda: ("%s" % x) is lit)
+        w("subclass text", lambda: "%s" % x)
+        w("subclass str", lambda: "%s" % Shown("abc"))
+        # AND THE COPY LANDS BACK IN THE SHARED CELL when there is one.
+        w("empty subclass", lambda: ("%s" % S("")) == empty)
+        w("empty is shared", lambda: ("%s" % S("")) is empty)
+        # `%c` WRITES A CHARACTER.
+        w("c wide", lambda: ("%c" % wide) is wide)
+        w("c wide text", lambda: "%c" % wide)
+        w("c ascii", lambda: ("%c" % ay) is ay)
+        w("c int", lambda: ("%c" % 97) is ay)
+        w("c subclass", lambda: "%c" % S("a"))
+        w("c long", lambda: "%c" % "ab")
+        # THE OTHER CONVERSIONS NAME THE CLASS, because that is the object
+        # they were handed.
+        w("r subclass", lambda: "%r" % x)
+        w("a subclass", lambda: "%a" % x)
+        w("d subclass", lambda: "%d" % x)
+        # AND THE BYTES SIDE INSERTS WHAT THE ARGUMENT HOLDS.
+        w("bytes", lambda: b"%s" % b"ab")
+        w("bytes subclass", lambda: b"%s" % B(b"ab"))
+        w("bytes b", lambda: b"%b" % B(b"ab"))
+        w("bytes repr", lambda: b"%r" % B(b"ab"))
+    """,
     "an_enums_metaclass_is_named_the_way_the_language_names_it": """
         from enum import Enum, EnumType, EnumMeta
 

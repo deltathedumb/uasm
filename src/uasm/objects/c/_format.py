@@ -1075,6 +1075,16 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
         /* `%s` and `%r` have no mini-language type character: the value
            becomes text FIRST and the spec then pads that text. */
         if (conv == 's' || conv == 'b') {
+            /* A bytes SUBCLASS IS A bytes HERE. `b"%s"` inserts what the
+               argument HOLDS, and CPython's `format_obj` asks the buffer
+               protocol -- which `class B(bytes)` answers like any other
+               bytes. Without the unwrap the instance fell through to
+               `apy_str` below and `b"%s" % B(b"ab")` printed the REPR,
+               `b"b'ab'"`, which is a wrong answer and not a refusal. */
+            if (O(fmt)->kind == APY_BYTES_K
+                && O(value)->kind == APY_INST_K && O(value)->v.o.held
+                && O(O(value)->v.o.held)->kind == APY_BYTES_K)
+                value = O(value)->v.o.held;
             if (O(fmt)->kind == APY_BYTES_K
                 && O(value)->kind == APY_BYTES_K) {
                 /* `b"%s" % b"ab"` inserts THE BYTES, not their repr -- and
@@ -1097,6 +1107,14 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
                errors, which is the failure mode that does not announce
                itself. A string of the wrong length is refused BY ITS
                LENGTH, which is how CPython words it. */
+            /* A str SUBCLASS IS A str HERE -- unlike `%s`, where a
+               subclass is COPIED rather than handed back. `formatchar`
+               asks `PyUnicode_Check`, which a subclass passes, so
+               `"%c" % S("a")` writes its character like any other
+               one-character string; this refused it by its class name. */
+            if (O(value)->kind == APY_INST_K && O(value)->v.o.held
+                    && O(O(value)->v.o.held)->kind == APY_STR_K)
+                value = O(value)->v.o.held;
             if (apy_is_int_like(value)) {
                 value = apy_chr(value);
             } else if (!(O(value)->kind == APY_STR_K
