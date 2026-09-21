@@ -2947,6 +2947,18 @@ def _apy_member_descriptor(h, a):
         "answers a slot read on the class its own way")
 
 
+def _apy_getset_descriptor(h, a):
+    """One `getset_descriptor`, which is what a C-level attribute reads as.
+
+    A REAL BINDING AND NOT A REFUSAL, unlike its sibling above: the
+    interpreter has the same concept and the same class behind it, so there
+    is something to hand back. `object.__dict__["__class__"]` is one of
+    these, built once when `object`'s dict is filled; a caller reaching this
+    gets a fresh one, as the C's does.
+    """
+    return h._new(Instance(h._getset_descriptor_class(), h))
+
+
 def _apy_object_default(h, a):
     """`object`'s own implementation of a dunder, by name.
 
@@ -14719,6 +14731,7 @@ _TABLE.update({
     "apy_descr_get_of": _apy_descr_get_of,
     "apy_kind_class": _apy_kind_class,
     "apy_member_descriptor": _apy_member_descriptor,
+    "apy_getset_descriptor": _apy_getset_descriptor,
     "apy_group_select_of": _apy_group_select_of,
     "apy_str_count_in_of": _apy_str_count_in_of,
     "apy_arg_must_be_str_of": _apy_arg_must_be_str_of,
