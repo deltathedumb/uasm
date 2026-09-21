@@ -7884,28 +7884,36 @@ class DynamicLowering:
             # THE OUTERMOST ITERABLE ONLY -- see the note above `shadowed`.
             if gen.iter is not first_iter:
                 self._class_scope, self._class_binds = {}, None
-            seq = self.b.call(T.PTR, "apy_iterable",
-                              [self._dyn_expr(gen.iter)])
+            # ADVANCED UNTIL DONE, NOT WALKED BY INDEX -- the same rule
+            # `_dyn_for_sequence` sets out and for the same two reasons. The
+            # index walk asked `apy_iterable` for a sequence first, which
+            # DRAINS a generator: `[len(x) for x in gen()]` ran the whole of
+            # `gen` before the first `len`, so every element saw the state
+            # the last yield left behind and `[1, 2]` came out `[2, 2]`. And
+            # it read the length once, so a source that grew under the walk
+            # was cut off at the old count.
+            #
+            # `apy_step` answers the sentinel `apy_stop()` at the end -- a
+            # cell and not a null, because null already means an error is set
+            # and running out is not one.
+            cursor = self._keep(self.b.call(T.PTR, "apy_getiter",
+                                            [self._dyn_expr(gen.iter)]))
             self._class_scope, self._class_binds = {}, None
             self._dyn_check()
-            slot = self.b.alloca(8)
-            self.b.store(T.PTR, seq, slot)
-            length = self.b.call(T.I64, "apy_raw_len", [seq])
-            self._dyn_check()
-            index = self.b.reg(T.I64)
-            self.b.emit(Instruction(Op.COPY, T.I64, dst=index,
-                                    args=[self.b.const(T.I64, 0)]))
             test = self.b.new_block("comptest")
             body = self.b.new_block("compbody")
             step = self.b.new_block("compstep")
             done = self.b.new_block("compend")
             self.b.jump(test)
             self.b.switch_to(test)
-            self.b.branch(self.b.cmp(Op.LT, T.I64, index, length), body, done)
-            self.b.switch_to(body)
-            item = self.b.call(T.PTR, "apy_key_at",
-                               [self.b.load(T.PTR, slot), index])
+            stepped = self.b.call(T.PTR, "apy_step", [cursor()])
             self._dyn_check()
+            held = self._keep(stepped)
+            self.b.branch(self.b.cmp(Op.EQ, T.PTR, stepped,
+                                     self.b.call(T.PTR, "apy_stop", [])),
+                          done, body)
+            self.b.switch_to(body)
+            item = held()
             if isinstance(gen.target, ast.Name):
                 self._dyn_store(gen.target.id, item)
             else:
@@ -7921,10 +7929,6 @@ class DynamicLowering:
             self.b.switch_to(skip)
             self.b.jump(step)
             self.b.switch_to(step)
-            nxt = self.b.reg(T.I64)
-            self.b.emit(Instruction(Op.ADD, T.I64, dst=nxt,
-                                    args=[index, self.b.const(T.I64, 1)]))
-            self.b.emit(Instruction(Op.COPY, T.I64, dst=index, args=[nxt]))
             self.b.jump(test)
             self.b.switch_to(done)
 

@@ -17721,9 +17721,22 @@ def _apy_getiter(h, a):
         if h.err is not None:
             return 0
         if got is not NotImplemented:
-            if isinstance(got, Instance) and got.cls.find("__next__") is not None:
-                return h._value(got)
-            return _apy_getiter(h, [h._value(got)])
+            # WHAT `__iter__` RETURNS MUST BE AN ITERATOR, which is the rule
+            # `_apy_iterable` and the C's `apy_getiter` both hold and this
+            # one did not: a list is not an iterator, and `iter()` MAKING
+            # one from a list is a different thing. Walking it anyway turned
+            # a broken class into a working one that iterated something else
+            # entirely, and the author was never told which method to fix.
+            #
+            # IT SHOWED UP THROUGH COMPREHENSIONS, which used to come down
+            # the EAGER path -- where the rule was already enforced -- so
+            # only the `for` statement was reaching this gap, and nothing in
+            # the corpus wrote one over a class with a broken `__iter__`.
+            if not _is_iterator(got):
+                return h._fail("TypeError",
+                               f"iter() returned non-iterator of type "
+                               f"'{h.kind_name(got)}'")
+            return h._value(got)
         # A CLASS EXTENDING A BUILTIN steps the builtin's own cursor. This is
         # the entry a GENERATOR's `for` uses -- it advances rather than
         # walking by index, because an index walk cannot survive a suspension

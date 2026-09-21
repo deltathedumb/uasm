@@ -4819,6 +4819,95 @@ PROGRAMS = {
         w("runtime sub", lambda: list(type("R", (Plain,), {}).__dict__))
         w("exception works", lambda: isinstance(E("x"), Exception))
     """,
+    # A COMPREHENSION WALKS ITS SOURCE; IT DOES NOT DRAIN IT FIRST. The
+    # index walk asked `apy_iterable` for a sequence and then read 0, 1,
+    # 2... out of it, which is wrong in the two ways `_dyn_for_sequence`
+    # already sets out -- and the `for` statement had been fixed while the
+    # comprehension beside it had not.
+    #
+    # DRAINING IS OBSERVABLE WHENEVER THE ELEMENTS SHARE STATE. Yielding the
+    # same list twice and asking its length each time is the smallest case
+    # there is: CPython answers `[1, 2]` because the first `len` runs before
+    # the `append`, and draining answered `[2, 2]` because every element was
+    # already the last one. The set and dict forms collapsed further still,
+    # to a single entry, because the two lengths had become equal.
+    "a_comprehension_walks_its_source_rather_than_draining_it": """
+        def listcomp():
+            v = [1]
+
+            def gen():
+                yield v
+                v.append(2)
+                yield v
+            return [len(x) for x in gen()]
+
+        def setcomp():
+            v = [1]
+
+            def gen():
+                yield v
+                v.append(2)
+                yield v
+            return sorted({len(x) for x in gen()})
+
+        def dictcomp():
+            v = [1]
+
+            def gen():
+                yield v
+                v.append(2)
+                yield v
+            return sorted({len(x): 0 for x in gen()})
+
+        def genexp():
+            v = [1]
+
+            def gen():
+                yield v
+                v.append(2)
+                yield v
+            return list(len(x) for x in gen())
+
+        def nested():
+            seen = []
+
+            def outer():
+                for i in (1, 2):
+                    seen.append(("outer", i))
+                    yield i
+
+            def inner(n):
+                for j in range(n):
+                    seen.append(("inner", n, j))
+                    yield j
+            return [(i, j) for i in outer() for j in inner(i)], len(seen)
+
+        def with_if():
+            seen = []
+
+            def gen():
+                for i in (1, 2, 3):
+                    seen.append(i)
+                    yield i
+            return [i for i in gen() if i != 2], seen
+
+        print("listcomp:", listcomp())
+        print("setcomp:", setcomp())
+        print("dictcomp:", dictcomp())
+        print("genexp:", genexp())
+        print("nested:", nested())
+        print("with if:", with_if())
+        # AND THE ORDINARY SOURCES ARE UNTOUCHED, which is the half a change
+        # to the walk could quietly have broken.
+        print("list:", [x * 2 for x in [1, 2, 3]])
+        print("tuple:", [x for x in (1, 2)])
+        print("range:", [x for x in range(3)])
+        print("str:", [c for c in "ab"])
+        print("dict:", sorted(k for k in {"a": 1, "b": 2}))
+        print("set:", sorted({x for x in {1, 2}}))
+        print("empty:", [x for x in []])
+        print("nested lists:", [[y for y in row] for row in [[1], [2, 3]]])
+    """,
     # A KIND WITH NO PROTOTYPE ANSWERS NOTHING. A builtin type used as a
     # VALUE has no instance to ask which methods it carries, so one is made
     # -- empty, asked, thrown away -- and `bytearray` was the one kind with
