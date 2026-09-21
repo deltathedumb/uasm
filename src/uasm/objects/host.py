@@ -10228,8 +10228,22 @@ def _apy_init_subclass(h, a):
         # returned silently, and `class D(Plain, extra=1)` built a class
         # where CPython raises. The message names the class BEING CREATED,
         # as CPython's does: its classmethod is bound to that class.
+        # UNLESS A METACLASS TOOK THEM, which is the other place a class
+        # keyword can land and the reason the frontend hands the same dict to
+        # both. `class C(TypedDict, total=False)` gives `total` to
+        # `_TypedDictMeta.__new__`, which does not pass it on to
+        # `type.__new__` -- so CPython's `__init_subclass__` never sees it and
+        # there is nothing to refuse. The metaclass is asked FIRST here too,
+        # so by this point it has had them; refusing broke every metaclass
+        # that takes a class keyword, `typing`'s among them.
+        #
+        # THE LIMIT IS THAT A METACLASS FORWARDING THEM IS NOT TOLD APART.
+        # CPython refuses when `super().__new__(mcls, name, bases, ns,
+        # **kwds)` passes a keyword through to `type.__new__` and no hook
+        # consumes it; here the two spellings look the same, and the silence
+        # this restores is the one that stood before.
         left = h._get(a[1], "apy_init_subclass") if len(a) > 1 else {}
-        if left:
+        if left and cls.meta is None:
             return h._fail("TypeError",
                            f"{cls.name}.__init_subclass__() takes no "
                            f"keyword arguments")

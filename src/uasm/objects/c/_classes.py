@@ -520,8 +520,24 @@ APY_API apy_value apy_init_subclass(apy_value cls, apy_value kwd) {
            so a class keyword with no hook to consume it is an error. This
            returned silently, and `class D(Plain, extra=1)` built a class
            where CPython raises. The message names the class BEING CREATED,
-           as CPython's does: its classmethod is bound to that class. */
-        if (kwd && O(kwd)->kind == APY_DICT_K && O(kwd)->v.d.n) {
+           as CPython's does: its classmethod is bound to that class.
+
+           UNLESS A METACLASS TOOK THEM, which is the other place a class
+           keyword can land and the reason the frontend hands the same dict
+           to both. `class C(TypedDict, total=False)` gives `total` to
+           `_TypedDictMeta.__new__`, which does not pass it on to
+           `type.__new__` -- so CPython's `__init_subclass__` never sees it
+           and there is nothing to refuse. The metaclass is asked FIRST here
+           too, so by this point it has had them; refusing broke every
+           metaclass that takes a class keyword, `typing`'s among them.
+
+           THE LIMIT IS THAT A METACLASS FORWARDING THEM IS NOT TOLD APART.
+           CPython refuses when `super().__new__(mcls, name, bases, ns,
+           **kwds)` passes a keyword through to `type.__new__` and no hook
+           consumes it; here the two spellings look the same, and the silence
+           this restores is the one that stood before. */
+        if (kwd && O(kwd)->kind == APY_DICT_K && O(kwd)->v.d.n
+                && !O(cls)->v.t.meta) {
             char b[128];
             snprintf(b, sizeof b, "%s.__init_subclass__() takes no keyword "
                      "arguments", APY_CSTR(O(cls)->v.t.name));
