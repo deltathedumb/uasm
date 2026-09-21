@@ -323,7 +323,8 @@ REPLACES: dict[str, tuple[str, ...]] = {
                       "apy_group_dispatch",
                       # THE PIECES ATTRIBUTE LOOKUP STANDS ON.
                       "apy_class_builtin_kind", "apy_is_descriptor_of",
-                      "apy_member_descriptor", "apy_kind_class",
+                      "apy_member_descriptor", "apy_getset_descriptor",
+                      "apy_kind_class",
                       "apy_object_default", "apy_object_class",
                       "apy_descr_get_of", "apy_split_of",
                       "apy_kind_method_of", "apy_kind_method_opt",

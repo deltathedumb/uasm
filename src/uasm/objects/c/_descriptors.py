@@ -424,6 +424,24 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
         at = apy_dict_find(O(obj)->v.o.dict, name);
         if (at >= 0) return O(O(obj)->v.o.dict)->v.d.vals[at];
         if (found) {
+            /* OBJECT'S `__class__` ENTRY IS A GETSET, AND READING IT IS
+               CALLING IT. The walk above finds it for every instance --
+               `object` is the end of every MRO -- and handing the descriptor
+               back made `object().__class__` the descriptor rather than
+               `object`. CPython's answer is `type(x)`, which is what the
+               rule below says; this is only about reaching it once the walk
+               has found the entry that stands for it.
+
+               AND THE WALK STILL WINS, which is why this is here rather than
+               ahead of it: a class writing `__class__ = 7` in its body makes
+               `C().__class__` 7 in CPython, because the MRO finds ITS entry
+               first and 7 is not a descriptor. Only object's own entry --
+               compared by cell, not by name -- means the rule. */
+            if (strcmp(want, "__class__") == 0
+                    && found == apy_dict_get_or(
+                        O(apy_object_class())->v.t.dict,
+                        apy_name("__class__"), 0))
+                return O(obj)->v.o.cls;
             /* A NON-DATA descriptor -- `staticmethod`, `classmethod`, or a
                user class with only `__get__` -- is asked here, after the
                instance dict has missed. */
@@ -497,10 +515,17 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
         /* `C.__class__` IS THE METACLASS, which is `type` unless the class
            named one. Every other kind answers this and a class did not, so
            `C.__class__` was an AttributeError about a class that plainly has
-           one -- and `isinstance(x, C.__class__)` is how a program asks. */
-        if (strcmp(want, "__class__") == 0
-                && !apy_dict_get_or(O(obj)->v.t.dict, apy_name("__class__"),
-                                    0))
+           one -- and `isinstance(x, C.__class__)` is how a program asks.
+
+           WHATEVER THE BODY BOUND, which is not what the dict test that
+           stood here said. `type.__dict__["__class__"]` is a DATA
+           descriptor, so for a class read it wins over the class's own dict
+           the way any data descriptor on the type wins: `class Own:
+           __class__ = 7` has `Own.__class__` as `type` in CPython and
+           answered 7 here. The instance read is the other way round and
+           still is -- `Own().__class__` IS 7, because there the MRO finds
+           Own's entry before object's getset. Measured both. */
+        if (strcmp(want, "__class__") == 0)
             return apy_type_of(obj);
         /* PEP 649 for a CLASS: `C.__annotations__` is built on access by the
            thunk the body left in the dict, for the same reason a function's

@@ -508,8 +508,8 @@ APY_API apy_value apy_object_class(void) {
 
        TWENTY-TWO ARE HERE, each through `apy_object_default`. `__doc__` is
        the twenty-third and is set below, because it is TEXT and not a method
-       that function could answer. `__class__` is the twenty-fourth and is in
-       no dict at all -- see `apy_dir`. */
+       that function could answer. `__class__` is the twenty-fourth and is
+       set below too, as a DESCRIPTOR -- see there. */
     static const char *names[] = {"__init__", "__new__", "__repr__", "__str__",
                                   "__eq__", "__ne__", "__hash__",
                                   "__getattribute__", "__setattr__",
@@ -537,6 +537,29 @@ APY_API apy_value apy_object_class(void) {
                          "new featureless\n"
                          "instance that has no instance attributes and cannot "
                          "be given any.\n"));
+    /* AND THE TWENTY-FOURTH, WHICH IS A RULE AND NOT A SLOT. `__class__` is
+       answered from `apy_default_getattr` -- `type(x)`, for every kind there
+       is -- and CPython answers it the same way, through a getset descriptor
+       in this dict that is CALLED with whoever asked. So the dict entry and
+       the attribute are two different things: the entry is the descriptor,
+       and reading `object.__class__` never consults it.
+
+       THE ENTRY IS STILL WHAT A PROGRAM SEES. `len(object.__dict__)` is 24
+       in CPython and was 23 here, `"__class__" in object.__dict__` was
+       False, and `sorted(object.__dict__) == sorted(dir(object))` was False
+       -- three readings of one absence, since `dir` already listed the name
+       from a rule of its own.
+
+       A DESCRIPTOR AND NOT A NATIVE, because a getset descriptor is not
+       callable: `object.__dict__["__class__"](x)` is a TypeError in CPython
+       and a native would have answered `type(x)`. `apy_getset_descriptor`
+       is `apy_member_descriptor`'s sibling and says how they differ.
+
+       ONE CELL, built here and never again, so
+       `object.__dict__["__class__"] is object.__dict__["__class__"]` is True
+       as it is in CPython. */
+    apy_dict_set(O(cls)->v.t.dict, apy_name("__class__"),
+                 apy_getset_descriptor());
     return cls;
 }
 

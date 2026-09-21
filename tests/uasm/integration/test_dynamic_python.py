@@ -4404,6 +4404,101 @@ PROGRAMS = {
         w("obj doc is dict", lambda: object.__doc__ is d["__doc__"])
         w("d[doc] is d[doc]", lambda: d["__doc__"] is d["__doc__"])
     """,
+    # `__class__` IS THE TWENTY-FOURTH NAME `object` CARRIES, and it was in
+    # no dict at all. `dir(object)` listed it from a rule of its own, so
+    # `len(object.__dict__)` was 23 against CPython's 24, `"__class__" in
+    # object.__dict__` was False, and `sorted(object.__dict__) ==
+    # sorted(dir(object))` was False -- three readings of one absence.
+    #
+    # A GETSET DESCRIPTOR AND NOT A SLOT, which is why the entry could not
+    # simply be the `type` cell: CPython's is a pair of C functions CALLED
+    # with whoever asked, so `object.__class__` is `type` and
+    # `object().__class__` is `object`, and one plain slot cannot be both
+    # answers. The entry is a descriptor cell and the two reads stay rules;
+    # what the entry buys is that a program looking at the dict sees what
+    # CPython's holds. It is not callable there and is not here.
+    #
+    # AND THE CLASS READ IS THE DATA DESCRIPTOR'S, which the dict test that
+    # guarded the rule had backwards: `type.__dict__["__class__"]` is a DATA
+    # descriptor, so for a CLASS read it wins over the class's own dict --
+    # `class Own: __class__ = 7` has `Own.__class__` as `type` in CPython and
+    # answered 7 here. The INSTANCE read is the other way round and still is:
+    # `Own().__class__` IS 7, because there the MRO finds Own's entry before
+    # object's getset.
+    "objects_class_is_the_twenty_fourth_name_object_carries": """
+        def w(label, f):
+            try:
+                print(f"{label:32} {f()!r}")
+            except Exception as e:
+                print(f"{label:32} !{type(e).__name__}: {e}")
+
+        class Meta(type):
+            pass
+
+        class C:
+            pass
+
+        class M(metaclass=Meta):
+            pass
+
+        class S(str):
+            pass
+
+        class Own:
+            __class__ = 7
+
+        d = object.__dict__
+        w("len(object.__dict__)", lambda: len(d))
+        w("class in dict", lambda: "__class__" in d)
+        w("dict == dir", lambda: sorted(d) == sorted(dir(object)))
+        w("type(d[class])", lambda: type(d["__class__"]).__name__)
+        w("d[class] callable", lambda: callable(d["__class__"]))
+        w("d[class] is d[class]", lambda: d["__class__"] is d["__class__"])
+        w("object.__class__ is type", lambda: object.__class__ is type)
+        w("object().__class__ is object",
+          lambda: object().__class__ is object)
+        w("C.__class__ is type", lambda: C.__class__ is type)
+        w("C().__class__ is C", lambda: C().__class__ is C)
+        w("M.__class__ is Meta", lambda: M.__class__ is Meta)
+        w("S('a').__class__ is S", lambda: S("a").__class__ is S)
+        w("Own.__class__ is type", lambda: Own.__class__ is type)
+        w("Own().__class__", lambda: Own().__class__)
+        w("(1).__class__ is int", lambda: (1).__class__ is int)
+        # AND `dir` LISTS IT ONCE, from the dict rather than from a push of
+        # its own -- for a class, for an instance and for a builtin value.
+        w("len(dir(object))", lambda: len(dir(object)))
+        w("dir(object) class", lambda: dir(object).count("__class__"))
+        w("dir(object()) class", lambda: dir(object()).count("__class__"))
+        w("dir(C) class", lambda: dir(C).count("__class__"))
+        w("dir(C()) class", lambda: dir(C()).count("__class__"))
+        w("dir(1) class", lambda: dir(1).count("__class__"))
+        # `dir(x)` AND `dir(type(x))` ARE ONE LIST for a class the program
+        # wrote, which is what the shared chain walk is for: the C's instance
+        # arm had no tail of its own and `dir(C())` was TWO names there where
+        # the interpreter and the IR answered twenty-five.
+        w("dir(C()) == dir(C)", lambda: dir(C()) == dir(C))
+        w("dir(S('a')) == dir(S)", lambda: dir(S("a")) == dir(S))
+        w("vars(C) class", lambda: "__class__" in vars(C))
+        # AND THE LIST DOES NOT LIE, which is what makes widening it safe:
+        # every name `dir` gives back has to answer `getattr`, and the
+        # interpreter listed `__doc__` for an instance and refused it. A
+        # class WITHOUT a docstring binds `__doc__ = None` rather than
+        # nothing, and the instance walk asked through `find`, which answers
+        # None for both a missing name and one bound to None.
+        bad = []
+        for recv, label in ((C(), "C()"), (S("a"), "S"), (object(), "o"),
+                            (C, "C"), (1, "1"), ("", "s")):
+            for n in dir(recv):
+                try:
+                    getattr(recv, n)
+                except Exception as e:
+                    bad.append(f"{label}.{n}: {type(e).__name__}")
+        print("unanswered:", len(bad), sorted(bad))
+        w("C().__doc__", lambda: C().__doc__)
+        # AND A BUILTIN BASE'S DOCSTRING IS NOT THE SUBCLASS'S: `S("a")`
+        # fell through to the held str and answered str's whole text.
+        w("S('a').__doc__", lambda: S("a").__doc__)
+    """,
     # A CLASS REACHED AS A TYPE INHERITS, and did not. `P.__eq__`,
     # `P.__init__`, `P.__repr__` and eight more were every one an
     # AttributeError about an attribute Python guarantees; `S.upper` for a

@@ -586,6 +586,23 @@ APY_API apy_value apy_member_descriptor(void) {
     if (!cls) cls = apy_type_new(apy_lit("member_descriptor"), 0);
     return apy_instance_new(cls);
 }
+
+/* AND ITS SIBLING, WHICH IS WHAT A C-LEVEL ATTRIBUTE READS AS. A
+   `member_descriptor` stands for a `__slots__` entry -- storage in the
+   instance, at a fixed offset -- and a `getset_descriptor` stands for a pair
+   of C functions called with whoever asked. CPython tells them apart by name
+   and so does a program: `object.__dict__["__class__"]` is a
+   getset_descriptor there, and `__class__` is the one name on `object` that
+   is a rule rather than a slot.
+
+   NOT CALLABLE, which is the point of using a descriptor cell here rather
+   than a native: `object.__dict__["__class__"](x)` is a TypeError in CPython
+   and a native would have answered `type(x)`. */
+APY_API apy_value apy_getset_descriptor(void) {
+    static apy_value cls = 0;
+    if (!cls) cls = apy_type_new(apy_lit("getset_descriptor"), 0);
+    return apy_instance_new(cls);
+}
 /* THE NAME ITS CALLERS USE, kept as a delegate: the body is IR's now,
    and the exported half above stands in when nothing is ported. */
 

@@ -105,6 +105,54 @@ APY_API apy_value apy_sizeof(apy_value v) {
     }
 }
 
+/* THE NAMES A CLASS CHAIN GIVES, AND THE ONES IT DOES NOT LINK TO.
+
+   `t.base` runs out at 0 twice over: the builtin a class extends is a KIND
+   and not a class, and `object` is not installed as a real base on anything
+   (see `apy_object_class`). So a walk of the chain alone saw a user class's
+   own dict and stopped -- `dir(P)` was the two names its body left behind,
+   `__doc__` and `__module__`, where CPython answers twenty-nine.
+
+   ONE BODY FOR BOTH ARMS, which is the whole reason it is a function.
+   `dir(S("a"))` and `dir(S)` are one list in CPython and the instance arm
+   walks this same chain; written out twice, the tail was added to the class
+   arm alone and `dir(C())` answered TWO names on this runtime where the
+   interpreter and the IR answered twenty-five.
+
+   `__class__` NEEDS NO ARM OF ITS OWN any more: it is an entry in `object`'s
+   dict, a getset descriptor put there by `apy_object_class`, so the merge
+   below lists it like any other name. It was a special push here while the
+   dict had nothing to list. */
+static void apy_dir_add_chain(apy_value out, apy_value cls) {
+    apy_value here = cls, root = apy_object_class();
+    const char *base, *row;
+    int64_t i;
+    while (here && O(here)->kind == APY_TYPE_K) {
+        apy_value cd = O(here)->v.t.dict;
+        for (i = 0; i < O(cd)->v.d.n; i++)
+            if (apy_set_find(out, O(cd)->v.d.keys[i]) < 0)
+                apy_seq_push(out, O(cd)->v.d.keys[i]);
+        here = O(here)->v.t.base;
+    }
+    if (!cls || O(cls)->kind != APY_TYPE_K) return;
+    /* THE ROW IS A RUN OF NUL-TERMINATED NAMES, pushed through the same
+       duplicate test the chain uses, because a class that writes `upper`
+       must not list it twice. */
+    base = apy_builtin_base_name(apy_class_builtin_kind(cls));
+    row = base ? apy_kind_dir(base) : 0;
+    while (row && *row) {
+        if (apy_set_find(out, apy_lit(row)) < 0)
+            apy_seq_push(out, apy_lit(row));
+        row += strlen(row) + 1;
+    }
+    if (cls != root) {
+        apy_value rd = O(root)->v.t.dict;
+        for (i = 0; i < O(rd)->v.d.n; i++)
+            if (apy_set_find(out, O(rd)->v.d.keys[i]) < 0)
+                apy_seq_push(out, O(rd)->v.d.keys[i]);
+    }
+}
+
 APY_API apy_value apy_dir(apy_value v) {
     apy_value out, hook;
     /* `object`'s OWN `__dir__` IS THIS COMPUTATION and not an override of
@@ -125,84 +173,17 @@ APY_API apy_value apy_dir(apy_value v) {
     }
     out = apy_seq_new(APY_LIST_K, 8);
     if (O(v)->kind == APY_INST_K) {
-        apy_value cls = O(v)->v.o.cls;
         apy_value d = O(v)->v.o.dict;
         int64_t i;
         for (i = 0; i < O(d)->v.d.n; i++)
             if (apy_set_find(out, O(d)->v.d.keys[i]) < 0)
                 apy_seq_push(out, O(d)->v.d.keys[i]);
-        while (cls && O(cls)->kind == APY_TYPE_K) {
-            apy_value cd = O(cls)->v.t.dict;
-            for (i = 0; i < O(cd)->v.d.n; i++)
-                if (apy_set_find(out, O(cd)->v.d.keys[i]) < 0)
-                    apy_seq_push(out, O(cd)->v.d.keys[i]);
-            /* `object`'s TWENTY-FOURTH NAME, and the only one of the
-               twenty-four that is not an entry in its dict. `__class__` is
-               answered from a RULE here -- `type(x)`, for every kind there
-               is -- rather than from storage, so the dict has nothing to
-               list and `dir(object)` came back one short of CPython's.
-               Storing the `type` cell under that key instead would answer
-               `type` for `object().__class__`, which CPython says is
-               `object`: CPython's entry is a getset called with whoever
-               asked, and one plain slot cannot be both answers. */
-            if (cls == apy_object_class()
-                    && apy_set_find(out, apy_name("__class__")) < 0)
-                apy_seq_push(out, apy_name("__class__"));
-            cls = O(cls)->v.t.base;
-        }
+        apy_dir_add_chain(out, O(v)->v.o.cls);
     } else if (O(v)->kind == APY_TYPE_K
                && !(O(v)->v.t.dict && !O(O(v)->v.t.dict)->v.d.n
                     && !O(v)->v.t.base && !O(v)->v.t.meta
                     && apy_kind_dir(APY_CSTR(O(v)->v.t.name)))) {
-        apy_value cls = v;
-        int64_t i;
-        while (cls && O(cls)->kind == APY_TYPE_K) {
-            apy_value cd = O(cls)->v.t.dict;
-            for (i = 0; i < O(cd)->v.d.n; i++)
-                if (apy_set_find(out, O(cd)->v.d.keys[i]) < 0)
-                    apy_seq_push(out, O(cd)->v.d.keys[i]);
-            /* `object`'s TWENTY-FOURTH NAME, and the only one of the
-               twenty-four that is not an entry in its dict. `__class__` is
-               answered from a RULE here -- `type(x)`, for every kind there
-               is -- rather than from storage, so the dict has nothing to
-               list and `dir(object)` came back one short of CPython's.
-               Storing the `type` cell under that key instead would answer
-               `type` for `object().__class__`, which CPython says is
-               `object`: CPython's entry is a getset called with whoever
-               asked, and one plain slot cannot be both answers. */
-            if (cls == apy_object_class()
-                    && apy_set_find(out, apy_name("__class__")) < 0)
-                apy_seq_push(out, apy_name("__class__"));
-            cls = O(cls)->v.t.base;
-        }
-        /* AND WHAT THE CHAIN DOES NOT LINK TO. `v.t.base` runs out at 0: the
-           builtin a class extends is a KIND and not a class, and `object` is
-           not installed as a real base on anything. So the walk above saw a
-           user class's own dict and stopped, and `dir(P)` was the two names
-           its body left behind where CPython answers twenty-nine. */
-        {
-            const char *base = apy_builtin_base_name(
-                apy_class_builtin_kind(v));
-            const char *row = base ? apy_kind_dir(base) : 0;
-            apy_value root = apy_object_class();
-            /* THE ROW IS A RUN OF NUL-TERMINATED NAMES, walked the way the
-               builtin-kind arm below walks it -- and pushed through the
-               same duplicate test the chain above uses, because a class
-               that writes `upper` must not list it twice. */
-            while (row && *row) {
-                if (apy_set_find(out, apy_lit(row)) < 0)
-                    apy_seq_push(out, apy_lit(row));
-                row += strlen(row) + 1;
-            }
-            if (v != root) {
-                apy_value rd = O(root)->v.t.dict;
-                for (i = 0; i < O(rd)->v.d.n; i++)
-                    if (apy_set_find(out, O(rd)->v.d.keys[i]) < 0)
-                        apy_seq_push(out, O(rd)->v.d.keys[i]);
-                if (apy_set_find(out, apy_name("__class__")) < 0)
-                    apy_seq_push(out, apy_name("__class__"));
-            }
-        }
+        apy_dir_add_chain(out, v);
     } else {
         /* A BUILT-IN KIND READS A GENERATED TABLE. There is no class chain
            here to walk -- the method table lives in the frontend and the

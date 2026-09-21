@@ -239,6 +239,7 @@ class ObjectHost:
         #: `member_descriptor`, the class a slot read through its own class
         #: answers -- see the `__slots__` branch in `_apy_getattr`.
         self._member_class = None
+        self._getset_class = None
         #: `code`, the class `f.__code__` answers -- see `_code_class`.
         self._code_cls = None
         #: `frame`, the class `g.gi_frame` answers -- see `_gen_frame_class`.
@@ -1508,6 +1509,21 @@ class ObjectHost:
         if self._member_class is None:
             self._member_class = Class("member_descriptor")
         return self._member_class
+
+    def _getset_descriptor_class(self):
+        """What a C-level attribute reads as, beside `member_descriptor`.
+
+        A `member_descriptor` stands for a `__slots__` entry -- storage in
+        the instance, at a fixed offset -- and a `getset_descriptor` stands
+        for a pair of C functions called with whoever asked. CPython tells
+        them apart by name and so does a program:
+        `object.__dict__["__class__"]` is a getset_descriptor there, and
+        `__class__` is the one name on `object` that is a rule rather than a
+        slot.
+        """
+        if self._getset_class is None:
+            self._getset_class = Class("getset_descriptor")
+        return self._getset_class
 
     def _no_attr(self, obj, name: str) -> int:
         # Every builtin kind's lookup ends here, which is why the protocol
@@ -5434,7 +5450,7 @@ def _apy_object_class(h, a):
     # TWENTY-TWO ARE FILLED HERE, each through `_object_default`. `__doc__`
     # is the twenty-third and is set below, because it is TEXT and not a
     # method that function could answer. `__class__` is the twenty-fourth and
-    # is in no dict at all -- see `_apy_dir`.
+    # is set below too, as a DESCRIPTOR -- see there.
     for nm in ("__init__", "__new__", "__repr__", "__str__", "__eq__",
                "__ne__", "__hash__", "__getattribute__", "__setattr__",
                "__delattr__", "__init_subclass__",
@@ -5452,6 +5468,27 @@ def _apy_object_class(h, a):
         "\n"
         "When called, it accepts no arguments and returns a new featureless\n"
         "instance that has no instance attributes and cannot be given any.\n")
+    # AND THE TWENTY-FOURTH, WHICH IS A RULE AND NOT A SLOT. `__class__` is
+    # answered from `_apy_default_getattr` -- `type(x)`, for every kind there
+    # is -- and CPython answers it the same way, through a getset descriptor
+    # in this dict that is CALLED with whoever asked. So the dict entry and
+    # the attribute are two different things: the entry is the descriptor, and
+    # reading `object.__class__` never consults it.
+    #
+    # THE ENTRY IS STILL WHAT A PROGRAM SEES. `len(object.__dict__)` is 24 in
+    # CPython and was 23 here, `"__class__" in object.__dict__` was False, and
+    # `sorted(object.__dict__) == sorted(dir(object))` was False -- three
+    # readings of one absence, since `dir` already listed the name from a rule
+    # of its own.
+    #
+    # A DESCRIPTOR AND NOT A NATIVE, because a getset descriptor is not
+    # callable: `object.__dict__["__class__"](x)` is a TypeError in CPython
+    # and a native would have answered `type(x)`.
+    #
+    # ONE CELL, built here and never again, so
+    # `object.__dict__["__class__"] is object.__dict__["__class__"]` is True
+    # as it is in CPython.
+    cls.dict["__class__"] = Instance(h._getset_descriptor_class(), h)
     made = h._new(cls)
     h._defaults["<object>"] = made
     return made
@@ -9721,6 +9758,16 @@ def _object_root(h):
     return h._get(_apy_object_class(h, []), "apy_object_class")
 
 
+def _object_class_entry(h):
+    """The one getset descriptor `object.__dict__["__class__"]` holds.
+
+    Compared BY CELL and not by name, so that a class writing its own
+    `__class__` is told apart from the entry that stands for the rule.
+    """
+    root = h._get(_apy_object_class(h, []), "apy_default_getattr")
+    return root.dict.get("__class__")
+
+
 def _type_doc(h, text):
     """A TYPE's `__doc__`, which is a getset's answer and not a dict read.
 
@@ -10660,6 +10707,21 @@ def _apy_default_getattr(h, a):
             return h._value(obj.dict[name])
         found = obj.cls.find(name)
         if found is not None:
+            # OBJECT'S `__class__` ENTRY IS A GETSET, AND READING IT IS
+            # CALLING IT. The walk above finds it for every instance --
+            # `object` is the end of every MRO -- and handing the descriptor
+            # back made `object().__class__` the descriptor rather than
+            # `object`. CPython's answer is `type(x)`, which is what the rule
+            # below says; this is only about reaching it once the walk has
+            # found the entry that stands for it.
+            #
+            # AND THE WALK STILL WINS, which is why this is here rather than
+            # ahead of it: a class writing `__class__ = 7` in its body makes
+            # `C().__class__` 7 in CPython, because the MRO finds ITS entry
+            # first and 7 is not a descriptor. Only object's own entry --
+            # compared by cell, not by name -- means the rule.
+            if name == "__class__" and found is _object_class_entry(h):
+                return h._value(obj.cls)
             # A NON-DATA descriptor is asked HERE, after the instance dict
             # has missed -- `staticmethod`, `classmethod`, or a user class
             # with only `__get__`.
@@ -10684,6 +10746,24 @@ def _apy_default_getattr(h, a):
             if not _slot_allows(obj.cls, "__dict__"):
                 return h._no_attr(obj, name)
             return h._new(obj.dict)
+        # A CLASS'S DOCSTRING IS ITS INSTANCES' TOO, and a class WITHOUT one
+        # binds None rather than nothing: `class C: pass` leaves
+        # `__doc__ = None` in its dict, so `C().__doc__` is None in CPython
+        # and was an AttributeError here -- a name `dir(C())` listed and
+        # `getattr` refused, which is a list that lies.
+        #
+        # THROUGH `lookup` AND NOT `find`, which is the whole of why the walk
+        # above missed it: `find` answers None for both a missing name and
+        # one bound to None, and every class's `__doc__` is the second.
+        #
+        # AND AHEAD OF THE HELD DELEGATION, because a class extending a
+        # builtin has its own None: `S("a").__doc__` for `class S(str)` is
+        # None in CPython and fell through to the held str here, answering
+        # str's whole docstring. Both compiled paths already answered both.
+        if name == "__doc__":
+            got = obj.cls.lookup("__doc__")
+            if got is not _ABSENT:
+                return h._value(got)
         # A CLASS THAT EXTENDS A BUILTIN answers with the builtin's own
         # method for everything its body did not define. `class D(dict)` with
         # only a `__missing__` still has `keys`, `items`, `get` and `update`,
@@ -10800,7 +10880,15 @@ def _apy_default_getattr(h, a):
         # named one. Every other kind answers this and a class did not, so
         # `C.__class__` was an AttributeError about a class that plainly has
         # one -- and `isinstance(x, C.__class__)` is how a program asks.
-        if name == "__class__" and "__class__" not in obj.dict:
+        # WHATEVER THE BODY BOUND, which is not what the dict test that stood
+        # here said. `type.__dict__["__class__"]` is a DATA descriptor, so for
+        # a class read it wins over the class's own dict the way any data
+        # descriptor on the type wins: `class Own: __class__ = 7` has
+        # `Own.__class__` as `type` in CPython and answered 7 here. The
+        # instance read is the other way round and still is -- `Own().__class__`
+        # IS 7, because there the MRO finds Own's entry before object's
+        # getset. Measured both.
+        if name == "__class__":
             # `_value` AND NOT `_new`: identity has to survive the handle, so
             # `C.__class__ is type` holds. A fresh handle for the same object
             # answers False to `is`, which is the one question this is for.
@@ -12741,22 +12829,15 @@ def _apy_dir(h, a):
         for n in seq:
             if n not in names:
                 names.append(n)
-    # `object`'s TWENTY-FOURTH NAME, ADDED WHERE THE CHAIN REACHES IT.
-    # `__class__` is the one of the twenty-four that is not an entry in
-    # `object`'s dict: it is answered from a RULE here -- `type(x)`, for every
-    # kind there is -- rather than from storage, so the dict has nothing to
-    # list and `dir(object)` came back one short of CPython's. Storing the
-    # `type` cell under that key instead would answer `type` for
-    # `object().__class__`, which CPython says is `object`: CPython's entry is
-    # a getset called with whoever asked, and one plain slot cannot be both
-    # answers.
+    # `__class__` NEEDS NO ARM OF ITS OWN. It is an entry in `object`'s dict
+    # -- a getset descriptor put there by `_apy_object_class` -- so the merge
+    # below lists it like any other name. It was a special push here while
+    # the dict had nothing to list.
     root = h._get(_apy_object_class(h, []), "apy_dir")
     def walk(cls):
         start = cls
         while isinstance(cls, Class):
             add(cls.dict)
-            if cls is root:
-                add(["__class__"])
             cls = cls.base
         # AND WHAT THE CHAIN DOES NOT LINK TO. A class's `base` runs out at
         # None: the builtin it extends is a KIND and not a class, and
@@ -12773,7 +12854,6 @@ def _apy_dir(h, a):
             if kind is not None and kind.__name__ in KIND_DIR:
                 add(KIND_DIR[kind.__name__])
             add(root.dict)
-            add(["__class__"])
     if isinstance(v, Instance):
         add(v.dict)
         walk(v.cls)

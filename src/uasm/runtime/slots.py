@@ -691,6 +691,35 @@ def apy_member_descriptor() -> ptr:
     return apy_instance_new(held)
 
 
+def apy_getset_slot() -> ptr:
+    """Where the one `getset_descriptor` class lives."""
+    return reserve("apy_getset_cls_ir", 8)
+
+
+def apy_getset_descriptor() -> ptr:
+    """One `getset_descriptor`, which is what a C-level attribute reads as.
+
+    A `member_descriptor` stands for a `__slots__` entry -- storage in the
+    instance, at a fixed offset -- and a `getset_descriptor` stands for a pair
+    of C functions called with whoever asked. CPython tells them apart by name
+    and so does a program: `object.__dict__["__class__"]` is a
+    getset_descriptor there, and `__class__` is the one name on `object` that
+    is a rule rather than a slot.
+
+    NOT CALLABLE, which is the point of using a descriptor cell here rather
+    than a native: `object.__dict__["__class__"](x)` is a TypeError in CPython
+    and a native would have answered `type(x)`.
+    """
+    held: ptr = ptr(load(u64, apy_getset_slot()))
+    if not held:
+        held = apy_type_new(
+            apy_from_cstr(rodata(b"getset_descriptor\0")), ptr(0))
+        if not held:
+            return held
+        store(u64, u64(held), apy_getset_slot())
+    return apy_instance_new(held)
+
+
 def apy_kind_class(obj: ptr) -> ptr:
     """The class object standing for `obj`'s builtin kind.
 
@@ -804,7 +833,7 @@ def apy_object_class() -> ptr:
     TWENTY-TWO ARE FILLED HERE, each through `apy_object_default`.
     `__doc__` is the twenty-third and is set below, because it is TEXT and
     not a method that function could answer. `__class__` is the
-    twenty-fourth and is in no dict at all -- see `apy_dir_chain`.
+    twenty-fourth and is set below too, as a DESCRIPTOR -- see there.
     """
     held: ptr = ptr(load(u64, apy_object_slot()))
     if held:
@@ -849,6 +878,24 @@ def apy_object_class() -> ptr:
                      b" featureless\n"
                      b"instance that has no instance attributes and cannot be"
                      b" given any.\n\0")))
+    # AND THE TWENTY-FOURTH, WHICH IS A RULE AND NOT A SLOT. `__class__` is
+    # answered from `apy_default_getattr` -- `type(x)`, for every kind there
+    # is -- and CPython answers it the same way, through a getset descriptor
+    # in this dict that is CALLED with whoever asked. So the dict entry and
+    # the attribute are two different things: the entry is the descriptor,
+    # and reading `object.__class__` never consults it.
+    #
+    # THE ENTRY IS STILL WHAT A PROGRAM SEES. `len(object.__dict__)` is 24 in
+    # CPython and was 23 here, `"__class__" in object.__dict__` was False, and
+    # `sorted(object.__dict__) == sorted(dir(object))` was False -- three
+    # readings of one absence, since `dir` already listed the name from a rule
+    # of its own.
+    #
+    # ONE CELL, built here and never again, so
+    # `object.__dict__["__class__"] is object.__dict__["__class__"]` is True
+    # as it is in CPython.
+    apy_dict_set(d, apy_name_of(rodata(b"__class__\0")),
+                 apy_getset_descriptor())
     return cls
 
 
@@ -1996,6 +2043,29 @@ def apy_inst_getattr(obj: ptr, name: ptr) -> ptr:
         vals: ptr = ptr(load(u64, offset(d, apy_d_vals_offset())))
         return ptr(load(u64, offset(vals, at * apy_value_size())))
     if found:
+        # OBJECT'S `__class__` ENTRY IS A GETSET, AND READING IT IS CALLING
+        # IT. The walk above finds it for every instance -- `object` is the
+        # end of every MRO -- and handing the descriptor back made
+        # `object().__class__` the descriptor rather than `object`. CPython's
+        # answer is `type(x)`, which is what the rule below says; this is
+        # only about reaching it once the walk has found the entry that
+        # stands for it.
+        #
+        # AND THE WALK STILL WINS, which is why this is here rather than
+        # ahead of it: a class writing `__class__ = 7` in its body makes
+        # `C().__class__` 7 in CPython, because the MRO finds ITS entry first
+        # and 7 is not a descriptor. Only object's own entry -- compared by
+        # cell, not by name -- means the rule.
+        w0: ptr = ptr(load(u64, offset(name, apy_str_ptr_offset())))
+        if apy_cstr_eq(w0, rodata(b"__class__\0")):
+            root: ptr = apy_object_class()
+            rd: ptr = ptr(load(u64, offset(root, apy_t_dict_offset())))
+            rat: i64 = apy_dict_find_of(rd, name)
+            if rat >= 0:
+                rvals: ptr = ptr(load(u64, offset(rd, apy_d_vals_offset())))
+                if u64(found) == load(u64, offset(rvals,
+                                                  rat * apy_value_size())):
+                    return cls
         if apy_is_descriptor_of(found):
             return apy_descr_get_of(found, obj, cls)
         if i64(load(i32, offset(found, 0))) == apy_func_kind():

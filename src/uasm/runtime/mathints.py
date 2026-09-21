@@ -1567,15 +1567,10 @@ def apy_dir_names(out: ptr, d: ptr) -> None:
 def apy_dir_chain(out: ptr, cls: ptr) -> None:
     """Add the names every class in `cls`\'s base chain defines.
 
-    AND `object`'s TWENTY-FOURTH NAME WHERE THE CHAIN REACHES IT.
-    `__class__` is the one of the twenty-four that is not an entry in
-    `object`'s dict: it is answered from a RULE here -- `type(x)`, for every
-    kind there is -- rather than from storage, so the dict has nothing to
-    list and `dir(object)` came back one short of CPython's. Storing the
-    `type` cell under that key instead would answer `type` for
-    `object().__class__`, which CPython says is `object`: CPython's entry is
-    a getset called with whoever asked, and one plain slot cannot be both
-    answers.
+    `__class__` NEEDS NO ARM OF ITS OWN. It is an entry in `object`'s dict --
+    a getset descriptor put there by `apy_object_class` -- so the merge below
+    lists it like any other name. It was a special push here while the dict
+    had nothing to list.
     """
     here: ptr = cls
     going: i64 = 1
@@ -1587,10 +1582,6 @@ def apy_dir_chain(out: ptr, cls: ptr) -> None:
         else:
             apy_dir_names(out, ptr(load(u64, offset(
                 here, apy_t_dict_offset()))))
-            if here == apy_object_class():
-                name: ptr = apy_name_of(rodata(b"__class__\0"))
-                if apy_set_find_of(out, name) < 0:
-                    apy_q_append_of(out, name)
             here = ptr(load(u64, offset(here, apy_t_base_offset())))
     # AND WHAT THE CHAIN DOES NOT LINK TO. `t.base` runs out at 0: the
     # builtin a class extends is a KIND and not a class, and `object` is not
@@ -1623,9 +1614,6 @@ def apy_dir_chain(out: ptr, cls: ptr) -> None:
             if cls != root:
                 apy_dir_names(out, ptr(load(u64, offset(
                     root, apy_t_dict_offset()))))
-                shown: ptr = apy_name_of(rodata(b"__class__\0"))
-                if apy_set_find_of(out, shown) < 0:
-                    apy_q_append_of(out, shown)
 
 
 def apy_builtin_base_name_of(kind: i64) -> ptr:
