@@ -12677,6 +12677,30 @@ PROGRAMS = {
         print("statement:", members)
         print("eager   :", [m.name for m in list(Colour)])
     """,
+    "a_builtin_subclass_is_filled_from_any_iterable": """
+        # `super().__init__(source)` IN A dict OR list SUBCLASS is the
+        # builtin's `__init__`, which takes any iterable. The interpreter
+        # handed the argument straight to the host's own `dict()`, which can
+        # read a list or a dict but not a GENERATOR of this runtime's, so
+        # `OrderedDict(pairs for ...)` was `'Gen' object is not iterable`.
+        # It is built the way `dict(x)` written out is built now.
+        import collections
+
+        class D(dict):
+            def __init__(self, source):
+                super().__init__(source)
+
+        class L(list):
+            def __init__(self, source):
+                super().__init__(source)
+
+        pairs = ((str(i), i * i) for i in range(4))
+        print(D(pairs), D({"x": 1}), D([("a", 1)]))
+        print(L(i + 1 for i in range(3)), L("abc"), L(range(2)),
+              L(iter([7, 8])))
+        print(collections.OrderedDict((k, len(k)) for k in ("one", "three")))
+        print(collections.Counter(c for c in "hello"))
+    """,
     "a_methods_locals_are_its_own_and_a_global_is_the_modules": """
         # WHAT A METHOD ASSIGNS IS ITS OWN. The module's names were collected
         # with a walk that went from each class into its methods, so a method

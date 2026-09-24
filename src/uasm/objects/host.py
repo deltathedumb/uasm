@@ -10966,7 +10966,7 @@ def _content_of(v):
     return v.held if isinstance(v, Instance) and v.held is not None else v
 
 
-def _builtin_init(*args):
+def _builtin_init(h, *args):
     """`super().__init__(...)` where the base chain ends at a BUILTIN.
 
     `class M(dict)` writing `super().__init__(other)` means `dict.__init__`,
@@ -10985,7 +10985,15 @@ def _builtin_init(*args):
     # IN PLACE, not a new object: `super().__init__()` initialises the
     # instance the caller already has, and the lines after it in the same
     # `__init__` go on using it.
-    recv.held = kind(*[_content_of(one) for one in rest])
+    vals = [_content_of(one) for one in rest]
+    # BUILT THE WAY `dict(x)` IS WRITTEN, when the kind is one of the builtin
+    # constructors: that path drains a generator, an iterator or an instance
+    # through the runtime, where the host's own `dict(gen)` could only fail --
+    # `'Gen' object is not iterable`, for `OrderedDict(pairs for ...)`.
+    if kind.__name__ in _BUILTIN_CTORS:
+        recv.held = _ctor_make(h, kind.__name__, vals)
+    else:
+        recv.held = kind(*vals)
     return None
 
 
@@ -11688,7 +11696,9 @@ def _apy_default_getattr(h, a):
         # the walk finds nothing and `object.__init__` would accept the
         # arguments and drop them. See `_builtin_init`.
         if found is None and name == "__init__"                 and isinstance(obj.recv, Instance) and obj.recv.held is not None:
-            return h._new(Native("__init__", _builtin_init).bind(obj.recv))
+            return h._new(Native("__init__",
+                                 lambda *args: _builtin_init(h, *args))
+                          .bind(obj.recv))
         # `super().__new__(cls, x)` PAST A BUILTIN BASE, which is the only way
         # to build an immutable one. A tuple's contents cannot be set after
         # the fact, so `class P(tuple)` has to fill it here or never -- and
