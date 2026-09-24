@@ -47,6 +47,18 @@ static int apy_exc_is_os(apy_value v) {
     }
     return 0;
 }
+/* IS THIS EXCEPTION A `SystemExit`? The same walk `apy_exc_is_os` does, and
+   for the same reason: the builtin hierarchy is a TABLE OF NAMES here, so
+   "is it one of these" is a walk up the parents rather than a class test.
+   `e.code` is the one name it gates -- see `apy_default_getattr`. */
+static int apy_exc_is_exit(apy_value v) {
+    const char *at = O(v)->v.e.name;
+    while (at) {
+        if (strcmp(at, "SystemExit") == 0) return 1;
+        at = apy_exc_parent(at);
+    }
+    return 0;
+}
 static apy_value apy_os_text(apy_value v, apy_value argv) {
     int64_t n = O(argv)->v.q.n, out;
     apy_value a0, msg, tail = 0;

@@ -1,4 +1,9 @@
-# COVERAGE: sys.getrefcount -- one binding, a second binding, a binding
+# COVERAGE: sys.exit -- the exception it raises, the status it carries, and
+# the one place `sys.exit(None)` and `SystemExit(None)` part company. The
+# ESCAPING form is not here: this runner requires both sides to exit 0 and
+# compares stdout, so a program that really exits cannot be one of these
+# cases -- `tests/uasm/integration/test_cli.py` measures the status instead.
+# Also sys.getrefcount -- one binding, a second binding, a binding
 # dropped, membership in a list, a dict value, a set member, an instance
 # attribute, and each of those going away again. A function asking about
 # its OWN PARAMETER reads one higher here than in CPython 3.14 and is
@@ -242,3 +247,62 @@ def command_line_replaced():
 
 command_line_replaced()
 print("--- command line replaced done ---")
+
+
+def exiting():
+    """`sys.exit` RAISES; it does not stop the process.
+
+    That is the whole of what it does, and the distinction is observable:
+    the exception unwinds, so a `finally` runs and an enclosing `except
+    SystemExit` may decline to exit at all. A function that ended the
+    process would skip both.
+    """
+    for label, call in (("2", lambda: sys.exit(2)),
+                        ("bare", lambda: sys.exit()),
+                        ("None", lambda: sys.exit(None)),
+                        ("0", lambda: sys.exit(0)),
+                        ("message", lambda: sys.exit("no such file"))):
+        try:
+            call()
+        except SystemExit as e:
+            print(f"{label:8} code={e.code!r} args={e.args!r}")
+        else:
+            print(f"{label:8} did not raise")
+
+
+exiting()
+print("--- exit done ---")
+
+
+def exit_unwinds():
+    """The `finally` runs and the handler may decline, both observable."""
+    try:
+        try:
+            sys.exit(9)
+        finally:
+            print("finally ran")
+    except SystemExit as e:
+        print("declined", e.code)
+    print("carried on")
+
+
+exit_unwinds()
+print("--- exit unwinding done ---")
+
+
+def the_constructor_keeps_what_it_was_handed():
+    """`sys.exit(None)` and `SystemExit(None)` are NOT the same object.
+
+    `sys.exit` drops the None -- CPython raises a SystemExit with no
+    arguments for both the bare call and the explicit None, so `args` is
+    `()` -- while the CONSTRUCTOR keeps it. A reimplementation that passes
+    its default straight through gets the second row wrong and nothing else
+    notices.
+    """
+    print("ctor None :", SystemExit(None).args, SystemExit(None).code)
+    print("ctor bare :", SystemExit().args, SystemExit().code)
+    print("ctor two  :", SystemExit(1, 2).args, SystemExit(1, 2).code)
+
+
+the_constructor_keeps_what_it_was_handed()
+print("--- exit constructor done ---")

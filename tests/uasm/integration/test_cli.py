@@ -194,6 +194,53 @@ class TestRun:
         path.write_text("def main() -> int:\n    return 7\n", encoding="utf-8")
         assert run_cli("run", str(path)).returncode == 7
 
+    def test_an_escaping_system_exit_is_the_status_and_says_nothing(
+            self, tmp_path):
+        """`SystemExit` IS NOT A FAILURE TO REPORT.
+
+        It used to be treated as one: an escaping `SystemExit(3)` printed
+        `trap: SystemExit: 3` and exited 70, so a script meaning to fail
+        returned a status no caller can read and one meaning `sys.exit(0)`
+        would have reported failure. The third way to set a status, beside
+        `plat_exit` and a `main` returning an int -- and the one a Python
+        program actually writes.
+        """
+        path = tmp_path / "three.py"
+        path.write_text("print('before')\nraise SystemExit(3)\n",
+                        encoding="utf-8")
+        r = run_cli("run", str(path))
+        assert r.returncode == 3, r.stderr
+        assert "trap" not in r.stderr, r.stderr
+        assert r.stdout.strip() == "before"
+
+    def test_a_system_exit_carrying_a_message_prints_it_and_exits_1(
+            self, tmp_path):
+        """CPython's third case, and what makes `sys.exit("...")` complete.
+
+        None (or no argument) is success and an int is the status; anything
+        else is a MESSAGE, written to stderr with the status 1. Reading a
+        number off it would have exited 0 for a string.
+        """
+        path = tmp_path / "msg.py"
+        path.write_text("raise SystemExit('no such file')\n",
+                        encoding="utf-8")
+        r = run_cli("run", str(path))
+        assert r.returncode == 1, r.stderr
+        assert "no such file" in r.stderr
+        assert "SystemExit" not in r.stderr, r.stderr
+
+    def test_a_bare_system_exit_is_success(self, tmp_path):
+        """`raise SystemExit` and `SystemExit(0)` and `SystemExit(None)` all
+        mean the program finished, which is a status of 0 rather than the
+        "something escaped" one."""
+        for body in ("raise SystemExit\n", "raise SystemExit(0)\n",
+                     "raise SystemExit(None)\n"):
+            path = tmp_path / "ok.py"
+            path.write_text(body, encoding="utf-8")
+            r = run_cli("run", str(path))
+            assert r.returncode == 0, f"{body!r}: {r.stderr}"
+            assert "trap" not in r.stderr, f"{body!r}: {r.stderr}"
+
     def test_an_entry_override_is_an_answer_not_a_status(self, tmp_path):
         """`--entry` runs something that is not a program.
 

@@ -1870,6 +1870,52 @@ static const char *apy_exc_shown(const char *name) {
    `user == f` and not merely `user`, because a program may define an
    ordinary class sharing the name; the object registered as the exception is
    the one this is true of. */
+/* THE STATUS AN ESCAPING `SystemExit` ASKS FOR, or -1 for anything else --
+   declared in the core part, where `apy_fatal_if_error` calls it.
+
+   CPYTHON'S THREE CASES ARE THE WHOLE RULE: None, or no argument at all, is
+   success; an int is the status itself; anything else is a MESSAGE, printed
+   to stderr and exiting 1. That last one is what makes `sys.exit("no such
+   file")` a complete way to fail, and is why this cannot just read a number
+   off `args`.
+
+   A SUBCLASS COUNTS. `apy_exc_parent` is the same table `except` matches
+   through, walked here because the builtin hierarchy is names rather than
+   class pointers -- so `class Bye(SystemExit)` stops the program the way
+   its base does. */
+static int64_t apy_exit_status(void) {
+    apy_value v, code, all;
+    const char *at = apy_err_type;
+    while (at) {
+        if (strcmp(at, "SystemExit") == 0) break;
+        at = apy_exc_parent(at);
+    }
+    if (!at) return -1;
+    v = apy_err_value;
+    /* NO VALUE TO ASK is a bare stop, which is success. */
+    if (!v || O(v)->kind != APY_EXC_K) return 0;
+    all = O(v)->v.e.argv;
+    /* SEVERAL ARGUMENTS ARE A MESSAGE, not a status: CPython prints the
+       whole `args` tuple and exits 1. */
+    if (all && apy_is_seq(all) && O(all)->v.q.n > 1) {
+        apy_value shown = apy_text(all, 1);
+        if (shown) fprintf(stderr, "%.*s\n",
+                           (int)O(shown)->v.s.n, O(shown)->v.s.p);
+        return 1;
+    }
+    if (!O(v)->v.e.has_arg) return 0;
+    code = O(v)->v.e.arg;
+    if (!code || O(code)->kind == APY_NONE_K) return 0;
+    if (O(code)->kind == APY_INT_K) return O(code)->v.i & 0xFF;
+    if (O(code)->kind == APY_BOOL_K) return O(code)->v.i ? 1 : 0;
+    {
+        apy_value shown = apy_text(code, 0);
+        if (shown) fprintf(stderr, "%.*s\n",
+                           (int)O(shown)->v.s.n, O(shown)->v.s.p);
+    }
+    return 1;
+}
+
 static int apy_type_is_exc(apy_value f) {
     const char *name;
     apy_value user;

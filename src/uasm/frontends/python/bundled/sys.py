@@ -241,6 +241,32 @@ def _read_argv():
 
 argv = _read_argv()
 
+def exit(status=None):
+    """`sys.exit(status)` -- RAISE `SystemExit`, do not stop the process.
+
+    That is the whole of what CPython's does, and the distinction matters:
+    the exception unwinds, so every `finally` runs and an enclosing
+    `except SystemExit` may decline to exit at all. A function that ended
+    the process here would skip both.
+
+    None MEANS NO STATUS, and this is the one place the two spellings of
+    "nothing" part company. `sys.exit(None)` and `sys.exit()` are the same
+    call -- CPython raises a SystemExit with NO arguments for both, so
+    `e.args` is `()` -- while the CONSTRUCTOR keeps what it was handed:
+    `SystemExit(None).args` really is `(None,)`. So the None is dropped
+    HERE rather than passed on, which is why this takes an ordinary default
+    and not a sentinel; a sentinel would have preserved a None nobody wants.
+
+    THE STATUS IS READ BACK OFF THE EXCEPTION, as `e.code` -- see
+    `objects/host.py`'s Exc arm, which answers it from `args`. 0 and None
+    both mean success, any other int is the status, and anything else is a
+    MESSAGE: CPython prints it to stderr and exits 1, which is what makes
+    `sys.exit("no such file")` a complete way to fail.
+    """
+    if status is None:
+        raise SystemExit()
+    raise SystemExit(status)
+
 
 def _print(*args, sep=" ", end="\n", file=None, flush=False):
     """What `print` becomes in a program that replaces `sys.stdout`.

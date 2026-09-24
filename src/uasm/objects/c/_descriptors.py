@@ -1340,6 +1340,22 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
         }
         if (strcmp(want, "value") == 0)
             return O(obj)->v.e.has_arg ? O(obj)->v.e.arg : apy_none();
+        /* `e.code` -- THE STATUS A `SystemExit` CARRIES, and the documented
+           way to read back what `sys.exit(n)` was given. It is `args` said
+           once more: None with no arguments, the single argument with one,
+           the whole tuple with several -- answered FROM `args` rather than
+           stored twice, exactly as `errno` and `strerror` are.
+
+           SystemExit'S ALONE. `ValueError(2).code` is an AttributeError in
+           CPython, so the name is gated on the FAMILY and falls through to
+           the refusal below for anything else. The walk is
+           `apy_exc_is_exit`, which is `apy_exc_is_os` with another name in
+           it, because the builtin hierarchy here is a table of names. */
+        if (strcmp(want, "code") == 0 && apy_exc_is_exit(obj)) {
+            apy_value all = O(obj)->v.e.argv;
+            if (all && apy_is_seq(all) && O(all)->v.q.n > 1) return all;
+            return O(obj)->v.e.has_arg ? O(obj)->v.e.arg : apy_none();
+        }
         if (strcmp(want, "__context__") == 0)
             return O(obj)->v.e.context ? O(obj)->v.e.context : apy_none();
         if (strcmp(want, "__cause__") == 0)

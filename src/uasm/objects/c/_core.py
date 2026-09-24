@@ -743,9 +743,36 @@ APY_API void apy_error_clear(void) {
     apy_err_value = 0;
 }
 
+/* THE STATUS AN ESCAPING `SystemExit` ASKS FOR, or -1 for anything else.
+
+   DECLARED HERE AND DEFINED LATER, which is the one shape this could take:
+   `apy_fatal_if_error` is the choke point every escaping exception reaches
+   and it belongs in this part, while deciding whether a type IS a SystemExit
+   needs the hierarchy table and rendering a non-int status needs the text
+   machinery -- and both of those are parts above this one. See
+   `apy_exit_status` in the builtins part for the rule it applies.
+
+   AND static, not APY_API, because it is this file's own plumbing rather
+   than a runtime entry point: nothing a compiled PROGRAM emits calls it, so
+   exporting it would oblige `objects/host.py` to carry a binding for a
+   symbol no program can name. The forward declaration is the accepted way a
+   part reaches below itself -- `apy_is_int_like` in the bigint part is
+   declared the same way. */
+static int64_t apy_exit_status(void);
+
 APY_API void apy_fatal_if_error(void) {
     if (!apy_err_type) return;
     fflush(stdout);
+    /* A `SystemExit` IS NOT A FAILURE TO REPORT. Every other exception
+       arriving here is a program that went wrong and is worth a line on
+       stderr; this one is a program that ASKED TO STOP, and printing
+       `SystemExit: 3` while exiting 1 gets both halves wrong -- the status
+       a caller reads is not the one the program chose, and `sys.exit(0)`
+       would report failure. The interpreter's twin is `_exit_status_of`. */
+    {
+        int64_t status = apy_exit_status();
+        if (status >= 0) exit((int)status);
+    }
     fprintf(stderr, "%s: %s\n", apy_err_type, apy_err_msg);
     exit(1);
 }

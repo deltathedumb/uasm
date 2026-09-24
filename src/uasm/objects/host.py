@@ -2073,7 +2073,8 @@ class ObjectHost:
 # Imported late so this module can be read without chasing the interpreter's
 # own definitions; `Trap` is the interpreter's "the program did something
 # undefined" signal and this file raises exactly one kind of it.
-from ..ir.interpreter import Trap as _Trap, _FUNC_TAG  # noqa: E402
+from ..ir.interpreter import (  # noqa: E402
+    Trap as _Trap, _Exited, _FUNC_TAG)
 
 #: "not a builtin type" -- distinct from every value a constructor can
 #: answer, including None and 0, which `bool()` and `int()` really do give.
@@ -6957,7 +6958,56 @@ def _apy_fatal_if_error(h, a):
     if h.err is None:
         return None
     kind, msg = h.err
+    status = _exit_status_of(h, kind)
+    if status is not None:
+        # `plat_exit` AND NOT A TRAP, because that is the floor's own way to
+        # end a process with a status and every backend already honours it --
+        # see `objects/floor.py`. Routing through it means the interpreter
+        # and a compiled build agree without the driver knowing anything
+        # about SystemExit.
+        raise _Exited(status & 0xFF)
     raise _Trap(f"{kind}: {msg}" if msg else kind)
+
+
+def _exit_status_of(h, kind: str):
+    """The status an escaping `SystemExit` asks for, or None for anything else.
+
+    A `SystemExit` IS NOT A FAILURE TO REPORT. Every other exception reaching
+    the top is a program that went wrong and is worth a line on stderr; this
+    one is a program that asked to stop, and printing `SystemExit: 3` while
+    exiting 70 gets BOTH halves wrong -- a script meaning to fail returns a
+    status no caller can read, and one meaning `sys.exit(0)` fails.
+
+    CPython'S THREE CASES, which are the whole rule: None (or no argument at
+    all) is success, an int is the status itself, and anything else is a
+    MESSAGE -- printed to stderr, exiting 1. That last one is what makes
+    `sys.exit("no such file")` a complete way to fail, and it is why this
+    cannot simply read `args[0]` as a number.
+
+    A SUBCLASS COUNTS, through `_exc_chain` rather than a name comparison: the
+    builtin hierarchy here is a table of names, so `class Bye(SystemExit)`
+    is only recognisable by walking it.
+    """
+    if "SystemExit" not in _exc_chain(h, kind):
+        return None
+    exc = h.err_value
+    code = None
+    if isinstance(exc, Exc):
+        argv = getattr(exc, "argv", None)
+        if argv is not None and len(argv) > 1:
+            code = tuple(argv)
+        elif exc.has_arg:
+            code = exc.arg
+    if code is None:
+        return 0
+    if _is_int_like(code):
+        return code
+    # THE SAME STREAM THE PROGRAM'S OWN WRITES GO TO. `plat_write(2, ...)`
+    # ends in `sys.stderr` -- see the interpreter's `_plat_write` -- so
+    # writing here keeps this line in order with whatever the program
+    # printed before it.
+    sys.stderr.write(h._text(code, False) + "\n")
+    return 1
 
 
 # ── the numeric tower ───────────────────────────────────────────────────────
@@ -11945,6 +11995,22 @@ def _apy_default_getattr(h, a):
         # `e.value` -- what a generator's `return` gave. Every exception has
         # it in CPython, so answering None keeps the bare form working too.
         if name == "value":
+            return h._value(obj.arg if obj.has_arg else None)
+        # `e.code` -- THE STATUS A `SystemExit` CARRIES, and the documented
+        # way to read back what `sys.exit(n)` was given. It is `args` said
+        # once more: None when there were no arguments, the single argument
+        # when there was one, and the whole tuple when there were several --
+        # so it is answered FROM `args` rather than stored twice, exactly as
+        # `errno` and `strerror` are.
+        #
+        # SystemExit'S ALONE. `ValueError(2).code` is an AttributeError in
+        # CPython, so the name is gated on the family rather than given to
+        # every exception the way `value` is; `_exc_chain` is the walk that
+        # knows, because the builtin hierarchy here is a table of names.
+        if name == "code" and "SystemExit" in _exc_chain(h, obj.name):
+            argv = getattr(obj, "argv", None)
+            if argv is not None and len(argv) > 1:
+                return h._new(tuple(argv))
             return h._value(obj.arg if obj.has_arg else None)
         if name == "__context__":
             return h._value(obj.context)
