@@ -777,24 +777,45 @@ C_SOURCE["net"] = r"""/* --- host services: net --------------------------------
 #ifdef _WIN32
 /* Winsock needs starting, and its descriptors are `SOCKET` (an unsigned
    pointer-sized handle) rather than ints -- widened to int64_t here, which
-   is what the contract answers anyway. */
+   is what the contract answers anyway.
+
+   RESOLVED WHEN FIRST USED, NOT LINKED. Winsock is `ws2_32.dll`, a library
+   of its own where BSD sockets are libc everywhere else, so calling it
+   directly made it a link input that every Windows build owed and none
+   passed: no toolchain adds anything on Windows, because `fmod` and
+   `LoadLibraryA` are both in what the CRT links already. Every program
+   failed to link, whether or not it touched a socket, because this
+   group's own calls were enough. `LoadLibraryA` at the first use costs
+   nothing for a program that never connects, and it asks for no flag, so
+   MinGW, clang and MSVC link this as it stands. It also takes eleven
+   global names out of the way of a `ctypes` program, which is the concern
+   the paragraph above has about headers.
+
+   The two loader prototypes are the `dynlib` group's, word for word: two
+   IDENTICAL declarations of one function are legal C, and both groups can
+   be in one program. */
 typedef unsigned long long apy_socket_t;
-__declspec(dllimport) int __stdcall WSAStartup(unsigned short, void *);
-__declspec(dllimport) apy_socket_t __stdcall socket(int, int, int);
-__declspec(dllimport) int __stdcall connect(apy_socket_t, const void *, int);
-__declspec(dllimport) int __stdcall bind(apy_socket_t, const void *, int);
-__declspec(dllimport) int __stdcall listen(apy_socket_t, int);
-__declspec(dllimport) apy_socket_t __stdcall accept(apy_socket_t, void *, int *);
-__declspec(dllimport) int __stdcall recv(apy_socket_t, char *, int, int);
-__declspec(dllimport) int __stdcall send(apy_socket_t, const char *, int, int);
-__declspec(dllimport) int __stdcall closesocket(apy_socket_t);
-__declspec(dllimport) int __stdcall setsockopt(apy_socket_t, int, int,
-                                               const char *, int);
-__declspec(dllimport) int __stdcall getsockname(apy_socket_t, void *, int *);
-__declspec(dllimport) unsigned long __stdcall inet_addr(const char *);
-__declspec(dllimport) void * __stdcall gethostbyname(const char *);
-__declspec(dllimport) int __stdcall WSAPoll(void *, unsigned long, int);
-#define APY_NET_CLOSE(s)   closesocket(s)
+__declspec(dllimport) void *__stdcall LoadLibraryA(const char *);
+__declspec(dllimport) void *__stdcall GetProcAddress(void *, const char *);
+#define APY_WS(ret, name, args) \
+    typedef ret (__stdcall *apy_ws_##name##_f) args; \
+    static apy_ws_##name##_f apy_ws_##name
+APY_WS(int, WSAStartup, (unsigned short, void *));
+APY_WS(apy_socket_t, socket, (int, int, int));
+APY_WS(int, connect, (apy_socket_t, const void *, int));
+APY_WS(int, bind, (apy_socket_t, const void *, int));
+APY_WS(int, listen, (apy_socket_t, int));
+APY_WS(apy_socket_t, accept, (apy_socket_t, void *, int *));
+APY_WS(int, recv, (apy_socket_t, char *, int, int));
+APY_WS(int, send, (apy_socket_t, const char *, int, int));
+APY_WS(int, closesocket, (apy_socket_t));
+APY_WS(int, setsockopt, (apy_socket_t, int, int, const char *, int));
+APY_WS(int, getsockname, (apy_socket_t, void *, int *));
+APY_WS(unsigned long, inet_addr, (const char *));
+APY_WS(int, WSAPoll, (void *, unsigned long, int));
+#undef APY_WS
+#define APY_NET(f)         apy_ws_##f
+#define APY_NET_CLOSE(s)   apy_ws_closesocket(s)
 #define APY_NET_INVALID    ((apy_socket_t)~0)
 #define APY_NET_SOL_SOCKET 0xffff
 #define APY_NET_REUSEADDR  0x0004
@@ -813,6 +834,7 @@ int getsockname(int, void *, unsigned int *);
 unsigned int inet_addr(const char *);
 void *gethostbyname(const char *);
 int poll(void *, unsigned long, int);
+#define APY_NET(f)         f
 #define APY_NET_CLOSE(s)   close(s)
 #define APY_NET_INVALID    (-1)
 #define APY_NET_SOL_SOCKET 1
@@ -855,14 +877,38 @@ static int apy_net_name(@PTR@ p, int64_t n, char *out)
     return 1;
 }
 
-static void apy_net_start(void)
+/* 1 when the calls below can be made, 0 when they cannot. EVERY ENTRY POINT
+   ASKS, and not only the two that make a socket: a descriptor handed to
+   `accept` or `recv` before any `connect` or `listen` would otherwise call
+   through a pointer nothing has filled in. */
+static int apy_net_start(void)
 {
 #ifdef _WIN32
-    /* ONCE. Winsock refuses every call before `WSAStartup`, and calling it
-       twice is harmless but pointless. 0x0202 is version 2.2. */
-    static int done = 0;
-    if (!done) { char data[512]; WSAStartup(0x0202, data); done = 1; }
+    /* ONCE, and a failure is remembered as one. Winsock refuses every call
+       before `WSAStartup`, and calling it twice is harmless but pointless.
+       0x0202 is version 2.2. */
+    static int state = 0;                   /* untried, 1 ready, -1 absent */
+    void *dll;
+    char data[512];
+    if (state) return state > 0;
+    state = -1;
+    dll = LoadLibraryA("ws2_32.dll");
+    if (!dll) return 0;
+    /* Through `uintptr_t`, for the reason the `dynlib` group gives at its
+       one `GetProcAddress`. */
+#define APY_WS_GET(name) \
+    if (!(apy_ws_##name = (apy_ws_##name##_f)(uintptr_t) \
+              GetProcAddress(dll, #name))) return 0
+    APY_WS_GET(WSAStartup); APY_WS_GET(socket); APY_WS_GET(connect);
+    APY_WS_GET(bind); APY_WS_GET(listen); APY_WS_GET(accept);
+    APY_WS_GET(recv); APY_WS_GET(send); APY_WS_GET(closesocket);
+    APY_WS_GET(setsockopt); APY_WS_GET(getsockname);
+    APY_WS_GET(inet_addr); APY_WS_GET(WSAPoll);
+#undef APY_WS_GET
+    if (apy_ws_WSAStartup(0x0202, data) != 0) return 0;
+    state = 1;
 #endif
+    return 1;
 }
 
 @STATIC@int64_t host_net_connect(@PTR@ host, int64_t n, int64_t port)
@@ -873,18 +919,18 @@ static void apy_net_start(void)
     apy_socket_t s;
     if (port < 0 || port > 65535) return -9;
     if (!apy_net_name(host, n, name)) return -9;
-    apy_net_start();
-    ip = (unsigned int)inet_addr(name);
+    if (!apy_net_start()) return -1;
+    ip = (unsigned int)APY_NET(inet_addr)(name);
     /* NUMERIC ADDRESSES ONLY. `gethostbyname` would resolve a name, and
        resolution is a larger contract than this group has -- it needs a
        resolver, a timeout and an error vocabulary of its own. A caller with
        a name resolves it before getting here; a caller without one passes
        `127.0.0.1` and this works. */
     if (ip == 0xffffffffu) return -9;
-    s = socket(APY_AF_INET, APY_SOCK_STREAM, 0);
+    s = APY_NET(socket)(APY_AF_INET, APY_SOCK_STREAM, 0);
     if (s == APY_NET_INVALID) return -1;
     apy_net_addr(sa, ip, port);
-    if (connect(s, sa, 16) != 0) { APY_NET_CLOSE(s); return -1; }
+    if (APY_NET(connect)(s, sa, 16) != 0) { APY_NET_CLOSE(s); return -1; }
     return (int64_t)s;
 }
 
@@ -894,18 +940,18 @@ static void apy_net_start(void)
     apy_socket_t s;
     int on = 1;
     if (port < 0 || port > 65535) return -9;
-    apy_net_start();
-    s = socket(APY_AF_INET, APY_SOCK_STREAM, 0);
+    if (!apy_net_start()) return -1;
+    s = APY_NET(socket)(APY_AF_INET, APY_SOCK_STREAM, 0);
     if (s == APY_NET_INVALID) return -1;
     /* REUSEADDR, or a listener that has just closed leaves the port in
        TIME_WAIT and the next run of the same program is refused. The
        interpreter's implementation sets it too, so the two agree about
        whether a program can be run twice. */
-    setsockopt(s, APY_NET_SOL_SOCKET, APY_NET_REUSEADDR,
-               (const char *)&on, (unsigned int)sizeof on);
-    apy_net_addr(sa, inet_addr("127.0.0.1"), port);
-    if (bind(s, sa, 16) != 0) { APY_NET_CLOSE(s); return -1; }
-    if (listen(s, (int)(backlog > 0 ? backlog : 1)) != 0) {
+    APY_NET(setsockopt)(s, APY_NET_SOL_SOCKET, APY_NET_REUSEADDR,
+                        (const char *)&on, (unsigned int)sizeof on);
+    apy_net_addr(sa, APY_NET(inet_addr)("127.0.0.1"), port);
+    if (APY_NET(bind)(s, sa, 16) != 0) { APY_NET_CLOSE(s); return -1; }
+    if (APY_NET(listen)(s, (int)(backlog > 0 ? backlog : 1)) != 0) {
         APY_NET_CLOSE(s); return -1;
     }
     return (int64_t)s;
@@ -913,7 +959,9 @@ static void apy_net_start(void)
 
 @STATIC@int64_t host_net_accept(int64_t fd)
 {
-    apy_socket_t c = accept((apy_socket_t)fd, 0, 0);
+    apy_socket_t c;
+    if (!apy_net_start()) return -1;
+    c = APY_NET(accept)((apy_socket_t)fd, 0, 0);
     if (c == APY_NET_INVALID) return -1;
     return (int64_t)c;
 }
@@ -922,7 +970,9 @@ static void apy_net_start(void)
 {
     long got;
     if (n < 0) return -9;
-    got = (long)recv((apy_socket_t)fd, (char *)buf, (unsigned long)n, 0);
+    if (!apy_net_start()) return -1;
+    got = (long)APY_NET(recv)((apy_socket_t)fd, (char *)buf,
+                              (unsigned long)n, 0);
     /* ZERO IS END OF STREAM and is not an error: the peer closed its end.
        Every error in this table is negative, so the two never collide. */
     if (got < 0) return -1;
@@ -933,13 +983,16 @@ static void apy_net_start(void)
 {
     long put;
     if (n < 0) return -9;
-    put = (long)send((apy_socket_t)fd, (const char *)buf, (unsigned long)n, 0);
+    if (!apy_net_start()) return -1;
+    put = (long)APY_NET(send)((apy_socket_t)fd, (const char *)buf,
+                              (unsigned long)n, 0);
     if (put < 0) return -8;                    /* EPIPE: the peer is gone  */
     return (int64_t)put;
 }
 
 @STATIC@int64_t host_net_close(int64_t fd)
 {
+    if (!apy_net_start()) return -1;
     return APY_NET_CLOSE((apy_socket_t)fd) == 0 ? 0 : -1;
 }
 
@@ -960,13 +1013,15 @@ static void apy_net_start(void)
     int ready;
 #ifdef _WIN32
     struct { apy_socket_t fd; short events; short revents; } pfd;
+    if (!apy_net_start()) return -1;
     pfd.fd = (apy_socket_t)fd;
     /* POLLRDNORM / POLLWRNORM: Winsock's names for the two conditions,
        and the only two `WSAPoll` accepts on input. */
     pfd.events = (short)(want == 1 ? 0x0100 : 0x0010);
     pfd.revents = 0;
     if (want != 1 && want != 2) return -9;
-    ready = WSAPoll(&pfd, 1, timeout < 0 ? -1 : (int)(timeout / 1000000));
+    ready = apy_ws_WSAPoll(&pfd, 1,
+                           timeout < 0 ? -1 : (int)(timeout / 1000000));
 #else
     struct { int fd; short events; short revents; } pfd;
     if (want != 1 && want != 2) return -9;
@@ -990,8 +1045,9 @@ static void apy_net_start(void)
     unsigned char sa[16];
     unsigned int len = 16;
     int i;
+    if (!apy_net_start()) return -1;
     for (i = 0; i < 16; i++) sa[i] = 0;
-    if (getsockname((apy_socket_t)fd, sa, &len) != 0) return -1;
+    if (APY_NET(getsockname)((apy_socket_t)fd, sa, &len) != 0) return -1;
     /* NETWORK BYTE ORDER, read back the way `apy_net_addr` wrote it. */
     return (int64_t)(((unsigned int)sa[2] << 8) | (unsigned int)sa[3]);
 }

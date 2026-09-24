@@ -114,10 +114,12 @@ from ...objects import hostsvc as _hostsvc  # noqa: E402
 #: literal `CDLL("m")` is still a promise to the linker and still needs
 #: nothing here. See the group's own commentary in `objects/hostsvc.py`.
 #:
-#: `net` LINKS AGAINST WINSOCK ON WINDOWS, which is why `_extra_libraries`
-#: below exists: BSD sockets are in libc everywhere else and `ws2_32` is a
-#: separate library there. A group that needs a link input is the first one,
-#: and naming it beside the group is what keeps the two from drifting.
+#: `net` IS WINSOCK ON WINDOWS, a library of its own where BSD sockets are
+#: libc everywhere else -- and it is LOADED, not linked, so no group asks the
+#: link step for anything. This said a function beside the group named the
+#: link input; no such function was ever written, and every Windows build
+#: failed to link for want of it. The group's own commentary says why loading
+#: it is the better answer.
 _HOSTSVC_GROUPS = frozenset({"file", "time", "random", "env", "dynlib",
                              "net", "proc", "thread"})
 
