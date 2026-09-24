@@ -10584,6 +10584,76 @@ PROGRAMS = {
         # AND `%` ON A str RUNS AGAINST ANYTHING.
         show("percent", lambda: SubS("%d") % 5)
     """,
+    "percent_takes_its_width_and_precision_from_the_arguments": """
+        # `%*d` READS ITS WIDTH OUT OF THE ARGUMENTS and `%.*f` its
+        # precision. Neither has a spelling in the format MINI-LANGUAGE this
+        # is translated into, so a star left in the spec fell through to the
+        # conversion and came back as `Unknown format code '*' for object of
+        # type 'int'` -- the one compiler gap between here and argparse,
+        # whose help columns are laid out with exactly this.
+        class Idx:
+            def __index__(self):
+                return 4
+
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+            except OverflowError as e:
+                print(label, "OverflowError:", e)
+
+        show("w", lambda: "%*s|" % (8, "hi"))
+        # A NEGATIVE WIDTH IS THE `-` FLAG. printf's rule, and the flag is
+        # the only spelling the mini-language has for it.
+        show("w-", lambda: "%*s|" % (-8, "hi"))
+        show("flag", lambda: "%-*s|" % (8, "hi"))
+        show("zero", lambda: "%0*d" % (5, 42))
+        show("zero-", lambda: "%0*d" % (-5, 42))
+        show("plus", lambda: "%+*d" % (6, 42))
+        show("hash", lambda: "%#*x" % (8, 255))
+        show("chr", lambda: "%*c" % (4, 65))
+        show("repr", lambda: "%*r" % (6, "a"))
+        show("nil", lambda: "%*s|" % (0, "hi"))
+        show("bool", lambda: "%*s|" % (True, "hi"))
+        show("p", lambda: "%.*f" % (2, 3.14159))
+        show("ps", lambda: "%.*s" % (2, "abcdef"))
+        show("p0", lambda: "%.*s" % (0, "abc"))
+        # A NEGATIVE PRECISION IS ZERO -- not an error, and not the
+        # alignment flag its width twin turns into.
+        show("p-", lambda: "%.*f" % (-2, 3.14159))
+        show("pd", lambda: "%.*d" % (5, 42))
+        # A PRECISION ON AN INTEGER IS A MINIMUM NUMBER OF DIGITS, which the
+        # mini-language has no spelling for either: the interpreter refused
+        # `%.5d` outright and both compiled paths dropped the precision and
+        # printed `42`. The fill goes after the sign and after the `0x`, and
+        # Python's `0` flag still widens it to the field.
+        show("digits", lambda: ("%.5d" % -42, "%.5x" % 255, "%#.5o" % 8))
+        show("digits+", lambda: ("%+.5d" % 42, "% 8.5d" % -42, "%#.3d" % 42))
+        show("digits0", lambda: ("%08.5d" % 42, "%#08.3x" % 255,
+                                 "%-08.5d|" % 42))
+        show("digits.", lambda: ("%.d" % 42, "%.0x" % 0, "%#.0x" % 0,
+                                 "%.2d" % 12345, "%.3d" % True))
+        show("digitsbig", lambda: "%.30d" % -(2 ** 70))
+        show("both", lambda: "%*.*f" % (10, 3, 3.14159))
+        show("twice", lambda: "%*d%*d" % (4, 1, 5, 2))
+        show("bytes", lambda: b"%*s|%.*s" % (6, b"hi", 2, b"abcdef"))
+        # REFUSED BY `PyLong_Check` AND NOTHING ELSE: a float is turned away
+        # here where `%d` of one truncates, and `__index__` is not consulted
+        # where `%d` would ask for it.
+        show("str*", lambda: "%*d" % ("x", 42))
+        show("float*", lambda: "%*s" % (2.0, "hi"))
+        show("index*", lambda: "%*s|" % (Idx(), "hi"))
+        show("short", lambda: "%*s" % (8,))
+        # THE MAPPING FORM has no positional arguments to draw on, so the
+        # star is handed the MAPPING itself and refused by the same words.
+        show("map", lambda: "%(k)*s" % {"k": "v"})
+        show("pct", lambda: "%*%" % (5,))
+        # TWO OVERFLOW WORDINGS, because CPython reads the width through
+        # `PyLong_AsSsize_t` and the precision through `_PyLong_AsInt`: the
+        # precision is refused four billion times lower down.
+        show("big p", lambda: "%.*f" % (2 ** 40, 1.5))
+    """,
     "percent_refuses_an_argument_its_conversion_cannot_take": """
         # `"%d" % "a"` RAISED A ValueError. `%` is implemented by translating
         # into the format MINI-LANGUAGE and handing the argument to

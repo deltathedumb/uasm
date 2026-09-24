@@ -7258,6 +7258,78 @@ def _percent_needs(h, conv, value):
     return None
 
 
+def _percent_digits(value, conv, flags, width, prec):
+    """`%.5d` -- a precision on an INTEGER conversion, which is a minimum
+    number of DIGITS.
+
+    THE MINI-LANGUAGE HAS NO SUCH THING. `format(42, ".5d")` is refused
+    outright -- `Precision not allowed in integer format specifier` -- which
+    is what this path used to raise, while the C's own mini-language quietly
+    dropped the precision and printed `42`: two wrong answers, one of them
+    silent. printf's precision is a zero fill applied to the digits alone,
+    AFTER the sign and AFTER any `0x`, so it is spelled here as the one
+    thing the mini-language does have for that -- a `0`-filled width that
+    counts the sign and the prefix -- and the field width is laid over the
+    result afterwards.
+
+    THE `0` FLAG STILL APPLIES, which is where Python parts from C's printf:
+    `"%08.5d" % 42` is `'00000042'`, not three spaces and five digits. So a
+    zero-filled width simply widens the digit fill to the whole field.
+    """
+    kind = "d" if conv in ("i", "u") else conv
+    sign = "+" if "+" in flags else (" " if " " in flags else "")
+    # `%#d` IS ACCEPTED AND MEANS NOTHING, so the prefix is only counted
+    # where there is one to count.
+    alt = "#" if ("#" in flags and kind != "d") else ""
+    digits = (int(prec[1:] or 0) + (1 if (value < 0 or sign) else 0)
+              + (2 if alt else 0))
+    if "0" in flags and "-" not in flags and width:
+        digits = max(digits, int(width))
+    body = format(value, sign + alt + ("0" + str(digits) if digits else "")
+                  + kind)
+    if not width:
+        return body
+    return body.ljust(int(width)) if "-" in flags else body.rjust(int(width))
+
+
+def _percent_star(h, args, at, sized):
+    """The argument behind a `%*d` width or a `%.*f` precision.
+
+    IT IS FETCHED LIKE ANY OTHER POSITIONAL ARGUMENT, and that is what
+    settles the mapping form without a case of its own: `"%(k)*s" % {...}`
+    has no positional arguments to draw on, so CPython's `getnextarg` hands
+    the MAPPING itself over as the star's argument -- which is not an int,
+    and the refusal below is exactly what it reports for it.
+
+    REFUSED BY `PyLong_Check` AND NOTHING ELSE. A float is turned away here
+    where `%d` of one truncates, and an object carrying `__index__` is turned
+    away where `%d` of one is asked for it: the star reads a C integer out of
+    the argument rather than converting anything. An int SUBCLASS passes,
+    because `PyLong_Check` is what asks.
+
+    TWO OVERFLOW WORDINGS, and they are not interchangeable: CPython reads
+    the width through `PyLong_AsSsize_t` and the precision through
+    `_PyLong_AsInt`, so one names `ssize_t` and the other names `int` -- and
+    the precision is refused at a threshold four billion times lower.
+    """
+    if at >= len(args):
+        h._fail("TypeError", "not enough arguments for format string")
+        return None
+    value = args[at]
+    if isinstance(value, Instance) and _is_int_like(value.held):
+        value = value.held
+    if not _is_int_like(value):
+        h._fail("TypeError", "* wants int")
+        return None
+    span = int(value)
+    limit = 1 << (63 if sized else 31)
+    if not -limit <= span < limit:
+        h._fail("OverflowError", "Python int too large to convert to C "
+                + ("ssize_t" if sized else "int"))
+        return None
+    return span, at + 1
+
+
 def _percent(h, fmt, right):
     """`"%d %s" % (1, "a")` -- printf-style formatting.
 
@@ -7305,12 +7377,40 @@ def _percent(h, fmt, right):
         flags, width, prec = set(), "", ""
         while i < n and text[i] in "-+ 0#":
             flags.add(text[i]); i += 1
-        while i < n and text[i].isdigit():
-            width += text[i]; i += 1
-        if i < n and text[i] == ".":
-            prec += text[i]; i += 1
+        if i < n and text[i] == "*":
+            # `%*d` TAKES ITS WIDTH FROM THE ARGUMENTS, and it is read HERE
+            # rather than copied into the spec below: the mini-language has
+            # no `*`, so a star left in the width fell through to the
+            # conversion and came back as `Unknown format code '*'`.
+            i += 1
+            got = _percent_star(h, args, at, True)
+            if got is None:
+                return 0
+            span, at = got
+            # A NEGATIVE WIDTH IS THE `-` FLAG. printf's rule, and the flag
+            # is the only spelling the mini-language has for it, so
+            # `"%*s" % (-8, "hi")` left-aligns in a field of eight.
+            if span < 0:
+                flags.add("-"); span = -span
+            width = str(span)
+        else:
             while i < n and text[i].isdigit():
-                prec += text[i]; i += 1
+                width += text[i]; i += 1
+        if i < n and text[i] == ".":
+            i += 1
+            if i < n and text[i] == "*":
+                i += 1
+                got = _percent_star(h, args, at, False)
+                if got is None:
+                    return 0
+                span, at = got
+                # A NEGATIVE PRECISION IS ZERO -- not an error, and not the
+                # alignment flag its width twin turns into.
+                prec = "." + str(span if span > 0 else 0)
+            else:
+                prec = "."
+                while i < n and text[i].isdigit():
+                    prec += text[i]; i += 1
         if i >= n:
             return h._fail("ValueError", "incomplete format")
         conv = text[i]; i += 1
@@ -7424,7 +7524,10 @@ def _percent(h, fmt, right):
             if conv in _PERCENT_REAL and isinstance(value, float):
                 value = int(value)
         try:
-            out.append(format(value, spec))
+            if prec and conv in _PERCENT_REAL + _PERCENT_INT:
+                out.append(_percent_digits(value, conv, flags, width, prec))
+            else:
+                out.append(format(value, spec))
         except (ValueError, TypeError) as exc:
             return h._fail_like(exc)
     # A MAPPING has nothing to leave unconsumed: its entries are reached by

@@ -948,6 +948,111 @@ static int apy_percent_needs(char conv, apy_value value) {
     return 0;
 }
 
+/* A run of decimal digits as a number, saturating rather than wrapping: the
+   width or the precision of a `%` spec, read out of the format itself. */
+static int64_t apy_percent_digit_run(const char *p, int64_t n) {
+    int64_t k, got = 0;
+    for (k = 0; k < n; k++) {
+        if (got > (INT64_MAX - 9) / 10) return INT64_MAX;
+        got = got * 10 + (p[k] - '0');
+    }
+    return got;
+}
+
+/* `%.5d` -- a precision on an INTEGER conversion, which is a minimum number
+   of DIGITS.
+
+   THE MINI-LANGUAGE HAS NO SUCH THING, and this runtime's own copy of it
+   quietly ignored the precision it was handed, so `"%.5d" % 42` printed `42`
+   where CPython prints `00042` -- a wrong answer that does not announce
+   itself, while the interpreter refused the same line outright. printf's
+   precision is a zero fill applied to the digits alone, AFTER the sign and
+   AFTER any `0x`, so it is spelled here as the one thing the mini-language
+   does have for that -- a `0`-filled width counting the sign and the prefix
+   -- and the field width is laid over the result afterwards.
+
+   THE `0` FLAG STILL APPLIES, which is where Python parts from C's printf:
+   `"%08.5d" % 42` is `'00000042'`, so a zero-filled width simply widens the
+   digit fill to the whole field. The interpreter's twin is
+   `_percent_digits`. */
+static apy_value apy_percent_digits(apy_value value, char conv, int plus,
+                                    int space, int hash, int zero, int minus,
+                                    int64_t width, int64_t prec) {
+    char inner[48], outer[32];
+    int64_t digits, n = 0;
+    apy_value body;
+    char kind = (conv == 'i' || conv == 'u') ? 'd' : conv;
+    /* `%#d` IS ACCEPTED AND MEANS NOTHING, so the prefix is only counted
+       where there is one to count. */
+    int alt = hash && kind != 'd';
+    int neg = O(value)->kind == APY_BIG_K ? O(value)->v.big.neg
+            : (O(value)->kind == APY_INT_K && O(value)->v.i < 0);
+    digits = prec + ((neg || plus || space) ? 1 : 0) + (alt ? 2 : 0);
+    if (zero && !minus && width > digits) digits = width;
+    if (plus) inner[n++] = '+';
+    else if (space) inner[n++] = ' ';
+    if (alt) inner[n++] = '#';
+    if (digits > 0)
+        n += snprintf(inner + n, sizeof inner - (size_t)n, "0%lld",
+                      (long long)digits);
+    inner[n++] = kind;
+    body = apy_format(value, apy_str_copy(inner, n));
+    if (!body || width <= 0) return body;
+    n = snprintf(outer, sizeof outer, "%c%lld", minus ? '<' : '>',
+                 (long long)width);
+    return apy_format(body, apy_str_copy(outer, n));
+}
+
+/* The argument behind a `%*d` width or a `%.*f` precision: 1, with the number
+   through `slot` and the cursor advanced, or 0 with the error set.
+
+   IT IS FETCHED LIKE ANY OTHER POSITIONAL ARGUMENT, and that is what settles
+   the mapping form without a case of its own: `"%(k)*s" % {...}` has no
+   positional arguments to draw on, so the star is handed the MAPPING itself
+   -- which is not an int, and the refusal below is exactly what CPython
+   reports for it.
+
+   REFUSED BY `PyLong_Check` AND NOTHING ELSE. A float is turned away here
+   where `%d` of one truncates, and a class carrying `__index__` is turned
+   away where `%d` of one is asked for it: the star reads a C integer out of
+   the argument rather than converting anything. An int SUBCLASS passes,
+   because `PyLong_Check` is what asks.
+
+   TWO OVERFLOW WORDINGS, and they are not interchangeable: CPython reads the
+   width through `PyLong_AsSsize_t` and the precision through `_PyLong_AsInt`,
+   so one names `ssize_t` and the other names `int` -- and the precision is
+   refused at a threshold four billion times lower. */
+static int apy_percent_star(apy_value right, int many, int64_t supplied,
+                            int64_t *at, int64_t *slot, int sized) {
+    apy_value v;
+    if (*at >= supplied) {
+        apy_fail("TypeError", "not enough arguments for format string");
+        return 0;
+    }
+    v = many ? O(right)->v.q.items[*at] : right;
+    (*at)++;
+    if (O(v)->kind == APY_INST_K && O(v)->v.o.held
+            && apy_is_int_like(O(v)->v.o.held))
+        v = O(v)->v.o.held;
+    if (!apy_is_int_like(v)) {
+        apy_fail("TypeError", "* wants int");
+        return 0;
+    }
+    /* A BIG IS READ BEFORE `v.i` IS, because `v.i` on one is the limb
+       POINTER: the overflow this reports is the reason the value never gets
+       that far. */
+    if (apy_is_big(v)
+            || (!sized && (O(v)->v.i > 2147483647LL
+                           || O(v)->v.i < -2147483647LL - 1))) {
+        apy_fail("OverflowError",
+                 sized ? "Python int too large to convert to C ssize_t"
+                       : "Python int too large to convert to C int");
+        return 0;
+    }
+    *slot = O(v)->v.i;
+    return 1;
+}
+
 static apy_value apy_str_percent(apy_value fmt, apy_value right) {
     const char *p = APY_CSTR(fmt);
     int64_t n = O(fmt)->v.s.n, i = 0, out_cap = n + 64, out_n = 0, at = 0;
@@ -1020,6 +1125,11 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
            `+<` for `%-+d`, which is not a spec at all. */
         int plus = 0, space = 0, hash = 0, is_text;
         int64_t wid_at, wid_n = 0, prec_at, prec_n = 0;
+        /* THE STAR FORMS ARE READ, NOT COPIED, which is why they need slots
+           of their own: the digits below are copied into the spec verbatim,
+           and the mini-language has no `*` for them to land in. */
+        int64_t star_w = 0, star_p = 0;
+        int starred_w = 0, starred_p = 0;
         while (i < n && (p[i] == '-' || p[i] == '+' || p[i] == ' '
                          || p[i] == '0' || p[i] == '#')) {
             if (p[i] == '-') minus = 1;
@@ -1030,11 +1140,36 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
             i++;
         }
         wid_at = i;
-        while (i < n && p[i] >= '0' && p[i] <= '9') { i++; wid_n++; }
+        if (i < n && p[i] == '*') {
+            i++;
+            if (!apy_percent_star(right, many, supplied, &at, &star_w, 1)) {
+                free(out); return 0;
+            }
+            /* A NEGATIVE WIDTH IS THE `-` FLAG. printf's rule, and the flag
+               is the only spelling the mini-language has for it, so
+               `"%*s" % (-8, "hi")` left-aligns in a field of eight. */
+            if (star_w < 0) { minus = 1; star_w = -star_w; }
+            starred_w = 1;
+        } else {
+            while (i < n && p[i] >= '0' && p[i] <= '9') { i++; wid_n++; }
+        }
         prec_at = i;
         if (i < n && p[i] == '.') {
-            i++; prec_n++;
-            while (i < n && p[i] >= '0' && p[i] <= '9') { i++; prec_n++; }
+            i++;
+            if (i < n && p[i] == '*') {
+                i++;
+                if (!apy_percent_star(right, many, supplied, &at,
+                                      &star_p, 0)) {
+                    free(out); return 0;
+                }
+                /* A NEGATIVE PRECISION IS ZERO -- not an error, and not the
+                   alignment flag its width twin turns into. */
+                if (star_p < 0) star_p = 0;
+                starred_p = 1;
+            } else {
+                prec_n++;
+                while (i < n && p[i] >= '0' && p[i] <= '9') { i++; prec_n++; }
+            }
         }
         if (i >= n) {
             free(out);
@@ -1054,8 +1189,16 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
         /* A zero fill on TEXT is not a thing printf does either. */
         if (zero && !minus && !is_text) spec[sn++] = '0';
         { int64_t k;
-          for (k = 0; k < wid_n; k++) spec[sn++] = p[wid_at + k];
-          for (k = 0; k < prec_n; k++) spec[sn++] = p[prec_at + k]; }
+          if (starred_w)
+              sn += snprintf(spec + sn, sizeof spec - (size_t)sn,
+                             "%lld", (long long)star_w);
+          else
+              for (k = 0; k < wid_n; k++) spec[sn++] = p[wid_at + k];
+          if (starred_p)
+              sn += snprintf(spec + sn, sizeof spec - (size_t)sn,
+                             ".%lld", (long long)star_p);
+          else
+              for (k = 0; k < prec_n; k++) spec[sn++] = p[prec_at + k]; }
         if (!named) {
             if (at >= supplied) {
                 free(out);
@@ -1154,7 +1297,18 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
         }
         if (!value) { free(out); return 0; }
         spec[sn] = 0;
-        shown = apy_format(value, apy_str_copy(spec, sn));
+        if ((prec_n || starred_p)
+                && (conv == 'd' || conv == 'i' || conv == 'u' || conv == 'x'
+                    || conv == 'X' || conv == 'o'))
+            shown = apy_percent_digits(
+                value, conv, plus, space, hash, zero, minus,
+                starred_w ? star_w
+                          : apy_percent_digit_run(p + wid_at, wid_n),
+                starred_p ? star_p
+                          : apy_percent_digit_run(p + prec_at + 1,
+                                                  prec_n - 1));
+        else
+            shown = apy_format(value, apy_str_copy(spec, sn));
         if (!shown) { free(out); return 0; }
         /* ONE CONVERSION AND NOTHING ELSE HANDS THE ARGUMENT BACK: `"%s" % s`
            IS `s` in CPython, because `%s` calls `PyObject_Str` -- which
