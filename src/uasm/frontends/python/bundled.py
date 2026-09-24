@@ -325,7 +325,12 @@ def _dependencies(wanted, have):
         seen.add(name)
         source = (_HERE / f"{name}.py").read_text(encoding="utf-8")
         tree = ast.parse(source, filename=f"<bundled {name}>")
-        for stmt in tree.body:
+        # `ast.walk` AND NOT `tree.body`, for the reason `splice` gives on
+        # the program's side: `import copy` INSIDE A FUNCTION is the same
+        # import. argparse makes six of them -- `copy`, `textwrap`,
+        # `warnings`, `shutil`, `difflib` and `_colorize` are all imported
+        # where they are used, to keep its own import cheap.
+        for stmt in ast.walk(tree):
             if isinstance(stmt, ast.ImportFrom) and stmt.module in have:
                 visit(stmt.module)
             elif isinstance(stmt, ast.Import):
@@ -558,6 +563,57 @@ class _Rewrite(ast.NodeTransformer):
         return node
 
 
+def _hoist_imports(parsed, have, defined, borrowed, brought) -> None:
+    """A bundled module's imports of another bundled module that sit INSIDE
+    a function or a class, dropped and recorded as if written at the top.
+
+    `import copy` inside a function binds a LOCAL, and `_bound_locally` says
+    so -- which is exactly what stopped `copy.copy(items)` from being
+    rewritten to the spliced definition: a local is the function's own
+    business. With the statement removed there is no local any more, and the
+    name means the module everywhere in this file that does not bind it
+    itself, which is also what it meant in CPython, where every one of those
+    imports returns the same cached module object.
+
+    A NAME THE MODULE ALSO DEFINES IS LEFT ALONE rather than guessed at: two
+    meanings for one spelling in one file cannot share a module-wide map,
+    and leaving the statement in place reports the import as unresolved
+    instead of quietly pointing one of them at the other.
+    """
+    for node in ast.walk(parsed):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+            continue
+        for holder in ast.walk(node):
+            for field in ("body", "orelse", "finalbody"):
+                stmts = getattr(holder, field, None)
+                if not isinstance(stmts, list):
+                    continue
+                kept = []
+                for stmt in stmts:
+                    if isinstance(stmt, ast.Import) \
+                            and all(a.name in have for a in stmt.names) \
+                            and not any((a.asname or a.name) in defined
+                                        for a in stmt.names):
+                        for alias in stmt.names:
+                            brought[alias.asname or alias.name] = alias.name
+                        continue
+                    if isinstance(stmt, ast.ImportFrom) \
+                            and stmt.module in have \
+                            and not any((a.asname or a.name) in defined
+                                        for a in stmt.names):
+                        for alias in stmt.names:
+                            borrowed[alias.asname or alias.name] = _mangled(
+                                stmt.module, alias.name)
+                        continue
+                    kept.append(stmt)
+                if len(kept) != len(stmts):
+                    # A BODY CANNOT BE EMPTY, and one holding nothing but the
+                    # import would be.
+                    stmts[:] = kept or [ast.copy_location(ast.Pass(),
+                                                          stmts[0])]
+
+
 def splice(tree: ast.Module, source, sink) -> ast.Module:
     """Rewrite `tree` so its bundled imports become ordinary definitions.
 
@@ -682,6 +738,7 @@ def splice(tree: ast.Module, source, sink) -> ast.Module:
                 continue
             body.append(stmt)
         parsed.body = body
+        _hoist_imports(parsed, have, defined, borrowed, brought)
         renamed = _Rename(module, defined, borrowed, brought,
                           members).visit(parsed)
         # The docstring goes: it is the module's, and a spliced statement that
