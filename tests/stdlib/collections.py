@@ -240,3 +240,9 @@ print(us.split(), us.replace("hi", "yo"), us.title(), us.strip())
 print(us.startswith("hi"), us.endswith("re"), us.find("there"))
 print(UserString("a") * 3, UserString("A").lower(), hash(us) == hash("hi there"))
 print(sorted([UserString("b"), UserString("a")]))
+
+# EMPTY REPRS: `OrderedDict()` and `Counter()` drop their braces when there is
+# nothing to put in them; `defaultdict` and `ChainMap` keep theirs.
+print(repr(OrderedDict()), repr(Counter()), repr(defaultdict(int)),
+      repr(deque()), repr(ChainMap()), repr(OrderedDict(a=1)),
+      repr(Counter("aab")))

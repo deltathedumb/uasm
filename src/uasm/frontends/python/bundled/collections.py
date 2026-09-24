@@ -494,6 +494,9 @@ class Counter(dict):
         return self.copy()
 
     def __repr__(self):
+        # EMPTY IS `Counter()`, as it is for `OrderedDict`.
+        if not len(self):
+            return "Counter()"
         pairs = self.most_common()
         parts = []
         for one in pairs:
@@ -634,6 +637,11 @@ class OrderedDict(dict):
         return got if got is NotImplemented else not got
 
     def __repr__(self):
+        # EMPTY IS `OrderedDict()`, with no braces -- CPython's spelling, and
+        # the one a program reading its own repr back expects. The braces
+        # only appear once there is something to put in them.
+        if not len(self):
+            return "OrderedDict()"
         parts = []
         for key in list(self):
             parts.append(repr(key) + ": " + repr(self[key]))
