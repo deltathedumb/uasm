@@ -299,7 +299,7 @@ while the object is still in use:
 
 ## Rebuilt so far
 
-**50 modules, and every one of them has a differential test.** Nothing is in
+**51 modules, and every one of them has a differential test.** Nothing is in
 the table below without a `tests/stdlib/<module>.py` that CPython 3.14 and
 uasm both run to identical bytes, and nothing is in `bundled/` without
 a row here -- the two are checked against each other rather than kept in
@@ -359,6 +359,7 @@ depth it claims.
 | `difflib` | `SequenceMatcher` (`isjunk`, `autojunk`, `set_seq1`/`set_seq2`, `find_longest_match` with bounds, `get_matching_blocks`, `get_opcodes`, `get_grouped_opcodes`, the three ratios, `b2j`/`bjunk`/`bpopular`), `Match`, `get_close_matches`, `Differ`/`ndiff` with intraline `?` marking (3.14's windowed synch search), `restore`, `unified_diff`, `context_diff`, `diff_bytes`, `IS_LINE_JUNK`, `IS_CHARACTER_JUNK` -- the search in CPython's order, so every ratio, opcode and `?` mark agrees, and the in-place trim `get_grouped_opcodes` makes to the cached opcodes is kept. NOT `HtmlDiff`, `SequenceMatcher[...]`. |
 | `shlex` | `split` (`comments=`, `posix=`), `quote`, `join`, and the `shlex` lexer over a string or a stream, in POSIX and non-POSIX mode, with every attribute a program reshapes it through (`commenters`, `wordchars`, `whitespace`, `whitespace_split`, `quotes`, `escape`, `escapedquotes`, `source`, `debug`), `punctuation_chars`, `get_token`/`push_token`/`read_token`, `push_source`/`pop_source`, `sourcehook`, `error_leader`, iteration -- CPython's own state names, since `lex.state` is readable and `debug` prints it. NOT a lexer with no stream, which CPython reads from `sys.stdin` (refused BY NAME: standard input is not bundled). |
 | `pprint` | `pprint`, `pformat`, `pp`, `saferepr`, `isreadable`, `isrecursive`, and `PrettyPrinter` with `indent`, `width`, `depth`, `stream`, `compact`, `sort_dicts`, `underscore_numbers` -- laid out as CPython lays them out: dicts, lists, tuples, sets, strings split at line ends and between words, bytes split every four bytes, dataclasses with a generated repr, `SimpleNamespace`, and `collections`' `OrderedDict`, `defaultdict`, `Counter`, `ChainMap`, `deque`, `UserDict`, `UserList`, `UserString`; recursion and `depth`. The printer is chosen by the class a repr comes from rather than by `__repr__` function identity, which this compiler does not keep. NOT `types.MappingProxyType` (not bundled), a printer registered by writing into the private `_dispatch`. |
+| `getopt` | `getopt` and `gnu_getopt` over short options (flags, required `:` and optional `::` arguments, clusters, glued and separate arguments) and long options (`name`, `name=`, `name=?`, `--name=value`, unique and ambiguous abbreviations), `--`, a lone `-`; `gnu_getopt`'s intermixing, `+` prefix, `POSIXLY_CORRECT` and in-order `-` prefix; `GetoptError`/`error` with `msg`, `opt` and `args` for every message. Complete. |
 
 **Restoring is not free, and that is the point of stating coverage.** Three of
 `itertools`'s seven functions were wrong in ways the old suite never asked

@@ -771,6 +771,7 @@ def apy_known_modules() -> ptr:
         b"fractions\0"
         b"functools\0"
         b"gc\0"
+        b"getopt\0"
         b"heapq\0"
         b"inspect\0"
         b"io\0"
