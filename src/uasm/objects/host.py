@@ -11577,6 +11577,15 @@ def _apy_default_getattr(h, a):
         # Through the CLASS a method is UNBOUND: `C.m(x)` passes x as self.
         if found is not _ABSENT:
             return h._value(found)
+        # AN EXCEPTION CLASS REACHES BaseException's `__init__`, which takes
+        # any number of arguments and sets `args` from them: the hierarchy
+        # above it is a table of names rather than classes, so no walk finds
+        # it, and `Exception.__init__(self, msg, opt)` answered `object`'s,
+        # which kept `args` at what the constructor had been given. The C's
+        # `apy_default_getattr` draws the same line for the same spelling.
+        if name == "__init__" and (id(obj) in h.exc_types
+                                   or h.exc_class.get(obj.name) is obj):
+            return h._new(Native("__init__", _exc_init))
         # AN ATTRIBUTE OF THE CLASS'S OWN TYPE. `Quacks.register(Duck)` is a
         # method the METACLASS defines, and the class is its receiver -- the
         # same relationship an instance has to its class, one level up. Asked

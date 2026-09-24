@@ -12677,6 +12677,30 @@ PROGRAMS = {
         print("statement:", members)
         print("eager   :", [m.name for m in list(Colour)])
     """,
+    "an_explicit_base_init_sets_an_exceptions_args": """
+        # `Exception.__init__(self, msg, opt)` READ OFF THE CLASS is
+        # BaseException's `__init__`, which sets `args` from what it is
+        # given. The interpreter answered `object`'s there, which did
+        # nothing, so `args` stayed what the CONSTRUCTOR was called with:
+        # `getopt.GetoptError("plain")` had `args == ('plain',)` where
+        # CPython has `('plain', '')`.
+        class OptError(Exception):
+            def __init__(self, msg, opt=""):
+                self.msg = msg
+                Exception.__init__(self, msg, opt)
+
+        class Renamed(ValueError):
+            def __init__(self, code):
+                ValueError.__init__(self, "code %d" % code)
+
+        class Nothing(Exception):
+            def __init__(self, *parts):
+                Exception.__init__(self)
+
+        print(OptError("plain").args, OptError("m", "x").args)
+        print(Renamed(4).args, str(Renamed(5)))
+        print(Nothing(1, 2).args, repr(str(Nothing(3))))
+    """,
     "a_builtin_subclass_is_filled_from_any_iterable": """
         # `super().__init__(source)` IN A dict OR list SUBCLASS is the
         # builtin's `__init__`, which takes any iterable. The interpreter
