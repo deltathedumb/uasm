@@ -5,7 +5,8 @@
 # replace(); make_dataclass; InitVar; ClassVar exclusion; __post_init__;
 # inheritance and field override order; the __hash__ table; the split
 # overwrite policy; the non-default-after-default error; and the four __init__
-# arity errors. NOT covered here: slots/weakref_slot (refused by name, tested
+# arity errors; the generated methods' names, qualnames and `__wrapped__`.
+# NOT covered here: slots/weakref_slot (refused by name, tested
 # as refusals), field(doc=), Field[int], and abc.update_abstractmethods.
 #
 # TWO THINGS ARE DELIBERATELY NOT COMPARED, both because they cannot be:
@@ -584,5 +585,33 @@ try:
         x: int
 except TypeError as exc:
     print("TypeError:", exc)
+
+# ---- the generated methods' names -------------------------------------
+# `P.__init__.__qualname__` is `P.__init__`: the class and the method, not
+# the closure the method was made in. `__repr__` keeps its body as
+# `__wrapped__`, whose qualname names `__create_fn__` -- the shape a program
+# (pprint is one) reads to tell a generated repr from a written one -- and
+# `__replace__` is CPython's one module-level `_replace`.
+@dataclass(order=True, frozen=True)
+class Named:
+    x: int
+
+
+for name in ("__init__", "__repr__", "__eq__", "__lt__", "__le__", "__gt__",
+             "__ge__", "__hash__", "__setattr__", "__delattr__",
+             "__replace__"):
+    method = Named.__dict__[name]
+    wrapped = getattr(method, "__wrapped__", None)
+    print(name, method.__name__, method.__qualname__,
+          wrapped.__qualname__ if wrapped is not None else None)
+
+
+class Holder:
+    @dataclass
+    class Inside:
+        a: int
+
+
+print(Holder.Inside.__init__.__qualname__, Holder.Inside(3))
 
 print("done")

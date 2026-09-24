@@ -623,21 +623,32 @@ def _make_repr(cls, specs):
     #: the object's identity.
     running = set()
 
+    def body(self):
+        parts = []
+        for spec in shown:
+            parts.append("%s=%r" % (spec.name, getattr(self, spec.name)))
+        # `__qualname__`, NOT `__name__`, and read off the instance's own
+        # class at call time so a plain subclass prints its own name.
+        return "%s(%s)" % (self.__class__.__qualname__, ", ".join(parts))
+
+    # TWO FUNCTIONS, as CPython has: the body its `__create_fn__` makes, and
+    # the recursion guard around it, which keeps the body as `__wrapped__`.
+    # A program -- `pprint` is one -- tells a GENERATED repr from a written
+    # one by exactly that shape, so it is reproduced rather than folded away.
+    body.__name__ = "__repr__"
+    body.__qualname__ = "__create_fn__.<locals>.__repr__"
+
     def __repr__(self):
         key = id(self)
         if key in running:
             return "..."
         running.add(key)
         try:
-            parts = []
-            for spec in shown:
-                parts.append("%s=%r" % (spec.name, getattr(self, spec.name)))
-            # `__qualname__`, NOT `__name__`, and read off the instance's own
-            # class at call time so a plain subclass prints its own name.
-            return "%s(%s)" % (self.__class__.__qualname__, ", ".join(parts))
+            return body(self)
         finally:
             running.discard(key)
 
+    __repr__.__wrapped__ = body
     return __repr__
 
 
@@ -747,6 +758,24 @@ def _make_frozen_delattr(cls, names):
 
 # ── the decorator ───────────────────────────────────────────────────────────
 
+def _qualified(cls, value, name):
+    """A generated method named as CPython names it: `P.__init__`.
+
+    Without this a program reading `P.__init__.__qualname__` saw the closure
+    it was made in -- under the SPLICED name of this module's own function,
+    `_asmpy_bundled_11_dataclasses__make_init.<locals>.__init__` -- where
+    CPython answers the class and the method. A tuple (`__match_args__`)
+    and None (`__hash__`) are not functions and are left alone.
+
+    THE NAME TOO, not only the qualname: the four ordering methods are made
+    by one factory, so each was called `compare` where CPython's are
+    `__lt__`, `__le__`, `__gt__` and `__ge__`."""
+    if callable(value) and not isinstance(value, type)             and hasattr(value, "__name__"):
+        value.__name__ = name
+        value.__qualname__ = cls.__qualname__ + "." + name
+    return value
+
+
 def _set_new(cls, name, value):
     """Install a generated method only if the body did not write one.
 
@@ -755,6 +784,8 @@ def _set_new(cls, name, value):
     """
     if name in cls.__dict__:
         return False
+    if name != "__replace__":
+        _qualified(cls, value, name)
     setattr(cls, name, value)
     return True
 
@@ -774,7 +805,7 @@ def _set_or_raise(cls, name, value):
                            " Consider using functools.total_ordering"
                            if name in ("__lt__", "__le__", "__gt__", "__ge__")
                            else ""))
-    setattr(cls, name, value)
+    setattr(cls, name, _qualified(cls, value, name))
     return True
 
 
@@ -885,6 +916,12 @@ def _process(cls, init, repr, eq, order, unsafe_hash, frozen, match_args,
     def __replace__(self, **changes):
         return replace(self, **changes)
 
+    # NAMED `_replace`, which is what CPython's is: its `__replace__` is one
+    # module-level function assigned to every dataclass, never qualified by
+    # a class.
+    __replace__.__name__ = "_replace"
+    __replace__.__qualname__ = "_replace"
+
     # THROUGH THE SILENT-SKIP PATH, so a body-defined `__replace__` wins --
     # and installed unconditionally otherwise, including under `init=False`,
     # where it raises when called rather than being absent.
@@ -922,12 +959,12 @@ def _apply_hash(cls, specs, eq, frozen, unsafe_hash):
         if explicit:
             raise TypeError("Cannot overwrite attribute __hash__ in class %s"
                             % (cls.__name__,))
-        cls.__hash__ = _make_hash(cls, specs)
+        cls.__hash__ = _qualified(cls, _make_hash(cls, specs), "__hash__")
         return
     if explicit:
         return
     if eq and frozen:
-        cls.__hash__ = _make_hash(cls, specs)
+        cls.__hash__ = _qualified(cls, _make_hash(cls, specs), "__hash__")
     elif eq:
         cls.__hash__ = None
 
