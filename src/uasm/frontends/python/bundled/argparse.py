@@ -24,14 +24,14 @@ formatter classes, laid out exactly as CPython lays them out, including
 the usage wrap; `FileType`; `Namespace` (`repr`, `==`, `in`); and colour,
 decided by the same `PYTHON_COLORS`/`NO_COLOR`/`FORCE_COLOR`/`TERM` rules.
 
-NOT COVERED: `suggest_on_error=True`, refused BY NAME when it would first
-matter -- CPython's suggestions come from `difflib.get_close_matches`, and
-`difflib` is not bundled yet, so a parser asking for them would otherwise
-print the plain error and look as if it had nothing to suggest. Messages
-are never TRANSLATED: CPython asks `gettext` for the `messages` domain,
-which no CPython install ships a catalog for, so its answer is the English
-text too -- `_` and `ngettext` below are that answer, not an approximation
-of it. An interactive terminal's WIDTH: help is laid out for `$COLUMNS`
+`suggest_on_error=True` suggests from `difflib.get_close_matches`, as
+CPython's does, for a mistyped choice and a mistyped subcommand alike.
+
+NOT COVERED: TRANSLATION. Messages are never translated -- CPython asks
+`gettext` for the `messages` domain, which no CPython install ships a
+catalog for, so its answer is the English text too, and `_` and
+`ngettext` below are that answer rather than an approximation of it. An
+interactive terminal's WIDTH: help is laid out for `$COLUMNS`
 columns, or 80, where CPython asks the terminal itself -- the two agree
 whenever output goes to a pipe or a file, and `$COLUMNS` is read the same
 way. A program run as `python -m pkg` or from a zip is named after its
@@ -2332,14 +2332,23 @@ class ArgumentParser(_AttributeHolder, _ActionsContainer):
         if isinstance(choices, str):
             choices = iter(choices)
         if value not in choices:
-            if self.suggest_on_error:
-                raise TypeError('argparse: suggest_on_error=True is not '
-                                'supported -- its suggestions come from '
-                                'difflib, which is not bundled yet')
             args = {'value': str(value),
                     'choices': ', '.join([repr(str(choice))
                                           for choice in action.choices])}
             msg = _('invalid choice: %(value)r (choose from %(choices)s)')
+            # A SUGGESTION ONLY BETWEEN STRINGS: the closest choice by
+            # `difflib`'s ratio, when one scores 0.6 or better. Subcommand
+            # names come through here too, as the choices of the PARSER
+            # action.
+            if self.suggest_on_error and isinstance(value, str):
+                if all(isinstance(choice, str) for choice in action.choices):
+                    import difflib
+                    suggestions = difflib.get_close_matches(
+                        value, action.choices, 1)
+                    if suggestions:
+                        args['closest'] = suggestions[0]
+                        msg = _('invalid choice: %(value)r, maybe you meant '
+                                '%(closest)r? (choose from %(choices)s)')
             raise ArgumentError(action, msg % args)
 
     # -- help ----------------------------------------------------------------

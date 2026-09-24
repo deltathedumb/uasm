@@ -6,7 +6,8 @@
 # (store, store_const, store_true/false, append, append_const, extend,
 # count, help, version, BooleanOptionalAction, a program's own Action);
 # type (a callable raising ArgumentTypeError, int, float), choices (a list,
-# a range, a string), default (converted when it is a string), required,
+# a range, a string) and suggest_on_error's closest match for a choice or a
+# subcommand, default (converted when it is a string), required,
 # metavar (tuples), dest, deprecated; argument groups, mutually exclusive
 # groups (required or not), subparsers (aliases, help, title/description,
 # metavar, dest, required, deprecated, a subparser's own defaults and
@@ -353,6 +354,26 @@ run(r, ["--n", "x"])
 run(r, ["--f", "1e3", "--choice", "3", "--letters", "b"])
 run(r, ["--choice", "9"])
 run(r, ["--letters", "ab"])
+
+# ---- suggestions ---------------------------------------------------------------
+# The closest choice by difflib's ratio, for a mistyped choice and a mistyped
+# subcommand alike -- and none when nothing is close, or the choices are not
+# all strings.
+sg = argparse.ArgumentParser(prog="sg", suggest_on_error=True)
+sg.add_argument("--mode", choices=["fast", "slow", "careful"])
+ssub = sg.add_subparsers(dest="cmd")
+ssub.add_parser("commit")
+ssub.add_parser("checkout")
+run(sg, ["--mode", "fsat"])
+run(sg, ["--mode", "zzzz"])
+run(sg, ["comit"])
+run(sg, ["chekout"])
+nums = argparse.ArgumentParser(prog="nums", suggest_on_error=True)
+nums.add_argument("--n", type=int, choices=[1, 2, 3])
+run(nums, ["--n", "4"])
+quiet = argparse.ArgumentParser(prog="quiet")
+quiet.add_argument("--mode", choices=["fast", "slow"])
+run(quiet, ["--mode", "fsat"])
 
 # ---- errors --------------------------------------------------------------------
 e = argparse.ArgumentParser(prog="e", exit_on_error=False)
