@@ -1061,11 +1061,11 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
     /* A TUPLE ON THE RIGHT IS THE ARGUMENT LIST; anything else is one
        argument. That is the whole of the rule, and it is why `"%s" % (1, 2)`
        is an error while `"%s" % [1, 2]` prints the list. */
-    int many = O(right)->kind == APY_TUPLE_K;
+    int many;
     /* A MAPPING ON THE RIGHT supplies NAMED fields only -- `"%(x)s" % {...}`
        -- and nothing is consumed positionally, so an unused entry is not an
        error. `"ab" % {"ab": 1}` is just `"ab"`. */
-    int mapping = O(right)->kind == APY_DICT_K;
+    int mapping;
     /* THE ONE ARGUMENT THIS WHOLE FORMAT IS, or 0 -- see where it is set. */
     apy_value lone = 0;
     /* THE SINGLE ARGUMENT a non-tuple operand is, which a `%(key)` lookup
@@ -1076,7 +1076,17 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
        `"%(a)*s"` reads its width out of the VALUE. The found value used to
        ride beside the arguments instead, so a bare `%s` after a key still
        saw the mapping and printed it. */
-    apy_value cur = right;
+    apy_value cur;
+    /* A TUPLE SUBCLASS IS THE ARGUMENT LIST, because CPython asks
+       `PyTuple_Check` and a subclass passes it: `"%d-%d" % point` for a
+       namedtuple formats its fields, where this took the whole point for
+       one argument. */
+    if (O(right)->kind == APY_INST_K && O(right)->v.o.held
+            && O(O(right)->v.o.held)->kind == APY_TUPLE_K)
+        right = O(right)->v.o.held;
+    many = O(right)->kind == APY_TUPLE_K;
+    mapping = O(right)->kind == APY_DICT_K;
+    cur = right;
     supplied = many ? O(right)->v.q.n : 1;
 
     out = (char *)malloc((size_t)out_cap + 1);

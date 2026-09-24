@@ -7352,6 +7352,12 @@ def _percent(h, fmt, right):
     """
     raw = isinstance(fmt, (bytes, bytearray))
     text = fmt.decode("latin-1") if raw else fmt
+    # A TUPLE SUBCLASS IS THE ARGUMENT LIST, because CPython asks
+    # `PyTuple_Check` and a subclass passes it: `"%d-%d" % point` for a
+    # namedtuple formats its fields, where this took the whole point for one
+    # argument and refused it as `%d format: a real number is required`.
+    if isinstance(right, Instance) and isinstance(right.held, tuple):
+        right = right.held
     many = isinstance(right, tuple)
     # A MAPPING ON THE RIGHT supplies NAMED fields only, and nothing is
     # consumed positionally -- so an unused entry is not an error.
