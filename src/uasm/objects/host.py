@@ -5673,7 +5673,7 @@ def _apy_typevar(h, a):
 #: binary -- but the error says which of the two reasons it is.
 _KNOWN_MODULES = frozenset({
     "__future__", "_pyast", "_pycompile", "_pylex", "_pyparse", "_pyrun",
-    "_pyvalidate", "abc", "annotationlib", "asyncio", "bisect",
+    "_pyvalidate", "abc", "annotationlib", "argparse", "asyncio", "bisect",
     "collections", "collections.abc", "contextlib", "contextvars", "copy",
     "dataclasses", "datetime", "decimal", "enum", "fractions", "functools",
     "gc", "heapq", "inspect", "io", "itertools", "json", "keyword", "math",

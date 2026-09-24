@@ -755,6 +755,7 @@ def apy_known_modules() -> ptr:
         b"_pyvalidate\0"
         b"abc\0"
         b"annotationlib\0"
+        b"argparse\0"
         b"asyncio\0"
         b"bisect\0"
         b"collections\0"
