@@ -12647,6 +12647,79 @@ PROGRAMS = {
         print("statement:", members)
         print("eager   :", [m.name for m in list(Colour)])
     """,
+    "a_stream_swapped_inside_a_function_is_the_modules_stream": """
+        # `sys.stdout = buf` INSIDE A FUNCTION was rewritten to a store to
+        # the spliced definition's name -- a NAME store, which made that name
+        # local to the whole function. So the `saved = sys.stdout` above it
+        # read an unbound local: `UnboundLocalError` naming the mangled
+        # spelling, on every path, for the stream swap every redirecting
+        # helper is written around.
+        import io
+        import sys
+
+        def documented():
+            \"\"\"Swap the stream, and keep this docstring.\"\"\"
+            saved = sys.stdout
+            sys.stdout = io.StringIO()
+            print("captured")
+            got = sys.stdout.getvalue()
+            sys.stdout = saved
+            return got
+
+        # THE DECLARATION GOES AFTER THE DOCSTRING, which has to stay the
+        # first statement to go on being one.
+        print(repr(documented()), repr(documented.__doc__))
+
+        def outer():
+            saved = sys.stdout
+            def inner():
+                sys.stdout = io.StringIO()
+                print("inner wrote")
+                return sys.stdout.getvalue()
+            got = inner()
+            # ONLY THE FUNCTION THAT STORES is changed: `outer` still reads
+            # the module's binding, which `inner` replaced.
+            back = sys.stdout is saved
+            sys.stdout = saved
+            return got, back
+
+        print(outer())
+
+        class Capture:
+            def __enter__(self):
+                self.saved = sys.stdout
+                sys.stdout = self.buffer = io.StringIO()
+                return self
+            def __exit__(self, *exc):
+                sys.stdout = self.saved
+                return False
+
+        with Capture() as c:
+            print("in the with")
+        print("captured:", repr(c.buffer.getvalue()))
+
+        def swap_in_loop():
+            saved = sys.stdout
+            seen = []
+            # A LOOP TARGET is a store like any other.
+            for sys.stdout in [io.StringIO(), io.StringIO()]:
+                print("loop")
+                seen.append(sys.stdout.getvalue())
+            sys.stdout = saved
+            return seen
+
+        print(swap_in_loop())
+
+        def stderr_too():
+            saved = sys.stderr
+            sys.stderr = io.StringIO()
+            sys.stderr.write("to err")
+            got = sys.stderr.getvalue()
+            sys.stderr = saved
+            return got
+
+        print(repr(stderr_too()))
+    """,
 }
 
 

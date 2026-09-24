@@ -301,6 +301,32 @@ def _bound_locally(node) -> set:
     return out
 
 
+def _declare_global(scope, names) -> None:
+    """`global <names>` at the top of `scope`'s body -- after its docstring,
+    which has to stay the first statement to go on being the docstring.
+
+    WHY A REWRITE NEEDS ONE. `sys.stdout = buf` inside a function is an
+    attribute store, and binds nothing in the function; rewritten to the
+    spliced definition's name it becomes a NAME store, and a name stored to
+    anywhere in a function is local to ALL of it. So the rewrite changed the
+    meaning of every other mention of `sys.stdout` in that function: the
+    `saved = sys.stdout` above the assignment read an unbound local and
+    raised `UnboundLocalError` naming the mangled spelling, and the stream
+    swap every redirecting helper is written around never reached the
+    module. The declaration restores what the attribute store meant -- the
+    module's binding, not a new one.
+    """
+    decl = ast.Global(names=sorted(names))
+    body = scope.body
+    at = 0
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        at = 1
+    ast.copy_location(decl, body[min(at, len(body) - 1)])
+    body.insert(at, decl)
+
+
 def _dependencies(wanted, have):
     """Every bundled module needed, each before anything that imports it.
 
@@ -388,6 +414,8 @@ class _Rename(ast.NodeTransformer):
         self.members = members or {}
         #: Names the enclosing function bodies bind. A name in here is theirs.
         self.shadowed: set = set()
+        #: See `_Rewrite.stores`: the same bookkeeping, on this side.
+        self.stores: list = []
 
     def visit_Name(self, node: ast.Name) -> ast.Name:
         if node.id in self.shadowed:
@@ -422,7 +450,11 @@ class _Rename(ast.NodeTransformer):
         # the module's; everything the body binds is not.
         outer = self.shadowed
         self.shadowed = outer | (_bound_locally(node) - {node.name})
+        self.stores.append(set())
         self.generic_visit(node)
+        stored = self.stores.pop()
+        if stored:
+            _declare_global(node, stored)
         self.shadowed = outer
         if node.name in self.defined and node.name not in self.shadowed:
             node.name = _mangled(self.module, node.name, self.prefix)
@@ -438,9 +470,11 @@ class _Rename(ast.NodeTransformer):
                 and node.value.id not in self.shadowed:
             module = self.imported[node.value.id]
             if node.attr in self.members.get(module, ()):
+                name = _mangled(module, node.attr, self.prefix)
+                if not isinstance(node.ctx, ast.Load) and self.stores:
+                    self.stores[-1].add(name)
                 return ast.copy_location(
-                    ast.Name(id=_mangled(module, node.attr, self.prefix), ctx=node.ctx),
-                    node)
+                    ast.Name(id=name, ctx=node.ctx), node)
         return node
 
     def visit_ClassDef(self, node):
@@ -462,7 +496,11 @@ class _Rename(ast.NodeTransformer):
         methods = [one for one in node.body
                    if isinstance(one, (ast.FunctionDef, ast.AsyncFunctionDef))]
         kept = [one.name for one in methods]
+        self.stores.append(set())
         self.generic_visit(node)
+        stored = self.stores.pop()
+        if stored:
+            _declare_global(node, stored)
         # `generic_visit` renamed the method names along with everything
         # else; a method keeps the name its class body gave it.
         for one, name in zip(methods, kept):
@@ -501,15 +539,25 @@ class _Rewrite(ast.NodeTransformer):
         #: `members` is empty and the branch never fires -- which is why this
         #: only ever went wrong one scope down.
         self.shadowed: set = set()
+        #: One set per enclosing function or class body: the spliced names an
+        #: attribute STORE there was rewritten to. See `_declare_global`.
+        self.stores: list = []
 
     def _scoped(self, node):
         """Visit a function body with the names it binds held aside."""
         outer = self.shadowed
         self.shadowed = outer | _bound_locally(node)
+        self.stores.append(set())
         try:
             self.generic_visit(node)
         finally:
             self.shadowed = outer
+            stored = self.stores.pop()
+        # A LAMBDA HAS NO STATEMENTS to declare anything in, and needs none:
+        # its body is an expression, and an expression cannot store to an
+        # attribute.
+        if stored and not isinstance(node, ast.Lambda):
+            _declare_global(node, stored)
         return node
 
     def visit_FunctionDef(self, node):
@@ -519,6 +567,19 @@ class _Rewrite(ast.NodeTransformer):
 
     def visit_Lambda(self, node):
         return self._scoped(node)
+
+    def visit_ClassDef(self, node):
+        # A CLASS BODY IS A SCOPE TOO, for this purpose: a name stored there
+        # becomes a class attribute, where the attribute store it replaced
+        # changed the module.
+        self.stores.append(set())
+        try:
+            self.generic_visit(node)
+        finally:
+            stored = self.stores.pop()
+        if stored:
+            _declare_global(node, stored)
+        return node
 
     def visit_Name(self, node: ast.Name) -> ast.Name:
         # REWRITTEN, not bound to a variable. Binding `wraps = <mangled>` made
@@ -557,9 +618,11 @@ class _Rewrite(ast.NodeTransformer):
         if isinstance(node.value, ast.Name) and node.value.id in self.imported:
             module = self.imported[node.value.id]
             if node.attr in self.members[module]:
+                name = _mangled(module, node.attr, self.prefix)
+                if not isinstance(node.ctx, ast.Load) and self.stores:
+                    self.stores[-1].add(name)
                 return ast.copy_location(
-                    ast.Name(id=_mangled(module, node.attr, self.prefix), ctx=node.ctx),
-                    node)
+                    ast.Name(id=name, ctx=node.ctx), node)
         return node
 
 
