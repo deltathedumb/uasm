@@ -785,6 +785,7 @@ def apy_known_modules() -> ptr:
         b"random\0"
         b"re\0"
         b"select\0"
+        b"shlex\0"
         b"socket\0"
         b"statistics\0"
         b"string\0"

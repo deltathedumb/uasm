@@ -427,7 +427,7 @@ APY_API apy_value apy_import(apy_value name) {
         "decimal", "difflib", "enum", "fractions", "functools", "gc",
         "heapq", "inspect", "io", "itertools", "json", "keyword",
         "math", "numbers", "operator", "os", "pathlib", "random", "re",
-        "select", "socket", "statistics", "string", "struct",
+        "select", "shlex", "socket", "statistics", "string", "struct",
         "subprocess", "sys", "textwrap", "threading", "time", "tomllib",
         "traceback", "types", "typing", "unicodedata", "warnings",
         "weakref", 0};

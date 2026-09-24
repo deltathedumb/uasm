@@ -5678,7 +5678,7 @@ _KNOWN_MODULES = frozenset({
     "dataclasses", "datetime", "decimal", "difflib", "enum", "fractions",
     "functools", "gc", "heapq", "inspect", "io", "itertools", "json",
     "keyword", "math", "numbers", "operator", "os", "pathlib", "random",
-    "re", "select", "socket", "statistics", "string", "struct",
+    "re", "select", "shlex", "socket", "statistics", "string", "struct",
     "subprocess", "sys", "textwrap", "threading", "time", "tomllib",
     "traceback", "types", "typing", "unicodedata", "warnings", "weakref",
 })
