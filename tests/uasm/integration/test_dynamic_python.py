@@ -12677,6 +12677,52 @@ PROGRAMS = {
         print("statement:", members)
         print("eager   :", [m.name for m in list(Colour)])
     """,
+    "super_inside_a_class_nested_in_a_class_finds_its_class": """
+        # `super()` IS `super(TheClass, self)`, and the frontend supplies the
+        # class by loading its NAME -- which a class written inside another
+        # class does not have in any scope a method can read: `Inner` lives
+        # in `Outer`'s namespace. So every zero-argument `super()` there was
+        # `NameError: name 'Inner' is not defined`, on every path. It is
+        # reached as the program would reach it now: the outermost class by
+        # name, each nested one as an attribute of the one around it.
+        class Base:
+            def __init__(self, x):
+                self.x = x
+            def hello(self):
+                return "base hello"
+
+        class Outer:
+            class Inner(Base):
+                def __init__(self):
+                    super().__init__(5)
+                def hello(self):
+                    return "inner/" + super().hello()
+
+        o = Outer.Inner()
+        print(o.x, o.hello(), type(o).__qualname__)
+
+        class A:
+            class B:
+                class C(Base):
+                    def __init__(self):
+                        super().__init__("deep")
+
+        print(A.B.C().x, A.B.C.__qualname__)
+
+        # INSIDE A FUNCTION the outermost class is that function's LOCAL,
+        # which is what the closure the method is handed reaches.
+        def factory():
+            class Local(Base):
+                def __init__(self):
+                    super().__init__(9)
+            class Out:
+                class In(Base):
+                    def __init__(self):
+                        super().__init__(11)
+            return Local().x, Out.In().x
+
+        print(factory())
+    """,
     "a_stream_swapped_inside_a_function_is_the_modules_stream": """
         # `sys.stdout = buf` INSIDE A FUNCTION was rewritten to a store to
         # the spliced definition's name -- a NAME store, which made that name

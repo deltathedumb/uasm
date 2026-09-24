@@ -2219,10 +2219,31 @@ class DynamicLowering:
         the stack ran out. Only the frontend knows which class the method was
         written in, so only the frontend can supply it.
         """
-        owner = self.classes[self.info.owner]
+        # A CLASS WRITTEN INSIDE ANOTHER CLASS HAS NO NAME OF ITS OWN to be
+        # loaded by: `Inner` is bound in `Outer`'s namespace, which is not a
+        # scope anything can read it from, so loading the bare name was
+        # `NameError: name 'Inner' is not defined` on every path. It is
+        # reached the way the program would reach it -- the OUTERMOST class
+        # by its name, each one inside it as an attribute -- which is also
+        # the spelling a class key already records: `Outer.Inner` for one
+        # at module level, `f.Outer.Inner` for one in a function, where the
+        # prefix stops being a class and `Outer` is that function's local.
+        chain = [self.classes[self.info.owner]]
+        key = self.info.owner
+        while True:
+            head, dot, _tail = key.rpartition(".")
+            outer = self.classes.get(head) if dot else None
+            if outer is None:
+                break
+            chain.insert(0, outer)
+            key = head
+        cls = self._dyn_load(chain[0].name)
+        for inner in chain[1:]:
+            cls = self.b.call(T.PTR, "apy_getattr",
+                              [cls, self._dyn_attr_literal(inner.node.name)])
+            self._dyn_check()
         out = self.b.call(T.PTR, "apy_super",
-                          [self._dyn_load(owner.name),
-                           self._dyn_load(self.info.params[0].name)])
+                          [cls, self._dyn_load(self.info.params[0].name)])
         self._dyn_check()
         return out
 

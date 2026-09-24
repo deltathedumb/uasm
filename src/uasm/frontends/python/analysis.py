@@ -1374,6 +1374,12 @@ def _expr_names(node, scope: _Scope) -> None:
             owner = scope.parent
             while owner is not None and owner.kind != "class":
                 owner = owner.parent
+            # THE OUTERMOST CLASS OF A NESTED RUN is what gets loaded by
+            # name -- see `_dyn_super` -- so it is the read to record: a
+            # class inside a class is reached through the one around it.
+            while owner is not None and owner.parent is not None \
+                    and owner.parent.kind == "class":
+                owner = owner.parent
             if owner is not None and owner.node is not None:
                 scope.reads.add(owner.node.name)
         if isinstance(sub, ast.Name):
