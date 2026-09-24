@@ -12677,6 +12677,64 @@ PROGRAMS = {
         print("statement:", members)
         print("eager   :", [m.name for m in list(Colour)])
     """,
+    "an_exception_class_writes_its_own_text_and_takes_any_arguments": """
+        # BaseException's surface, as a class the program writes reaches it.
+        # On both compiled paths `super().__init__(code, message)` was an
+        # arity error -- BaseException's `__init__` was declared with ONE
+        # argument where it takes any number -- and a class's own `__str__`
+        # was never asked, so `str(e)` printed the ARGS. The interpreter had
+        # the text right and `super().__str__()` wrong: it answered the repr.
+        # `e.__dict__` and `vars(e)` were refused on every path.
+        class AppError(Exception):
+            def __init__(self, code, message):
+                super().__init__(code, message)
+                self.code = code
+                self.message = message
+
+            def __str__(self):
+                return "%s: %s" % (self.code, self.message)
+
+        class Quiet(Exception):
+            def __repr__(self):
+                return "Quiet!"
+
+        class Wrapped(ValueError):
+            # `super().__str__()` IS BaseException's, rendered without asking
+            # the class again -- asking would call this from inside itself.
+            def __str__(self):
+                return "wrapped(" + super().__str__() + ")"
+
+        class Explicit(Exception):
+            def __init__(self, a, b):
+                Exception.__init__(self, a, b)
+
+        def show(label, f):
+            try:
+                print(label, f())
+            except Exception as e:
+                print(label, "raised", type(e).__name__, e)
+
+        try:
+            raise AppError(404, "missing")
+        except AppError as e:
+            show("str", lambda: str(e))
+            show("repr", lambda: repr(e))
+            show("args", lambda: e.args)
+            show("fmt", lambda: f"{e}|{e!r}|%s" % e)
+            show("dict", lambda: sorted(e.__dict__))
+            show("vars", lambda: vars(e))
+            show("base str", lambda: Exception.__str__(e))
+            show("base repr", lambda: Exception.__repr__(e))
+        show("quiet", lambda: (str(Quiet("x")), repr(Quiet("x")),
+                               repr([Quiet()])))
+        show("wrapped", lambda: (str(Wrapped("inner", 2)), str(Wrapped("one"))))
+        show("explicit", lambda: Explicit(1, 2).args)
+        show("in list", lambda: [AppError(2, "x")])
+        plain = ValueError("v")
+        show("empty dict", lambda: (plain.__dict__, vars(plain)))
+        plain.__dict__["extra"] = 3
+        show("through dict", lambda: plain.extra)
+    """,
     "super_inside_a_class_nested_in_a_class_finds_its_class": """
         # `super()` IS `super(TheClass, self)`, and the frontend supplies the
         # class by loading its NAME -- which a class written inside another

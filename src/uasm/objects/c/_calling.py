@@ -110,6 +110,10 @@ static apy_value apy_native(int sel, int64_t arity, const char *name) {
         o->v.fn.ndefaults = 1;
         o->v.fn.defaults = absent;
     }
+    /* `BaseException.__init__` TAKES ANY NUMBER, as `*args`: the call path
+       packs everything after the receiver into the one tuple slot this
+       leaves, and the body reads it from there. */
+    if (sel == APY_NAT_EXC_INIT) o->v.fn.vararg = 1;
     if (sel == APY_NAT_KIND) return V(o);
     made[sel] = V(o);
     return made[sel];
@@ -1919,16 +1923,25 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
     case APY_NAT_EXC_INIT: {
         /* `BaseException.__init__(*args)`: it SETS THE MESSAGE AND `args`,
            which is the whole of what it does and the reason a class writing
-           `super().__init__(f"{code}: {message}")` prints that text. */
-        apy_value exc, tuple;
-        int64_t i;
+           `super().__init__(f"{code}: {message}")` prints that text.
+
+           THE ARGUMENTS ARRIVE PACKED, as `*args` does: the native is
+           declared variadic -- see `apy_native` -- so `a[1]` is the tuple of
+           everything after the receiver. It was declared with ONE slot, so
+           `super().__init__(code, message)` was an arity error, `__init__()
+           takes 2 positional arguments but 3 were given`, where CPython
+           takes any number. */
+        apy_value exc, rest, tuple;
+        int64_t i, count;
         if (n < 1) return apy_fail("TypeError", "unbound builtin method");
         exc = a[0];
         if (O(exc)->kind != APY_EXC_K) return apy_none();
-        tuple = apy_tuple_new(n > 1 ? n - 1 : 1);
-        for (i = 1; i < n; i++) apy_seq_push(tuple, a[i]);
-        O(exc)->v.e.arg = n > 1 ? a[1] : apy_none();
-        O(exc)->v.e.has_arg = n > 1;
+        rest = n > 1 ? a[1] : 0;
+        count = rest && apy_is_seq(rest) ? O(rest)->v.q.n : 0;
+        tuple = apy_tuple_new(count > 0 ? count : 1);
+        for (i = 0; i < count; i++) apy_seq_push(tuple, O(rest)->v.q.items[i]);
+        O(exc)->v.e.arg = count > 0 ? O(rest)->v.q.items[0] : apy_none();
+        O(exc)->v.e.has_arg = count > 0;
         O(exc)->v.e.argv = tuple;
         /* The text is the ARGUMENT again, not something already rendered --
            see `rendered` on the cell for what that flag stops twice-over. */
@@ -1973,7 +1986,16 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
         return apy_instance_new(a[0]);
     }
     case APY_NAT_REPR:
-    case APY_NAT_STR:      return n < 1 ? 0 : apy_default_repr(a[0]);
+    case APY_NAT_STR:
+        /* ON AN EXCEPTION THESE ARE BaseException's, which is what
+           `super().__str__()` inside an exception class's own `__str__`
+           means: the args-based text, rendered WITHOUT asking the class
+           again. Asking again is what `str(e)` does -- the override wins
+           there -- and doing it here would call the override from inside
+           itself until the stack ran out. */
+        if (n >= 1 && O(a[0])->kind == APY_EXC_K)
+            return apy_exc_text(a[0], O(f)->v.fn.native == APY_NAT_REPR);
+        return n < 1 ? 0 : apy_default_repr(a[0]);
     case APY_NAT_EQ:       return n < 2 ? 0 : apy_default_eq(a[0], a[1]);
     /* THE SAME BODY THE WRITTEN SPELLING REACHES, and it has to be: a
        program may say `object.__ne__(x, y)`, which the frontend lowers

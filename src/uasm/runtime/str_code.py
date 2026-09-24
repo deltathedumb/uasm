@@ -563,6 +563,12 @@ def apy_text_of(v: ptr, quoted: i64) -> ptr:
     if k == apy_set_kind() or k == apy_frozen_kind():
         return apy_set_text_of(v)
     if k == apy_exc_kind():
+        # AN EXCEPTION OF A CLASS THE PROGRAM WROTE goes to the C half, which
+        # asks that class for its own `__str__`/`__repr__` before rendering
+        # anything BaseException would. One place holds that rule; this one
+        # only knows the runtime's own exceptions have no class to ask.
+        if load(u64, offset(v, apy_e_cls_offset())):
+            return apy_text_of_slow(v, quoted)
         return apy_exc_text_of(v, quoted)
     return apy_text_of_slow(v, quoted)
 

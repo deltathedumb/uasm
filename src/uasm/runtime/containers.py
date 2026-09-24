@@ -1878,6 +1878,13 @@ def apy_vars(obj: ptr) -> ptr:
     k: i64 = i64(load(i32, offset(obj, 0)))
     if k == apy_type_kind():
         return ptr(load(u64, offset(obj, apy_t_dict_offset())))
+    # AN EXCEPTION HAS ONE TOO, and an empty one when nothing was set. See
+    # the C's `apy_vars`, which says the same.
+    if k == apy_exc_kind():
+        held: ptr = ptr(load(u64, offset(obj, apy_e_dict_offset())))
+        if not held:
+            return apy_dict_new(1)
+        return apy_copy(held)
     if k != apy_inst_kind():
         return apy_raise_fmt(
             rodata(b"TypeError\0"),

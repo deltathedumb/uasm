@@ -750,6 +750,15 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            ASKED LAST, so a class's own body wins, then its base chain, then
            its metaclass, then the builtin it extends. `S.__repr__` is str's
            and not object's for exactly that reason. */
+        /* AN EXCEPTION CLASS REACHES BaseException's `__init__` FIRST, which
+           takes any number of arguments where `object`'s takes none: the
+           hierarchy above it is a table of names rather than classes, so no
+           walk finds it, and `Exception.__init__(self, code, message)` was
+           `takes 1 positional argument but 3 were given`. Its `__str__` and
+           `__repr__` are `object`'s cells, which answer BaseException's
+           text for an exception receiver -- see `APY_NAT_STR`. */
+        if (strcmp(want, "__init__") == 0 && apy_type_is_exc(obj))
+            return apy_native(APY_NAT_EXC_INIT, 2, "__init__");
         if (obj != apy_object_class()) {
             found = apy_class_find(apy_object_class(), name);
             {
@@ -1295,6 +1304,15 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
                 && strcmp(want, "args") != 0) {
             int64_t at = apy_dict_find(O(obj)->v.e.dict, name);
             if (at >= 0) return O(O(obj)->v.e.dict)->v.d.vals[at];
+        }
+        /* `e.__dict__` -- the attributes the program set, as THE dict that
+           holds them, made on first asking and kept: `vars(e)` and a write
+           through it have to reach the same place `e.code` is read from.
+           Every exception has one in CPython, set or not, so an empty one
+           is an answer and an AttributeError was not. */
+        if (strcmp(want, "__dict__") == 0) {
+            if (!O(obj)->v.e.dict) O(obj)->v.e.dict = apy_dict_new(4);
+            return O(obj)->v.e.dict;
         }
         /* `g.exceptions` -- what an `ExceptionGroup` carries. Absent on an
            ordinary exception, which is how a program tells the two apart

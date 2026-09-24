@@ -929,7 +929,25 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
                              (int)O(c)->v.s.n, O(c)->v.s.p);
         return apy_str_take(out, wrote);
     }
-    case APY_EXC_K:   return apy_exc_text(v, quoted);
+    case APY_EXC_K: {
+        /* A CLASS'S OWN `__str__`/`__repr__` WINS, exactly as it does for an
+           instance and exactly as the interpreter's `_text` already had it:
+           an exception is the one kind of object whose text is nearly always
+           overridden. Without this `str(AppError(404, "missing"))` printed
+           the ARGS -- `(404, 'missing')` -- on both compiled paths, where the
+           class wrote `404: missing`. BEFORE BaseException's own rules,
+           because an override is written to replace them; the runtime's own
+           exceptions have no class and skip it. */
+        const char *which = quoted ? "__repr__" : "__str__";
+        if (O(v)->v.e.cls) {
+            apy_value m = apy_class_find(O(v)->v.e.cls, apy_name(which));
+            if (m && O(m)->kind == APY_FUNC_K) {
+                apy_value r = apy_call_n(apy_bind(m, v), NULL, 0);
+                return r ? apy_text_result(r, which) : r;
+            }
+        }
+        return apy_exc_text(v, quoted);
+    }
     case APY_LIST_K:
     case APY_TUPLE_K: return apy_seq_text(v);
     case APY_SET_K:

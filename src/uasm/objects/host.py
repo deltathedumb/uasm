@@ -1201,6 +1201,59 @@ class ObjectHost:
             at = self.user_exc.get(at)
         return False
 
+    def _exc_text(self, v, quoted: bool) -> str:
+        """An exception's text by BaseException's own rules, without asking
+        its class -- what `str(e)` falls back to when the class writes no
+        `__str__`, and what `super().__str__()` means inside one that does.
+        Asking the class here would call that override from inside itself.
+        """
+        # MORE THAN ONE ARGUMENT PRINTS AS THE TUPLE. `str(ValueError(
+        # 'a','b'))` is `('a', 'b')` and its repr is `ValueError('a',
+        # 'b')` -- CPython shows the whole of `args` once there is more
+        # than one, and rendering only the first dropped the rest.
+        # THE NAME IT SHOWS, not the one it MATCHES on. A bundled
+        # module's exception class is spliced under a mangled name and
+        # renamed back, while its cells keep the mangled spelling --
+        # because `except copy.Error` compiles to that and the hierarchy
+        # walks by name. Mirrors the C's `apy_exc_shown`.
+        held = v.cls if v.cls is not None else self.exc_class.get(v.name)
+        shown_name = held.name if held is not None else v.name
+        argv = getattr(v, "argv", None)
+        # `[Errno 2] No such file`, and `: 'f.txt'` when a filename came
+        # too. THE WHOLE FAMILY ARRIVES UNDER ITS OWN NAME -- opening a
+        # missing file raises FileNotFoundError -- so this walks the
+        # hierarchy rather than testing for `OSError` itself. Mirrors the
+        # C's `apy_os_text` and IR's `apy_errno_text`; the three have to
+        # agree, and before they did the compiled paths said
+        # `[Errno 2] No such file` while `uasm run` said
+        # `(2, 'No such file')`.
+        if not quoted and argv is not None and 2 <= len(argv) <= 3:
+            if self._under_oserror(v.name) and isinstance(argv[0], int):
+                body = f"[Errno {argv[0]}] " + self._text(argv[1], False)
+                if len(argv) == 3:
+                    body += ": " + self._text(argv[2], True)
+                return body
+        if argv is not None and len(argv) > 1:
+            shown = self._text(tuple(argv), True)
+            # The tuple's own parentheses ARE the call's.
+            return f"{shown_name}{shown}" if quoted else shown
+        # `str(e)` is the argument alone, `repr(e)` is `ValueError('x')`.
+        if not quoted:
+            # `str(KeyError('k'))` is `"'k'"` -- the REPR of the argument.
+            # KeyError alone does this, so a missing key whose text is
+            # empty is still visible in the report.
+            return ("" if not v.has_arg else self._text(
+                v.arg, not v.rendered and v.name == "KeyError"))
+        # A KeyError REBUILT FROM A FAILED LOOKUP already holds the
+        # repr of the key -- that is what `rendered` records -- so
+        # repr'ing it again gave `KeyError("'k'")` where CPython says
+        # `KeyError('k')`. Every other type stores the plain message and
+        # does want the quotes. `e.args[0]` is still the repr text; see
+        # the C for why that half needs the key retained.
+        twice = v.rendered and v.name == "KeyError"
+        shown = "" if not v.has_arg else self._text(v.arg, not twice)
+        return f"{shown_name}({shown})"
+
     def _text(self, v, quoted: bool) -> str:
         # See `_class_module` for why the two reprs below qualify a name.
         if isinstance(v, Class):
@@ -1296,52 +1349,7 @@ class ObjectHost:
                         # which is better than a NULL reaching a caller
                         # that only wanted some text.
                         pass
-            # MORE THAN ONE ARGUMENT PRINTS AS THE TUPLE. `str(ValueError(
-            # 'a','b'))` is `('a', 'b')` and its repr is `ValueError('a',
-            # 'b')` -- CPython shows the whole of `args` once there is more
-            # than one, and rendering only the first dropped the rest.
-            # THE NAME IT SHOWS, not the one it MATCHES on. A bundled
-            # module's exception class is spliced under a mangled name and
-            # renamed back, while its cells keep the mangled spelling --
-            # because `except copy.Error` compiles to that and the hierarchy
-            # walks by name. Mirrors the C's `apy_exc_shown`.
-            held = v.cls if v.cls is not None else self.exc_class.get(v.name)
-            shown_name = held.name if held is not None else v.name
-            argv = getattr(v, "argv", None)
-            # `[Errno 2] No such file`, and `: 'f.txt'` when a filename came
-            # too. THE WHOLE FAMILY ARRIVES UNDER ITS OWN NAME -- opening a
-            # missing file raises FileNotFoundError -- so this walks the
-            # hierarchy rather than testing for `OSError` itself. Mirrors the
-            # C's `apy_os_text` and IR's `apy_errno_text`; the three have to
-            # agree, and before they did the compiled paths said
-            # `[Errno 2] No such file` while `uasm run` said
-            # `(2, 'No such file')`.
-            if not quoted and argv is not None and 2 <= len(argv) <= 3:
-                if self._under_oserror(v.name) and isinstance(argv[0], int):
-                    body = f"[Errno {argv[0]}] " + self._text(argv[1], False)
-                    if len(argv) == 3:
-                        body += ": " + self._text(argv[2], True)
-                    return body
-            if argv is not None and len(argv) > 1:
-                shown = self._text(tuple(argv), True)
-                # The tuple's own parentheses ARE the call's.
-                return f"{shown_name}{shown}" if quoted else shown
-            # `str(e)` is the argument alone, `repr(e)` is `ValueError('x')`.
-            if not quoted:
-                # `str(KeyError('k'))` is `"'k'"` -- the REPR of the argument.
-                # KeyError alone does this, so a missing key whose text is
-                # empty is still visible in the report.
-                return ("" if not v.has_arg else self._text(
-                    v.arg, not v.rendered and v.name == "KeyError"))
-            # A KeyError REBUILT FROM A FAILED LOOKUP already holds the
-            # repr of the key -- that is what `rendered` records -- so
-            # repr'ing it again gave `KeyError("'k'")` where CPython says
-            # `KeyError('k')`. Every other type stores the plain message and
-            # does want the quotes. `e.args[0]` is still the repr text; see
-            # the C for why that half needs the key retained.
-            twice = v.rendered and v.name == "KeyError"
-            shown = "" if not v.has_arg else self._text(v.arg, not twice)
-            return f"{shown_name}({shown})"
+            return self._exc_text(v, quoted)
         if isinstance(v, range):
             # `range(0, 10, 2)` -- and `range(0, 3)` when the step is 1, which
             # is how CPython prints one. Before the container branch, which
@@ -10271,8 +10279,14 @@ def _object_default(h, name: str):
         # runtime has no type object to write.
         body = _object_new_of(h)
     elif name in ("__repr__", "__str__"):
+        # ON AN EXCEPTION, BaseException's -- the args text, without asking
+        # the class, so `Exception.__str__(e)` is `(404, 'missing')` rather
+        # than the repr, and an override reaching this cannot loop. The C's
+        # `APY_NAT_STR`/`APY_NAT_REPR` draw the same line.
+        quoted = name == "__repr__"
         body = lambda v, *a: (_inst_repr(v) if isinstance(v, Instance)
-                              else h._text(v, True))
+                              else h._exc_text(v, quoted)
+                              if isinstance(v, Exc) else h._text(v, True))
     elif name == "__eq__":
         # IDENTITY OR NotImplemented, and not False for a pair it cannot
         # judge. `object_richcompare` answers True for identity and
@@ -11653,6 +11667,16 @@ def _apy_default_getattr(h, a):
         # message and does nothing with it.
         if found is None and isinstance(obj.recv, Exc) and name == "__init__":
             return h._new(Native("__init__", _exc_init).bind(obj.recv))
+        # AND ITS TEXT: `super().__str__()` inside an exception class's own
+        # `__str__` is BaseException's -- the args, rendered without asking
+        # the class again. `object`'s below answered the REPR, so a class
+        # writing `"wrapped(" + super().__str__() + ")"` printed its own
+        # constructor call inside the parentheses.
+        if found is None and isinstance(obj.recv, Exc) \
+                and name in ("__str__", "__repr__"):
+            quoted = name == "__repr__"
+            return h._new(Native(name, lambda exc: h._exc_text(exc, quoted))
+                          .bind(obj.recv))
         # THE SAME ARRANGEMENT FOR A BUILTIN BASE, and for the same reason:
         # the chain above `class M(dict)` is a KIND rather than a class, so
         # the walk finds nothing and `object.__init__` would accept the
@@ -12073,6 +12097,11 @@ def _apy_default_getattr(h, a):
         if name in obj.dict and not name.startswith('_') \
                 and name != 'args':
             return h._value(obj.dict[name])
+        # `e.__dict__` -- the attributes the program set, as THE dict that
+        # holds them, the way an instance's is served. Every exception has
+        # one in CPython, set or not; the C answers the same cell.
+        if name == "__dict__":
+            return h._new(obj.dict)
         # `g.exceptions` -- what an `ExceptionGroup` carries. Absent on an
         # ordinary exception, which is how a program tells the two apart
         # without asking about the type.
@@ -13237,6 +13266,9 @@ def _apy_vars(h, a):
     # where CPython answers one that refuses.
     if isinstance(obj, Class):
         return h._new(obj.dict)
+    # AN EXCEPTION HAS ONE TOO, and an empty one when nothing was set.
+    if isinstance(obj, Exc):
+        return h._new(dict(obj.dict))
     if not isinstance(obj, Instance):
         return h._fail("TypeError",
                        "vars() argument must have __dict__ attribute")

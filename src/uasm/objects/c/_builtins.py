@@ -2031,6 +2031,12 @@ APY_API apy_value apy_vars(apy_value obj) {
        CPython, mappingproxy and all, so a copy answered a writable dict
        where CPython answers one that refuses. */
     if (O(obj)->kind == APY_TYPE_K) return O(obj)->v.t.dict;
+    /* AN EXCEPTION HAS ONE TOO -- `self.code = 404` put `code` there -- and
+       an empty one when nothing was set, which is still a dict and not a
+       refusal. Copied, as an instance's is here. */
+    if (O(obj)->kind == APY_EXC_K)
+        return O(obj)->v.e.dict ? apy_copy(O(obj)->v.e.dict)
+                                : apy_dict_new(1);
     if (O(obj)->kind != APY_INST_K)
         return apy_fail2("TypeError",
                          "vars() argument must have __dict__ attribute%s%s",
