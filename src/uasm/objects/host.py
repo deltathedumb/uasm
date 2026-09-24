@@ -5677,10 +5677,11 @@ _KNOWN_MODULES = frozenset({
     "collections", "collections.abc", "contextlib", "contextvars", "copy",
     "dataclasses", "datetime", "decimal", "difflib", "enum", "fractions",
     "functools", "gc", "heapq", "inspect", "io", "itertools", "json",
-    "keyword", "math", "numbers", "operator", "os", "pathlib", "random",
-    "re", "select", "shlex", "socket", "statistics", "string", "struct",
-    "subprocess", "sys", "textwrap", "threading", "time", "tomllib",
-    "traceback", "types", "typing", "unicodedata", "warnings", "weakref",
+    "keyword", "math", "numbers", "operator", "os", "pathlib", "pprint",
+    "random", "re", "select", "shlex", "socket", "statistics", "string",
+    "struct", "subprocess", "sys", "textwrap", "threading", "time",
+    "tomllib", "traceback", "types", "typing", "unicodedata", "warnings",
+    "weakref",
 })
 
 

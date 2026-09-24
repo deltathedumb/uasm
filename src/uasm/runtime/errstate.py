@@ -782,6 +782,7 @@ def apy_known_modules() -> ptr:
         b"operator\0"
         b"os\0"
         b"pathlib\0"
+        b"pprint\0"
         b"random\0"
         b"re\0"
         b"select\0"
