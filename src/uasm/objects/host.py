@@ -7356,7 +7356,6 @@ def _percent(h, fmt, right):
         i += 1
         if i < n and text[i] == "%":
             out.append("%"); i += 1; continue
-        named = None
         if i < n and text[i] == "(":
             # `%(name)s` -- the MAPPING FORM. The key runs to the matching
             # `)`; what follows is an ordinary spec.
@@ -7370,7 +7369,17 @@ def _percent(h, fmt, right):
                 i += 1
             if key not in right:
                 return h._fail("KeyError", repr(key))
-            named = right[key]
+            # THE VALUE FOUND BECOMES THE ONE ARGUMENT, which is CPython's
+            # model exactly: a non-tuple operand is a single argument, and a
+            # key lookup REPLACES it with what the key found. The conversion
+            # below then takes it like any other -- and so does a `*` read
+            # before it, which is why `"%(a)*s" % {"a": None}` says `* wants
+            # int` about the VALUE, and why `"%(a)s %s"` has nothing left for
+            # its second conversion while `"%s %(a)s"` hands the first one the
+            # whole mapping. Carrying the value beside the arguments instead
+            # made None mean "no key": `"%(a)s" % {"a": None}` printed the
+            # mapping.
+            args, at = (right[key],), 0
         # THE FLAGS ARE COLLECTED, NOT EMITTED: two of them depend on the
         # conversion, which has not been read yet, and the mini-language fixes
         # an order (align, sign, `#`, `0`, width) that printf does not.
@@ -7423,13 +7432,10 @@ def _percent(h, fmt, right):
         spec += "0" if ("0" in flags and "-" not in flags
                         and not is_text) else ""
         spec += width + prec
-        if named is None:
-            if at >= len(args):
-                return h._fail("TypeError",
-                               "not enough arguments for format string")
-            value = args[at]; at += 1
-        else:
-            value = named
+        if at >= len(args):
+            return h._fail("TypeError",
+                           "not enough arguments for format string")
+        value = args[at]; at += 1
         if conv in ("s", "b"):
             if raw and isinstance(value, (bytes, bytearray)):
                 # `b"%s" % b"ab"` inserts THE BYTES, not their repr.

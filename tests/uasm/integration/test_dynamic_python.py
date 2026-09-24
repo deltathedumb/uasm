@@ -10654,6 +10654,36 @@ PROGRAMS = {
         # precision is refused four billion times lower down.
         show("big p", lambda: "%.*f" % (2 ** 40, 1.5))
     """,
+    "percent_looks_up_none_like_any_other_value": """
+        # `"%(a)s" % {"a": None}` PRINTED THE WHOLE MAPPING in the
+        # interpreter: None stood for "no key was written" as well as being
+        # the value found, so the lookup's answer was taken for no answer and
+        # the positional branch handed the conversion `right` itself. Two
+        # keys in one format ran out of "arguments" and raised instead.
+        # argparse's `%(default)s` is where a None default shows this.
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except (TypeError, KeyError) as e:
+                print(label, type(e).__name__, e)
+
+        d = {"a": None, "b": 1}
+        show("s", lambda: "%(a)s|" % d)
+        show("r", lambda: "%(a)r|%(b)s" % d)
+        show("twice", lambda: "%(a)s %(a)s" % {"a": None})
+        show("falsy", lambda: ("%(x)d" % {"x": 0}, "%(x)s" % {"x": ""},
+                               "%(x)s" % {"x": False}))
+        show("positional", lambda: "%s" % (None,))
+        show("missing", lambda: "%(nope)s" % d)
+        # ONE ARGUMENT, REPLACED BY EACH LOOKUP: a mapping on the right is a
+        # single argument, and a key swaps it for the value found. So a bare
+        # `%s` BEFORE any key is handed the whole mapping, one AFTER a key has
+        # nothing left, and a `*` next to a key reads the value.
+        show("mixed", lambda: "%(a)s %s" % d)
+        show("mixed first", lambda: "%s %(a)s" % d)
+        show("star key", lambda: "%(w)*s|" % {"w": 4})
+        show("star value", lambda: "%(a)*s" % d)
+    """,
     "percent_refuses_an_argument_its_conversion_cannot_take": """
         # `"%d" % "a"` RAISED A ValueError. `%` is implemented by translating
         # into the format MINI-LANGUAGE and handing the argument to

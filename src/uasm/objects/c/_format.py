@@ -1068,6 +1068,15 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
     int mapping = O(right)->kind == APY_DICT_K;
     /* THE ONE ARGUMENT THIS WHOLE FORMAT IS, or 0 -- see where it is set. */
     apy_value lone = 0;
+    /* THE SINGLE ARGUMENT a non-tuple operand is, which a `%(key)` lookup
+       REPLACES with the value it found -- CPython's model exactly. Every
+       conversion and every `*` then takes it through the same `at`, which
+       is why `"%(a)s %s" % d` has nothing left for its second conversion,
+       why `"%s %(a)s" % d` hands the first one the whole mapping, and why
+       `"%(a)*s"` reads its width out of the VALUE. The found value used to
+       ride beside the arguments instead, so a bare `%s` after a key still
+       saw the mapping and printed it. */
+    apy_value cur = right;
     supplied = many ? O(right)->v.q.n : 1;
 
     out = (char *)malloc((size_t)out_cap + 1);
@@ -1076,7 +1085,7 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
     while (i < n) {
         char spec[64];
         int64_t sn = 0, conv_at = i;
-        apy_value value, shown, given, named = 0;
+        apy_value value, shown, given;
         char conv;
         int minus = 0, zero = 0;
 
@@ -1116,7 +1125,8 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
                 free(out);
                 return apy_fail2("KeyError", "'%s'%s", key, "");
             }
-            named = found;
+            cur = found;
+            at = 0;
         }
         /* THE FLAGS ARE COLLECTED, NOT EMITTED, because two of them depend
            on the conversion that has not been read yet -- and because the
@@ -1142,7 +1152,8 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
         wid_at = i;
         if (i < n && p[i] == '*') {
             i++;
-            if (!apy_percent_star(right, many, supplied, &at, &star_w, 1)) {
+            if (!apy_percent_star(many ? right : cur, many, supplied, &at,
+                                  &star_w, 1)) {
                 free(out); return 0;
             }
             /* A NEGATIVE WIDTH IS THE `-` FLAG. printf's rule, and the flag
@@ -1158,8 +1169,8 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
             i++;
             if (i < n && p[i] == '*') {
                 i++;
-                if (!apy_percent_star(right, many, supplied, &at,
-                                      &star_p, 0)) {
+                if (!apy_percent_star(many ? right : cur, many, supplied,
+                                      &at, &star_p, 0)) {
                     free(out); return 0;
                 }
                 /* A NEGATIVE PRECISION IS ZERO -- not an error, and not the
@@ -1199,17 +1210,13 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
                              ".%lld", (long long)star_p);
           else
               for (k = 0; k < prec_n; k++) spec[sn++] = p[prec_at + k]; }
-        if (!named) {
-            if (at >= supplied) {
-                free(out);
-                return apy_fail("TypeError",
-                                "not enough arguments for format string");
-            }
-            value = many ? O(right)->v.q.items[at] : right;
-            at++;
-        } else {
-            value = named;
+        if (at >= supplied) {
+            free(out);
+            return apy_fail("TypeError",
+                            "not enough arguments for format string");
         }
+        value = many ? O(right)->v.q.items[at] : cur;
+        at++;
         /* THE ARGUMENT AS THE PROGRAM HANDED IT OVER, before `%s` turns it
            into text: what the identity rule at the end of this iteration is
            allowed to answer. */
