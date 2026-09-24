@@ -12677,6 +12677,54 @@ PROGRAMS = {
         print("statement:", members)
         print("eager   :", [m.name for m in list(Colour)])
     """,
+    "a_methods_locals_are_its_own_and_a_global_is_the_modules": """
+        # WHAT A METHOD ASSIGNS IS ITS OWN. The module's names were collected
+        # with a walk that went from each class into its methods, so a method
+        # writing `object = sorted(object)` made `object` MODULE storage --
+        # and every read of the builtin anywhere in the module then read that
+        # empty cell: `x = object()` at the top level was `NameError: name
+        # 'object' is not defined`, on every path. pprint's set printer is
+        # such a method.
+        class Sorter:
+            def sort(self, object):
+                object = sorted(object)
+                return object
+
+            def shadows(self):
+                type = "local type"
+                for len in range(2):
+                    pass
+                return type, len
+
+        x = object()
+        print(type(x).__name__, Sorter().sort([3, 1, 2]), Sorter().shadows(),
+              type(3).__name__, len("ab"))
+
+        if True:
+            def later():
+                format = "shadow"
+                return format
+
+        print(later(), format(3, "03d"))
+
+        # `global x` IN ANY FUNCTION IS MODULE STORAGE, assigned at the top
+        # level or not: CPython creates the global when the function first
+        # stores to it. A function saying so was refused outright, and a
+        # method was accepted only because the walk above found its store.
+        def make():
+            global made
+            made = "made in a function"
+
+        class Counter:
+            def bump(self):
+                global total
+                total = total + 1 if "total" in globals() else 1
+                return total
+
+        make()
+        c = Counter()
+        print(made, c.bump(), c.bump(), total)
+    """,
     "an_exception_class_writes_its_own_text_and_takes_any_arguments": """
         # BaseException's surface, as a class the program writes reaches it.
         # On both compiled paths `super().__init__(code, message)` was an

@@ -415,7 +415,6 @@ The full set the frontend can emit:
 | `E0062` | an unknown exception type in an `except` clause |
 | `E0064` | an async comprehension |
 | `E0065` | `and`/`or`/`if-else` yielding operands of different types, where the value is used |
-| `E0066` | `global` naming nothing at module scope |
 | `E0070` | `rodata()` given anything but a non-empty bytes literal |
 | `E0067` | `nonlocal` |
 | `E0068` | an unexpected keyword argument |

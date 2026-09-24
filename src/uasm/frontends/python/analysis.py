@@ -605,6 +605,35 @@ def _pattern_names(pat) -> list:
     return []
 
 
+def _module_scope_walk(node):
+    """`ast.walk`, WITHOUT ENTERING A FUNCTION -- the nodes whose bindings
+    belong to the scope `node` runs in.
+
+    A `def` or a `lambda` is a scope of its own, and what its body assigns is
+    its own local. `ast.walk` went straight into a method's body from the
+    class around it, so a method writing `object = sorted(object)` made
+    `object` MODULE storage: every read of the builtin anywhere in the module
+    then read that empty cell, and `x = object()` at the top level was
+    `NameError: name 'object' is not defined`. pprint's set printer is such a
+    method. A definition's decorators, defaults and annotations are still
+    walked -- they are evaluated where the definition stands.
+    """
+    pending = [node]
+    while pending:
+        one = pending.pop()
+        yield one
+        if isinstance(one, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            pending.extend(one.decorator_list)
+            pending.append(one.args)
+            if one.returns is not None:
+                pending.append(one.returns)
+            continue
+        if isinstance(one, ast.Lambda):
+            pending.append(one.args)
+            continue
+        pending.extend(ast.iter_child_nodes(one))
+
+
 def _target_names(node) -> list:
     """Every plain name in an assignment or loop target.
 
@@ -1550,6 +1579,16 @@ class Analyzer:
         self.module_names = self._module_names(
             [n for n in tree.body if not isinstance(n, _DEF_NODES)
              and not self._is_java_subclass(n)])
+        # `global x` IN ANY FUNCTION IS MODULE STORAGE, whether or not the
+        # module's own top level ever assigns `x` -- CPython creates the
+        # global when the function first stores to it. This was refused as
+        # `global x names nothing at module scope` for a function, and
+        # accepted for a METHOD only because the walk above used to wander
+        # into method bodies and find the store there.
+        for node in tree.body:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Global):
+                    self.module_names.update(sub.names)
         # PEP 695's type parameters, from the DEFINITIONS TOO. `_module_names`
         # is given only the non-definition statements -- a `def`'s body binds
         # its own names, not the module's -- so a `def first[T]` had nowhere
@@ -2052,7 +2091,13 @@ class Analyzer:
         """
         found: set = set()
         for node in body:
+            # PEP 695's type parameters come from EVERY definition, a method
+            # inside a class included -- see the branch below for why they
+            # live at module level at all.
             for sub in ast.walk(node):
+                for one in getattr(sub, "type_params", None) or ():
+                    found.add(one.name)
+            for sub in _module_scope_walk(node):
                 if isinstance(sub, ast.Assign):
                     for t in sub.targets:
                         found.update(_target_names(t))
@@ -2071,9 +2116,10 @@ class Analyzer:
                     # here. The annotations are the reason -- they are built
                     # by a thunk that runs later and reads its names as
                     # globals, so a scope that ended at the `def` would leave
-                    # the thunk with nothing to read.
-                    for one in sub.type_params:
-                        found.add(one.name)
+                    # the thunk with nothing to read. Collected above, from
+                    # every definition; this branch only keeps a node that
+                    # carries them from being read as anything else.
+                    pass
                 elif isinstance(sub, ast.With):
                     # `with a as x:` binds x. A `withitem` is not a statement
                     # or an expression, so neither of the branches above sees
@@ -2768,11 +2814,11 @@ class Analyzer:
                         f"`{type(node).__name__.lower()}` outside a loop", node)
                 return False
             case ast.Global() if self.dynamic:
-                for name in node.names:
-                    if name not in self.module_names:
-                        self._error("E0066",
-                                    f"`global {name}` names nothing at module "
-                                    f"scope", node)
+                # NOTHING TO CHECK: every name a `global` declares is module
+                # storage by construction -- see where `module_names` is
+                # built. The declaration only changes which storage the
+                # function's assignments use.
+                pass
             case ast.Nonlocal() if self.dynamic:
                 # The binding was resolved in `_resolve_closures`, which is
                 # also where a nonlocal with nothing to bind to is reported.
