@@ -5675,12 +5675,12 @@ _KNOWN_MODULES = frozenset({
     "__future__", "_pyast", "_pycompile", "_pylex", "_pyparse", "_pyrun",
     "_pyvalidate", "abc", "annotationlib", "argparse", "asyncio", "bisect",
     "collections", "collections.abc", "contextlib", "contextvars", "copy",
-    "dataclasses", "datetime", "decimal", "enum", "fractions", "functools",
-    "gc", "heapq", "inspect", "io", "itertools", "json", "keyword", "math",
-    "numbers", "operator", "os", "pathlib", "random", "re", "select",
-    "socket", "statistics", "string", "struct", "subprocess", "sys",
-    "textwrap", "threading", "time", "tomllib", "traceback", "types",
-    "typing", "unicodedata", "warnings", "weakref",
+    "dataclasses", "datetime", "decimal", "difflib", "enum", "fractions",
+    "functools", "gc", "heapq", "inspect", "io", "itertools", "json",
+    "keyword", "math", "numbers", "operator", "os", "pathlib", "random",
+    "re", "select", "socket", "statistics", "string", "struct",
+    "subprocess", "sys", "textwrap", "threading", "time", "tomllib",
+    "traceback", "types", "typing", "unicodedata", "warnings", "weakref",
 })
 
 

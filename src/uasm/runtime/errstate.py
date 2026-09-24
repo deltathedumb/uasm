@@ -766,6 +766,7 @@ def apy_known_modules() -> ptr:
         b"dataclasses\0"
         b"datetime\0"
         b"decimal\0"
+        b"difflib\0"
         b"enum\0"
         b"fractions\0"
         b"functools\0"
