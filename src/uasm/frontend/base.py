@@ -76,6 +76,11 @@ class Frontend(abc.ABC):
     name: str = ""
     extensions: tuple[str, ...] = ()
     description: str = ""
+    #: Language specifications this frontend can compile.  The driver does
+    #: not interpret these strings; each frontend owns its standard's naming
+    #: and validates its `--language-version` option in `configure`.
+    language_versions: tuple[str, ...] = ()
+    default_language_version: str = ""
 
     #: OPTIONS THIS FRONTEND TAKES from the command line, declared the way a
     #: backend has always declared its own. The flags a frontend needs used
