@@ -155,12 +155,16 @@ class CFrontend(Frontend):
     #: was never meant to stand alone. `.i` is preprocessed C and is still C.
     extensions = (".c", ".i")
     description = "C23, with the standard library compiled from C"
+    language_versions = ("c23",)
+    default_language_version = "c23"
 
     #: THE FLAGS A C COMPILER HAS ALWAYS HAD, declared here rather than on
     #: the driver's parser: they are this frontend's and nobody else's, and a
     #: Python build offered `--include-path` would be offered a flag that
     #: means nothing to it. `--c:include-path` is always spellable too.
     options = (
+        Option("language-version", metavar="VERSION",
+               help="C language version (currently c23)"),
         # `-I` AND `-D`, spelled as every C compiler spells them. They are
         # the two flags a C build is most likely to be handed by a Makefile
         # written elsewhere, and a compiler that only accepted the long form
@@ -198,13 +202,14 @@ class CFrontend(Frontend):
                  defines: tuple[tuple[str, str], ...] = (),
                  trigraphs: bool = False, bundled: bool = True,
                  units: tuple[Path, ...] = (),
-                 init_symbol: str = "") -> None:
+                 init_symbol: str = "", language_version: str = "c23") -> None:
         self.include_paths = include_paths
         self.defines = defines
         self.trigraphs = trigraphs
         self.bundled = bundled
         self.units = units
         self.init_symbol = init_symbol
+        self.language_version = language_version
 
     def configure(self, values: dict, context, sink: DiagnosticSink
                   ) -> "CFrontend":
@@ -216,6 +221,11 @@ class CFrontend(Frontend):
         Neither needs the source the driver started from, and nothing this
         frontend does is scoped by the target platform.
         """
+        version = values.get("language-version", self.default_language_version)
+        if version.lower() not in self.language_versions:
+            raise OptionError(
+                f"unsupported C language version {version!r}; "
+                f"supported: {', '.join(self.language_versions)}")
         return CFrontend(
             include_paths=tuple(Path(p) for p in
                                 values.get("include-path", ())),
@@ -223,7 +233,8 @@ class CFrontend(Frontend):
             trigraphs=_truth(values, "trigraphs", self.trigraphs),
             bundled=_truth(values, "bundled-headers", self.bundled),
             units=tuple(Path(u) for u in values.get("unit", ())),
-            init_symbol=values.get("init-symbol", self.init_symbol) or "")
+            init_symbol=values.get("init-symbol", self.init_symbol) or "",
+            language_version=version.lower())
 
     def compile(self, source: SourceFile, sink: DiagnosticSink) -> Module | None:
         """One module, from this source and any `--c:unit` beside it."""
