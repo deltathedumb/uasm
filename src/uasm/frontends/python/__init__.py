@@ -45,7 +45,7 @@ from pathlib import Path
 from ...diagnostics import DiagnosticSink, SourceFile, error, warning
 from ...frontend import BuildContext, Frontend, register
 from ...ir import Module
-from ...options import Option
+from ...options import Option, OptionError
 from .analysis import Analyzer, span_of
 from . import cffi
 from .bundled import _bound_locally, splice
@@ -185,7 +185,14 @@ class _Stringify(ast.NodeTransformer):
 class PythonFrontend(Frontend):
     name = "python"
     extensions = (".py",)
-    description = "statically-annotated Python subset"
+    description = "Python 3.14"
+
+    #: The language contract is explicit.  A compiler version is not a
+    #: language version: users need to be able to pin the grammar and
+    #: semantics their source was written for, and a future frontend can add
+    #: another supported release without changing the driver's interface.
+    language_versions = ("3.14",)
+    default_language_version = "3.14"
 
     #: THE FLAGS THIS FRONTEND TAKES, and no longer the driver's. Every one
     #: of them is about resolving Python names or compiling Python: a search
@@ -194,6 +201,8 @@ class PythonFrontend(Frontend):
     #: them, which meant a second frontend would inherit `--host-python` and
     #: have nothing to do with it.
     options = (
+        Option("language-version", metavar="VERSION",
+               help="Python language version (currently 3.14)"),
         Option("import-path", metavar="DIR", repeat=True,
                help="where to find the program's own modules; the source's "
                     "own directory is searched too unless -P"),
@@ -234,6 +243,7 @@ class PythonFrontend(Frontend):
     library = False
     #: Set by `configure` from `BuildContext.verifying`; see `compile`.
     verifying = False
+    language_version = default_language_version
 
     def configure(self, values: dict, context: BuildContext,
                   sink: DiagnosticSink) -> "PythonFrontend | None":
@@ -253,6 +263,12 @@ class PythonFrontend(Frontend):
         each other's.
         """
         from . import hostlib, imports as py_imports, nativelib as py_nativelib
+
+        version = values.get("language-version", self.default_language_version)
+        if version not in self.language_versions:
+            raise OptionError(
+                f"unsupported Python language version {version!r}; "
+                f"supported: {', '.join(self.language_versions)}")
 
         # THE HOST INSTALLATION'S PACKAGES GO LAST, so a name that resolved
         # before library points existed still resolves to what it resolved
@@ -291,6 +307,7 @@ class PythonFrontend(Frontend):
         clone = copy.copy(self)
         clone.library = bool(values.get("library"))
         clone.verifying = context.verifying
+        clone.language_version = version
         return clone
 
     def compile(self, source: SourceFile, sink: DiagnosticSink, *,
