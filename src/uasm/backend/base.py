@@ -16,6 +16,8 @@ is a library a backend may call; it is not a stage anyone must implement, and
 from __future__ import annotations
 
 import abc
+import copy
+from dataclasses import dataclass
 
 from ..diagnostics import is_real
 
@@ -229,6 +231,73 @@ class Backend(abc.ABC):
 
     def __repr__(self) -> str:
         return f"<backend {self.name}>"
+
+
+@dataclass(frozen=True, slots=True)
+class MachineConfiguration:
+    """Machine choices that are independent of an operating-system target."""
+
+    cpu: str
+    features: frozenset[str]
+
+
+class MachineBackend(Backend):
+    """A native backend with explicit ISA configuration.
+
+    The target owns ABI, object format and pointer width.  This class owns the
+    ISA baseline and optional instructions the emitter is allowed to use.  A
+    feature is refused until the emitter really implements it: silently
+    accepting a compiler flag is worse than not offering it.
+    """
+
+    architecture: str = ""
+    word_bits: int = 0
+    default_cpu: str = "generic"
+    cpus: frozenset[str] = frozenset(("generic",))
+    supported_features: frozenset[str] = frozenset()
+    required_features: frozenset[str] = frozenset()
+    options = (
+        Option("cpu", "ISA baseline to emit for", metavar="CPU"),
+        Option("feature", "enable or disable an ISA feature (+name or -name)",
+               metavar="FEATURE", repeat=True),
+    )
+    machine = MachineConfiguration("generic", frozenset())
+
+    def configure(self, values: dict[str, str], sink) -> "MachineBackend":
+        cpu = values.get("cpu", self.default_cpu).lower()
+        if cpu not in self.cpus:
+            raise OptionError(
+                f"unsupported CPU {cpu!r}; supported: {', '.join(sorted(self.cpus))}")
+        features = set(self.required_features)
+        for raw in values.get("feature", ()):
+            sign, name = raw[:1], raw[1:].lower()
+            if sign not in ("+", "-") or not name:
+                raise OptionError(f"--feature needs +name or -name, not {raw!r}")
+            if name not in self.supported_features:
+                raise OptionError(
+                    f"the {self.name} backend cannot emit feature {name!r}")
+            if sign == "+":
+                features.add(name)
+            elif name in self.required_features:
+                raise OptionError(f"the {self.name} backend requires feature {name!r}")
+            else:
+                features.discard(name)
+        clone = copy.copy(self)
+        clone.machine = MachineConfiguration(cpu, frozenset(features))
+        return clone
+
+    def validate_target(self, target: Target) -> None:
+        if target.arch != self.architecture:
+            raise BackendUnsupported(
+                f"target {target.name!r} has architecture {target.arch!r}, "
+                f"but this backend emits {self.architecture!r}")
+        if target.pointer_bits != self.word_bits:
+            raise BackendUnsupported(
+                f"target {target.name!r} has {target.pointer_bits}-bit pointers, "
+                f"but the {self.name} backend emits {self.word_bits}-bit code")
+        if not target.little_endian:
+            raise BackendUnsupported(
+                f"the {self.name} backend does not implement big-endian output")
 
 
 def source_file_of(module: Module):
