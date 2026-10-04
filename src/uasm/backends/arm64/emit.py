@@ -49,7 +49,7 @@ import struct
 from dataclasses import dataclass, field
 
 from ...backend.base import (
-    ENTRY_SYMBOL, Backend, BackendUnsupported, Target, register,
+    ENTRY_SYMBOL, MachineBackend, BackendUnsupported, Target, register,
 )
 from ...backend.regalloc import (
     Allocation, InRegister, InSlot, RegisterFile, allocate, verify_allocation,
@@ -431,12 +431,16 @@ def _emit_parallel_moves(e: _Emitter, moves: list[tuple[str, str]]) -> None:
             pending.remove(move)
 
 
-class Arm64Backend(Backend):
+class Arm64Backend(MachineBackend):
     name = "arm64"
     #: An ELF or Mach-O object, or the assembly it came from.
     artifacts = (".o", ".s")
     description = "AArch64 machine code (AAPCS64): ELF and Mach-O objects"
     default_target = "aarch64-none"
+    architecture = "aarch64"
+    word_bits = 64
+    default_cpu = "armv8-a"
+    cpus = frozenset(("generic", "armv8-a"))
 
     def symbol(self, name: str, dialect: AsmDialect) -> str:
         """The IR's `main` is not C's; see `ENTRY_SYMBOL`.
@@ -463,6 +467,7 @@ class Arm64Backend(Backend):
         return dialect.symbol_prefix + name
 
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:
+        self.validate_target(target)
         abi = abi_for(target)
         dialect = dialect_for(target)
         if target.object_format == "macho":
@@ -484,6 +489,7 @@ class Arm64Backend(Backend):
 
     def assembly(self, module: Module, target: Target) -> dict[str, bytes]:
         """What this backend generates, as text. See `Backend.assembly`."""
+        self.validate_target(target)
         abi = abi_for(target)
         dialect = dialect_for(target)
         out: list[str] = [
