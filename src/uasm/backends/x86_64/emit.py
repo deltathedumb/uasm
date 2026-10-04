@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ...backend.base import (
-    ENTRY_SYMBOL, Backend, BackendUnsupported, Target, register,
+    ENTRY_SYMBOL, MachineBackend, BackendUnsupported, Target, register,
 )
 from ...backend.regalloc import (
     Allocation, InRegister, InSlot, RegisterFile, allocate, verify_allocation,
@@ -557,7 +557,7 @@ class _Emitter:
         self.lines.append(f"{text}:")
 
 
-class X86_64Backend(Backend):
+class X86_64Backend(MachineBackend):
     name = "x86-64"
     #: An ELF, COFF or Mach-O object, or its assembly.
     artifacts = (".o", ".s")
@@ -566,6 +566,13 @@ class X86_64Backend(Backend):
     # authoring time: `uasm build --backend x86-64` on Windows used to
     # emit ELF directives and hand them to a COFF assembler.
     default_target = "host"
+    architecture = "x86_64"
+    word_bits = 64
+    default_cpu = "x86-64"
+    cpus = frozenset(("generic", "x86-64"))
+    # Floating-point lowering uses SSE2 and deliberately emits no newer SIMD.
+    supported_features = frozenset(("sse2",))
+    required_features = frozenset(("sse2",))
 
     def symbol(self, name: str, dialect: AsmDialect) -> str:
         """The assembler symbol for an IR function name.
@@ -600,6 +607,7 @@ class X86_64Backend(Backend):
         return dialect.symbol_prefix + name
 
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:
+        self.validate_target(target)
         abi = abi_for(target)
         dialect = dialect_for(target)
         if target.object_format == "macho":
@@ -621,6 +629,7 @@ class X86_64Backend(Backend):
 
     def assembly(self, module: Module, target: Target) -> dict[str, bytes]:
         """What this backend generates, as text. See `Backend.assembly`."""
+        self.validate_target(target)
         abi = abi_for(target)
         dialect = dialect_for(target)
         out: list[str] = [
