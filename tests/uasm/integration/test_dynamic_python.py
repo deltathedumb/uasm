@@ -69,6 +69,25 @@ PROGRAMS = {
         d.update(b=2)
         print(sorted(d.items()))
     """,
+    # sort's key and reverse are both keyword-only. A direct two-positional
+    # call used to bypass the method's arity gate and sort silently; a call
+    # with one positional and a keyword was bound to key instead of refused.
+    "sort_keyword_only": """
+        def show(fn):
+            xs = [3, 1, 2]
+            try:
+                fn(xs)
+                print(xs)
+            except TypeError as e:
+                print(type(e).__name__ + ":", e)
+        show(lambda xs: xs.sort(None))
+        show(lambda xs: xs.sort(None, None))
+        show(lambda xs: xs.sort(None, key=None))
+        show(lambda xs: xs.sort(None, reverse=True))
+        show(lambda xs: xs.sort(None, False, reverse=True))
+        show(lambda xs: getattr(xs, "sort")(None, reverse=True))
+        show(lambda xs: xs.sort(key=None, reverse=True))
+    """,
     # AN UNKNOWN KEYWORD IS A TypeError, not a value. Every message here is
     # CPython 3.14's own wording, because a program may be reading it.
     "builtin_method_keyword_errors": """

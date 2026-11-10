@@ -101,12 +101,11 @@ DYN_METHOD_TABLE = {
     # `sort` is IN PLACE and answers None; `sorted` is the other one. Both
     # arities take the key and reverse VALUES, which lowering supplies as
     # None/False when the call omitted them -- see `_dyn_builtin_method`.
-    # TWO ENTRIES FOR ONE SYMBOL. `apy_list_sort` takes all three slots and
-    # the lowering pads the ones a call left out, so the no-argument form and
-    # the folded two-keyword form reach the same place -- which is what lets
-    # `getattr(xs, "sort")(reverse=True)` arrive as a call the dispatch
-    # recognises.
-    "sort":         ["apy_list_sort", None, "apy_list_sort"],
+    # Only the no-positional spelling reaches the direct call. The two
+    # parameters are keyword-only; routing a two-positional call straight to
+    # `apy_list_sort` loses the original argument count and silently sorts.
+    # The attribute-call path checks the positional bound before invoking.
+    "sort":         ["apy_list_sort", None, None],
     # dict. All three are `apy_dict_parts` with a selector, so the table
     # records the shape and lowering supplies the constant -- see
     # `DICT_PARTS`.

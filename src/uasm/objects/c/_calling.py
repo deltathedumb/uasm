@@ -4085,6 +4085,11 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
                      (long long)(pos + kwn));
             return apy_fail("TypeError", b);
         }
+        /* `sort` has two KEYWORD-ONLY parameters. Reject a positional
+           before matching names: `sort(None, key=None)` reports the
+           positional error, not a duplicate `key`. */
+        if (strcmp(meth, "sort") == 0 && pos > 0)
+            return apy_fail("TypeError", "sort() takes no positional arguments");
         for (k2 = 0; k2 < kwn; k2++) {
             apy_value nm = O(kwd)->v.d.keys[k2];
             at = -1;

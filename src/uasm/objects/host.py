@@ -12528,6 +12528,8 @@ def _native_kwargs(h, f, args, kwargs):
         return h._fail("TypeError",
                        f"{f.name}() takes at most {len(params)} "
                        f"argument{plural} ({len(given) + len(kwargs)} given)")
+    if f.name == "sort" and given:
+        return h._fail("TypeError", "sort() takes no positional arguments")
     for name, value in kwargs.items():
         at = named.index(name) if name in named and name is not None else -1
         if at < 0:

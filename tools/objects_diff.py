@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -310,11 +311,13 @@ def group_keywords():
         "decode": ("b'caf\\xc3\\xa9'", ["'utf-8'", "'strict'"]),
         "to_bytes": ("(258)", ["4", "'little'"]),
         "translate": ("b'abc'", ["bytes.maketrans(b'ab', b'xy')"]),
+        "sort": ("[3, 1, 2]", ["None", "False"]),
     }
     values = {"sep": "','", "maxsplit": "1", "keepends": "True",
               "count": "2", "tabsize": "4", "encoding": "'utf-8'",
               "errors": "'replace'", "length": "4", "byteorder": "'little'",
-              "signed": "True", "delete": "b'c'"}
+              "signed": "True", "delete": "b'c'", "key": "None",
+              "reverse": "True"}
     out = []
     for name, params in sorted(METHOD_PARAMS.items()):
         recv, args = subjects[name]
@@ -546,15 +549,25 @@ def run_interp(path: pathlib.Path) -> list[str]:
 
 
 def run_compiled(path: pathlib.Path, mode: str, work: pathlib.Path):
+    c_file = work / f"prog_{mode}.c"
     exe = work / f"prog_{mode}.exe"
     build = subprocess.run(
         [sys.executable, "-m", "uasm", "build", str(path),
-         "--backend", "c", "--object-runtime", mode, "-o", str(exe),
+         "--backend", "c", "--object-runtime", mode, "-o", str(c_file),
          "--workdir", str(work / mode)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         env=_env())
     if build.returncode != 0:
         return None, (build.stdout + build.stderr)[-2000:]
+    cc = shutil.which("cc") or shutil.which("gcc")
+    if cc is None:
+        return None, "no C compiler found (cc or gcc)"
+    libs = [] if sys.platform == "win32" else ["-lm", "-ldl"]
+    link = subprocess.run(
+        [cc, str(c_file), "-o", str(exe), *libs],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if link.returncode != 0:
+        return None, link.stderr[-2000:]
     r = subprocess.run([str(exe)], capture_output=True, text=True,
                        encoding="utf-8", errors="replace", env=_env())
     return r.stdout.splitlines(), None
